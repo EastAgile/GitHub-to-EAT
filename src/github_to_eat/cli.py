@@ -57,6 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="OWNER/NAME",
         help="public GitHub repository, e.g. octocat/hello-world",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="run preflight and show the plan without importing anything",
+    )
     return parser
 
 
@@ -84,6 +89,13 @@ def main(argv: list[str] | None = None) -> int:
             "import appends, it does not replace.",
             file=sys.stderr,
         )
+
+    if args.dry_run:
+        print(
+            f"Dry run: would import {owner}/{repo} into project {args.project} "
+            f"({result.project_title}). No changes made."
+        )
+        return 0
 
     print(f"Importing {owner}/{repo} into project {args.project} ({result.project_title})...")
     try:

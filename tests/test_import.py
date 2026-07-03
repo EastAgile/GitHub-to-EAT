@@ -82,3 +82,14 @@ def test_import_errors_exit_one(tmp_path, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert code == 1
     assert "issue 5 failed" in err
+
+
+def test_dry_run_makes_no_import(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    with run_mock_server() as (base, recorded):
+        monkeypatch.setenv("EAT_AGENT_KEY", "ea_token")
+        monkeypatch.setenv("EAT_API_BASE", base)
+        code = main(["--project", "91", "--repo", "o/r", "--dry-run"])
+    assert code == 0
+    assert recorded.imports == []
+    assert "Dry run" in capsys.readouterr().out
