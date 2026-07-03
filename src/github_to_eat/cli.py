@@ -11,10 +11,11 @@ import sys
 import uuid
 
 from . import __version__
-from .client import EATClient, EATError
+from .client import EATClient, EATError, EATTimeout
 from .config import ConfigError, load_config
 from .importer import run_import
 from .preflight import preflight
+from .progress import run_with_progress
 
 
 def parse_repo(value: str) -> tuple[str, str]:
@@ -99,9 +100,20 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Importing {owner}/{repo} into project {args.project} ({result.project_title})...")
     try:
-        outcome = run_import(
-            client, args.project, owner, repo, idempotency_key=str(uuid.uuid4())
+        outcome = run_with_progress(
+            lambda: run_import(
+                client, args.project, owner, repo, idempotency_key=str(uuid.uuid4())
+            ),
+            "waiting for the server to import GitHub issues",
         )
+    except EATTimeout as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        print(
+            "The server may still be finishing the import — check the board in a "
+            "moment, or re-run. (v2 will stream progress for long imports.)",
+            file=sys.stderr,
+        )
+        return 1
     except EATError as exc:
         print(f"error: import failed: {exc}", file=sys.stderr)
         return 1
