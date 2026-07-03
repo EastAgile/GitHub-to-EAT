@@ -25,6 +25,7 @@ github-to-eat = "github_to_eat.cli:main"
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "responses>=0.25",
     "ruff>=0.5",
 ]
 
