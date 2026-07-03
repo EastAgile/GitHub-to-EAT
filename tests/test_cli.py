@@ -3,6 +3,7 @@ import pytest
 from github_to_eat import __version__, cli
 from github_to_eat.cli import main, parse_repo
 from github_to_eat.client import AuthError
+from github_to_eat.importer import ImportOutcome
 from github_to_eat.preflight import PreflightResult
 
 
@@ -52,21 +53,27 @@ def _patch_preflight(monkeypatch, result_or_exc):
     monkeypatch.setattr(cli, "preflight", fake)
 
 
-def test_happy_path_runs_preflight(tmp_path, monkeypatch, capsys):
+def _patch_import(monkeypatch, outcome):
+    monkeypatch.setattr(cli, "run_import", lambda *a, **k: outcome)
+
+
+def test_happy_path_preflight_then_import(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("EAT_AGENT_KEY", "key")
     _patch_preflight(monkeypatch, PreflightResult(91, "Demo Board", non_empty=False))
+    _patch_import(monkeypatch, ImportOutcome(imported=2, skipped=0, errors=[]))
     code = main(["--project", "91", "--repo", "octocat/hello-world"])
     assert code == 0
     out = capsys.readouterr().out
     assert "Demo Board" in out
-    assert "octocat/hello-world" in out
+    assert "Imported 2" in out
 
 
 def test_non_empty_project_warns(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("EAT_AGENT_KEY", "key")
     _patch_preflight(monkeypatch, PreflightResult(91, "Demo", non_empty=True))
+    _patch_import(monkeypatch, ImportOutcome(imported=0, skipped=0, errors=[]))
     code = main(["--project", "91", "--repo", "octocat/hello-world"])
     assert code == 0
     assert "already has stories" in capsys.readouterr().err

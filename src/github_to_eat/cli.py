@@ -1,17 +1,19 @@
 """Command-line interface for github-to-eat.
 
-Parses arguments, resolves configuration, runs preflight, then (in a later
-story) performs the import. See CONTRACT.md for the target behaviour.
+Parses arguments, resolves configuration, runs preflight, then performs the
+GitHub -> EAT import. See CONTRACT.md for the target behaviour.
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+import uuid
 
 from . import __version__
 from .client import EATClient, EATError
 from .config import ConfigError, load_config
+from .importer import run_import
 from .preflight import preflight
 
 
@@ -83,10 +85,23 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
-    print(f"Preflight OK — project {args.project}: {result.project_title}")
-    print(f"Ready to import {owner}/{repo}.")
-    print("(import is implemented in the next story)")
-    return 0
+    print(f"Importing {owner}/{repo} into project {args.project} ({result.project_title})...")
+    try:
+        outcome = run_import(
+            client, args.project, owner, repo, idempotency_key=str(uuid.uuid4())
+        )
+    except EATError as exc:
+        print(f"error: import failed: {exc}", file=sys.stderr)
+        return 1
+
+    print(
+        f"Imported {outcome.imported}, skipped {outcome.skipped}, "
+        f"{len(outcome.errors)} error(s)."
+    )
+    print(f"Board: {config.app_base}/projects/{args.project}")
+    for err in outcome.errors:
+        print(f"  - {err}", file=sys.stderr)
+    return 1 if outcome.errors else 0
 
 
 if __name__ == "__main__":
