@@ -119,8 +119,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(
-        f"Imported {outcome.imported}, skipped {outcome.skipped}, "
-        f"{len(outcome.errors)} error(s)."
+        f"Imported {outcome.imported_stories} stories ({outcome.imported_labels} labels), "
+        f"skipped {outcome.skipped}, {len(outcome.errors)} error(s)."
     )
     print(f"Board: {config.app_base}/projects/{args.project}")
     for err in outcome.errors:

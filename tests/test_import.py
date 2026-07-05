@@ -39,14 +39,21 @@ class _FakeClient:
 
 def test_run_import_normalizes_missing_fields():
     assert run_import(_FakeClient({}), 91, "o", "r", idempotency_key="k") == ImportOutcome(
-        imported=0, skipped=0, errors=[]
+        imported_stories=0, imported_labels=0, skipped=0, errors=[]
     )
 
 
-def test_run_import_reads_counts_and_errors():
-    raw = {"imported": 5, "skipped": 1, "errors": ["x"]}
+def test_run_import_reads_nested_imported():
+    raw = {"imported": {"stories": 5, "labels": 2}, "skipped": 1, "errors": ["x"]}
     assert run_import(_FakeClient(raw), 91, "o", "r", idempotency_key="k") == ImportOutcome(
-        imported=5, skipped=1, errors=["x"]
+        imported_stories=5, imported_labels=2, skipped=1, errors=["x"]
+    )
+
+
+def test_run_import_tolerates_flat_imported():
+    raw = {"imported": 3, "skipped": 0, "errors": []}
+    assert run_import(_FakeClient(raw), 91, "o", "r", idempotency_key="k") == ImportOutcome(
+        imported_stories=3, imported_labels=0, skipped=0, errors=[]
     )
 
 
