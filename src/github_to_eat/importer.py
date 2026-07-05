@@ -23,13 +23,16 @@ def run_import(
     repo: str,
     *,
     idempotency_key: str,
+    token: str | None = None,
 ) -> ImportOutcome:
     """Perform the GitHub import and return a normalized outcome.
 
     The server returns ``imported`` as a nested object (``{"stories": N,
     "labels": M}``); a flat integer from older/other sources is also tolerated.
     """
-    raw = client.import_github(project_id, owner, repo, idempotency_key=idempotency_key)
+    raw = client.import_github(
+        project_id, owner, repo, idempotency_key=idempotency_key, token=token
+    )
     imported = raw.get("imported")
     if isinstance(imported, dict):
         stories = int(imported.get("stories", 0) or 0)

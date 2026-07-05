@@ -7,6 +7,7 @@ GitHub -> EAT import. See CONTRACT.md for the target behaviour.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import uuid
 
@@ -63,6 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="run preflight and show the plan without importing anything",
     )
+    parser.add_argument(
+        "--token",
+        metavar="GITHUB_TOKEN",
+        help="GitHub token for a private repo (or set GITHUB_TOKEN); public repos need none",
+    )
     return parser
 
 
@@ -98,11 +104,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    token = args.token or os.environ.get("GITHUB_TOKEN")
     print(f"Importing {owner}/{repo} into project {args.project} ({result.project_title})...")
     try:
         outcome = run_with_progress(
             lambda: run_import(
-                client, args.project, owner, repo, idempotency_key=str(uuid.uuid4())
+                client, args.project, owner, repo, idempotency_key=str(uuid.uuid4()), token=token
             ),
             "waiting for the server to import GitHub issues",
         )
@@ -116,6 +123,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     except EATError as exc:
         print(f"error: import failed: {exc}", file=sys.stderr)
+        if not token:
+            print(
+                "  hint: private repo, or the server has no platform PAT? "
+                "set GITHUB_TOKEN or pass --token.",
+                file=sys.stderr,
+            )
         return 1
 
     print(

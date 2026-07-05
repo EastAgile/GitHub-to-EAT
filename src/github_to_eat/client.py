@@ -99,18 +99,23 @@ class EATClient:
         repo: str,
         *,
         idempotency_key: str,
+        token: str | None = None,
         timeout: float = DEFAULT_IMPORT_TIMEOUT,
     ) -> dict[str, Any]:
         """Trigger a GitHub import for a project.
 
-        Sends no token — the server fetches GitHub with its platform PAT. The
-        Idempotency-Key lets a retried request replay instead of double-importing.
-        Uses a longer timeout since the v1 server import is synchronous.
+        With no ``token`` the server fetches GitHub using its platform PAT (public
+        repos). Supplying a ``token`` (a GitHub PAT) lets the server read a private
+        repo, or work when no platform PAT is configured. The Idempotency-Key lets a
+        retried request replay instead of double-importing.
         """
+        body: dict[str, Any] = {"source": "github", "owner": owner, "repo": repo}
+        if token:
+            body["token"] = token
         resp = self._request(
             "POST",
             f"/projects/{project_id}/import/json",
-            json={"source": "github", "owner": owner, "repo": repo},
+            json=body,
             headers={"Idempotency-Key": idempotency_key},
             timeout=timeout,
         )
