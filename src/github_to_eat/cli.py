@@ -135,6 +135,9 @@ def main(argv: list[str] | None = None) -> int:
         f"Imported {outcome.imported_stories} stories ({outcome.imported_labels} labels), "
         f"skipped {outcome.skipped}, {len(outcome.errors)} error(s)."
     )
+    unmatched_total = sum(len(v) for v in outcome.unmatched.values())
+    if unmatched_total:
+        print(f"note: {unmatched_total} GitHub user(s) could not be matched to members.")
     print(f"Board: {config.app_base}/projects/{args.project}")
     for err in outcome.errors:
         print(f"  - {err}", file=sys.stderr)

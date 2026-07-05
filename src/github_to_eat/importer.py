@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .client import EATClient
@@ -14,6 +14,7 @@ class ImportOutcome:
     imported_labels: int
     skipped: int
     errors: list[Any]
+    unmatched: dict[str, list[Any]] = field(default_factory=dict)
 
 
 def run_import(
@@ -29,6 +30,7 @@ def run_import(
 
     The server returns ``imported`` as a nested object (``{"stories": N,
     "labels": M}``); a flat integer from older/other sources is also tolerated.
+    ``unmatched`` lists GitHub users the server could not map to EAT members.
     """
     raw = client.import_github(
         project_id, owner, repo, idempotency_key=idempotency_key, token=token
@@ -45,4 +47,5 @@ def run_import(
         imported_labels=labels,
         skipped=int(raw.get("skipped", 0) or 0),
         errors=list(raw.get("errors", []) or []),
+        unmatched=dict(raw.get("unmatched", {}) or {}),
     )

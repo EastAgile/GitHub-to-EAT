@@ -75,6 +75,17 @@ def test_run_import_passes_token():
     assert fake.calls[0][-1] == "ghp_z"
 
 
+def test_run_import_reads_unmatched():
+    raw = {
+        "imported": {"stories": 1, "labels": 0},
+        "skipped": 0,
+        "errors": [],
+        "unmatched": {"owners": ["a", "b"], "followers": []},
+    }
+    outcome = run_import(_FakeClient(raw), 91, "o", "r", idempotency_key="k")
+    assert outcome.unmatched == {"owners": ["a", "b"], "followers": []}
+
+
 def test_full_import_against_mock(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     result = {"imported": {"stories": 4, "labels": 0}, "skipped": 2, "errors": []}
@@ -143,3 +154,20 @@ def test_cli_github_token_env_flows_to_import(tmp_path, monkeypatch):
         code = main(["--project", "91", "--repo", "o/r"])
     assert code == 0
     assert recorded.imports[0]["body"]["token"] == "ghp_env"
+
+
+def test_cli_reports_unmatched_users(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    result = {
+        "imported": {"stories": 1, "labels": 0},
+        "skipped": 0,
+        "errors": [],
+        "unmatched": {"owners": ["alice", "bob"], "comment_authors": ["carol"]},
+    }
+    with run_mock_server(MockState(import_result=result)) as (base, _r):
+        monkeypatch.setenv("EAT_AGENT_KEY", "ea_token")
+        monkeypatch.setenv("EAT_API_BASE", base)
+        code = main(["--project", "91", "--repo", "o/r"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "3 GitHub user" in out
