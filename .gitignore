@@ -20,3 +20,6 @@ venv/
 
 # Playwright MCP artifacts
 .playwright-mcp/
+
+# Local Claude context (kept local, not committed)
+/CLAUDE.md
