@@ -59,7 +59,8 @@ def test_run_import_tolerates_flat_imported():
 
 def test_full_import_against_mock(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
-    state = MockState(import_result={"imported": 4, "skipped": 2, "errors": []})
+    result = {"imported": {"stories": 4, "labels": 0}, "skipped": 2, "errors": []}
+    state = MockState(import_result=result)
     with run_mock_server(state) as (base, recorded):
         monkeypatch.setenv("EAT_AGENT_KEY", "ea_token")
         monkeypatch.setenv("EAT_API_BASE", base)
@@ -80,7 +81,8 @@ def test_full_import_against_mock(tmp_path, monkeypatch, capsys):
 
 def test_import_errors_exit_one(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
-    state = MockState(import_result={"imported": 1, "skipped": 0, "errors": ["issue 5 failed"]})
+    result = {"imported": {"stories": 1, "labels": 0}, "skipped": 0, "errors": ["issue 5 failed"]}
+    state = MockState(import_result=result)
     with run_mock_server(state) as (base, _recorded):
         monkeypatch.setenv("EAT_AGENT_KEY", "ea_token")
         monkeypatch.setenv("EAT_API_BASE", base)

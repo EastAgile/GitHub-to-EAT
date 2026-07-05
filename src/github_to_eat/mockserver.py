@@ -27,7 +27,7 @@ import threading
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 
 @dataclass
@@ -35,14 +35,25 @@ class MockState:
     """Configurable state and recorded requests for a mock server instance."""
 
     projects: dict[int, dict[str, Any]] = field(
-        default_factory=lambda: {91: {"id": 91, "title": "Mock Project"}}
+        default_factory=lambda: {91: {"project_id": 91, "project_title": "Mock Project"}}
     )
     stories: dict[int, list[Any]] = field(default_factory=dict)
     meta: dict[str, Any] = field(
         default_factory=lambda: {"story_types": ["feature", "bug", "chore", "release"]}
     )
     import_result: dict[str, Any] = field(
-        default_factory=lambda: {"imported": 3, "skipped": 0, "errors": []}
+        default_factory=lambda: {
+            "imported": {"stories": 3, "labels": 0},
+            "skipped": 0,
+            "errors": [],
+            "unmatched": {
+                "owners": [],
+                "followers": [],
+                "reviewers": [],
+                "requesters": [],
+                "comment_authors": [],
+            },
+        }
     )
     imports: list[dict[str, Any]] = field(default_factory=list)
 
@@ -85,7 +96,12 @@ class _Handler(BaseHTTPRequestHandler):
 
         m = re.fullmatch(r"/projects/(\d+)/stories", path)
         if m:
-            self._send(200, self.state.stories.get(int(m.group(1)), []))
+            stories = self.state.stories.get(int(m.group(1)), [])
+            # With ?limit/?cursor EAT returns a cursor page; a bare array otherwise.
+            if "limit" in parse_qs(urlsplit(self.path).query):
+                self._send(200, {"items": stories, "next_cursor": None})
+            else:
+                self._send(200, stories)
             return
 
         self._send(404, {"error": "unknown route"})
