@@ -9,6 +9,20 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev]'
 ```
 
+## Two kinds of EAT agent keys — don't mix them
+
+This project touches the East Agile Tracker in two unrelated ways, each with its
+own credential:
+
+| Purpose | Env vars (file) | Read by |
+| --- | --- | --- |
+| **Run the tool** — import a GitHub repo into a target EAT project | `EAT_AGENT_KEY`, `EAT_API_BASE`, `EAT_APP_BASE` (`.env`) | the `github-to-eat` CLI |
+| **Track this tool's own development** — file/update its stories on the tool's tracker project | `EAT_DEV_AGENT_KEY`, `EAT_DEV_API_BASE`, `EAT_DEV_PROJECT_ID` (`.env.dev`) | maintainer scripts only — never the CLI |
+
+The CLI reads **only** the runtime `EAT_*` vars; the `EAT_DEV_*` vars are for
+maintainers managing the backlog and must stay out of the runtime `.env`. Both
+`.env` and `.env.dev` are gitignored. See `.env.example` and `.env.dev.example`.
+
 ## Tests and linting
 
 ```bash
