@@ -16,7 +16,8 @@ class PreflightResult:
 
 
 def _project_title(project: dict[str, Any], project_id: int) -> str:
-    for key in ("title", "name"):
+    # EAT returns the project name in ``project_title``; keep title/name as fallbacks.
+    for key in ("project_title", "title", "name"):
         value = project.get(key)
         if value:
             return str(value)

@@ -42,3 +42,8 @@ def test_preflight_title_falls_back_to_name():
 
 def test_preflight_title_default_when_missing():
     assert preflight(FakeClient(project={}), 7).project_title == "project 7"
+
+
+def test_preflight_prefers_project_title():
+    client = FakeClient(project={"project_title": "Real Name", "title": "legacy"})
+    assert preflight(client, 91).project_title == "Real Name"
