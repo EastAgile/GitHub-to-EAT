@@ -105,7 +105,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     token = args.token or os.environ.get("GITHUB_TOKEN")
-    print(f"Importing {owner}/{repo} into project {args.project} ({result.project_title})...")
+    print(
+        f"Importing {owner}/{repo} into project {args.project} ({result.project_title})...",
+        flush=True,
+    )
     try:
         outcome = run_with_progress(
             lambda: run_import(
