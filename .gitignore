@@ -13,6 +13,13 @@ venv/
 # Env / secrets
 .env
 .env.local
+.env.dev
 
 # OS
 .DS_Store
+
+# Playwright MCP artifacts
+.playwright-mcp/
+
+# Local Claude context (kept local, not committed)
+/CLAUDE.md
