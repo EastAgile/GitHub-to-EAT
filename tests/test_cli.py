@@ -86,3 +86,15 @@ def test_preflight_error_returns_one(tmp_path, monkeypatch, capsys):
     code = main(["--project", "91", "--repo", "octocat/hello-world"])
     assert code == 1
     assert "bad token" in capsys.readouterr().err
+
+
+def test_dry_run_skips_import(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EAT_AGENT_KEY", "key")
+    _patch_preflight(monkeypatch, PreflightResult(91, "Demo", non_empty=False))
+    called: list = []
+    monkeypatch.setattr(cli, "run_import", lambda *a, **k: called.append(1))
+    code = main(["--project", "91", "--repo", "octocat/hello-world", "--dry-run"])
+    assert code == 0
+    assert not called
+    assert "Dry run" in capsys.readouterr().out
