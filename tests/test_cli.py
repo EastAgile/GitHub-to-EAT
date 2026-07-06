@@ -61,7 +61,9 @@ def test_happy_path_preflight_then_import(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("EAT_AGENT_KEY", "key")
     _patch_preflight(monkeypatch, PreflightResult(91, "Demo Board", non_empty=False))
-    _patch_import(monkeypatch, ImportOutcome(imported=2, skipped=0, errors=[]))
+    _patch_import(
+        monkeypatch, ImportOutcome(imported_stories=2, imported_labels=0, skipped=0, errors=[])
+    )
     code = main(["--project", "91", "--repo", "octocat/hello-world"])
     assert code == 0
     out = capsys.readouterr().out
@@ -73,7 +75,9 @@ def test_non_empty_project_warns(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("EAT_AGENT_KEY", "key")
     _patch_preflight(monkeypatch, PreflightResult(91, "Demo", non_empty=True))
-    _patch_import(monkeypatch, ImportOutcome(imported=0, skipped=0, errors=[]))
+    _patch_import(
+        monkeypatch, ImportOutcome(imported_stories=0, imported_labels=0, skipped=0, errors=[])
+    )
     code = main(["--project", "91", "--repo", "octocat/hello-world"])
     assert code == 0
     assert "already has stories" in capsys.readouterr().err

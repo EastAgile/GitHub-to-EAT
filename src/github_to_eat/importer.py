@@ -10,7 +10,8 @@ from .client import EATClient
 
 @dataclass(frozen=True)
 class ImportOutcome:
-    imported: int
+    imported_stories: int
+    imported_labels: int
     skipped: int
     errors: list[Any]
 
@@ -23,10 +24,22 @@ def run_import(
     *,
     idempotency_key: str,
 ) -> ImportOutcome:
-    """Perform the GitHub import and return a normalized outcome."""
+    """Perform the GitHub import and return a normalized outcome.
+
+    The server returns ``imported`` as a nested object (``{"stories": N,
+    "labels": M}``); a flat integer from older/other sources is also tolerated.
+    """
     raw = client.import_github(project_id, owner, repo, idempotency_key=idempotency_key)
+    imported = raw.get("imported")
+    if isinstance(imported, dict):
+        stories = int(imported.get("stories", 0) or 0)
+        labels = int(imported.get("labels", 0) or 0)
+    else:
+        stories = int(imported or 0)
+        labels = 0
     return ImportOutcome(
-        imported=int(raw.get("imported", 0)),
-        skipped=int(raw.get("skipped", 0)),
+        imported_stories=stories,
+        imported_labels=labels,
+        skipped=int(raw.get("skipped", 0) or 0),
         errors=list(raw.get("errors", []) or []),
     )
