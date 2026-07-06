@@ -111,20 +111,6 @@ needs `repo`, or fine-grained *Issues: Read*, on that repo).
 | `1`  | Runtime error (bad key, project not found, timeout) or the import reported per-item errors |
 | `2`  | Usage error (bad or missing arguments)                            |
 
-## Try it locally against the mock server
-
-The package ships a mock EAT server so you can exercise the full flow without a
-real project:
-
-```bash
-# Terminal 1 — start the mock on http://127.0.0.1:8080
-python -m github_to_eat.mockserver --port 8080
-
-# Terminal 2 — point the CLI at it (the mock ships with project 91 preloaded)
-EAT_AGENT_KEY=ea_demo EAT_API_BASE=http://127.0.0.1:8080 \
-  github-to-eat --project 91 --repo octocat/hello-world
-```
-
 ## Troubleshooting
 
 - **`authentication failed`** — check `EAT_AGENT_KEY` is an owner-role agent key
