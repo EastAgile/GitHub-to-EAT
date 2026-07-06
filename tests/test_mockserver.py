@@ -9,7 +9,7 @@ def test_meta_and_project_via_client():
     with run_mock_server() as (base, _state):
         client = EATClient(base, "ea_token")
         assert "story_types" in client.get_meta()
-        assert client.get_project(91)["title"] == "Mock Project"
+        assert client.get_project(91)["project_title"] == "Mock Project"
 
 
 def test_missing_project_returns_404():
@@ -35,15 +35,15 @@ def test_missing_token_returns_401():
 
 
 def test_import_records_body_and_idempotency_key():
-    state = MockState(import_result={"imported": 5, "skipped": 1, "errors": []})
-    with run_mock_server(state) as (base, recorded):
+    result = {"imported": {"stories": 5, "labels": 0}, "skipped": 1, "errors": []}
+    with run_mock_server(MockState(import_result=result)) as (base, recorded):
         resp = requests.post(
             f"{base}/projects/91/import/json",
             json={"source": "github", "owner": "o", "repo": "r"},
             headers={"X-TrackerToken": "ea_token", "Idempotency-Key": "abc"},
         )
         assert resp.status_code == 200
-        assert resp.json() == {"imported": 5, "skipped": 1, "errors": []}
+        assert resp.json() == result
         assert recorded.imports[0]["idempotency_key"] == "abc"
         assert recorded.imports[0]["body"]["source"] == "github"
 

@@ -26,7 +26,8 @@ truth for what the tool does and what it depends on from the East Agile Tracker
    - **No token field** — the EAT server fetches GitHub using a platform PAT
      (`GITHUB_IMPORT_PAT`), so users never supply a GitHub token for public repos.
    - Sent with an `Idempotency-Key` so a retried run does not double-import.
-3. **Report** — render `{ imported, skipped, errors }` and a link to the board.
+3. **Report** — render the import result (see *Response shapes* below) and a link
+   to the board.
 
 ### Server-side dependencies (EAT [V1] use cases)
 
@@ -39,6 +40,29 @@ The tool assumes the EAT server provides:
   server falls back to the platform PAT.
 - **Re-import dedup** — re-running import skips issues already imported
   (by source + external id) rather than duplicating them.
+
+### Response shapes
+
+The API base is `.../api/v1`. Shapes the CLI parses:
+
+- **Import success** (`POST .../import/json`, HTTP 200 — synchronous):
+  ```json
+  {
+    "imported": { "stories": 39, "labels": 0 },
+    "skipped": 0,
+    "errors": ["Row 3: ..."],
+    "unmatched": { "owners": [], "followers": [], "reviewers": [],
+                   "requesters": [], "comment_authors": [] }
+  }
+  ```
+  `imported` is an **object**, not an integer; `errors` is a list of strings.
+- **Project** (`GET .../projects/{id}`): the name field is `project_title` (not
+  `title`/`name`); also `project_id`, `project_desc`, etc.
+- **Stories** (`GET .../projects/{id}/stories`): with `?limit=` (or `?cursor=`) it
+  returns a cursor page `{ "items": [...], "next_cursor": <str|null> }`; with no
+  query it returns a bare JSON array.
+
+These shapes are mirrored by the bundled mock server (`github_to_eat.mockserver`).
 
 ## v2 (reserved — not built yet)
 
