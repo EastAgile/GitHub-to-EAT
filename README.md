@@ -53,22 +53,25 @@ cp .env.example .env
 ## Usage
 
 ```bash
-# Import github.com/octocat/hello-world into EAT project 91
-github-to-eat --project 91 --repo octocat/hello-world
+# Format
+github-to-eat --project <project id> --repo <owner>/<name>
+
+# Example: import github.com/octocat/hello-world into project 147
+github-to-eat --project 147 --repo octocat/hello-world
 ```
 
 Example output:
 
 ```
-Importing octocat/hello-world into project 91 (My Board)...
+Importing octocat/hello-world into project 147 (My Board)...
 Imported 42 stories (0 labels), skipped 0, 0 error(s).
-Board: https://eastagiletracker.com/projects/91
+Board: https://eastagiletracker.com/projects/147
 ```
 
 Other flags:
 
 ```bash
-github-to-eat --project 91 --repo octocat/hello-world --dry-run   # preflight only, no writes
+github-to-eat --project 147 --repo octocat/hello-world --dry-run   # preflight only, no writes
 github-to-eat --version
 github-to-eat --help
 ```
@@ -98,7 +101,7 @@ real project:
 # Terminal 1 — start the mock on http://127.0.0.1:8080
 python -m github_to_eat.mockserver --port 8080
 
-# Terminal 2 — point the CLI at it
+# Terminal 2 — point the CLI at it (the mock ships with project 91 preloaded)
 EAT_AGENT_KEY=ea_demo EAT_API_BASE=http://127.0.0.1:8080 \
   github-to-eat --project 91 --repo octocat/hello-world
 ```
