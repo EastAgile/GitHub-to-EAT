@@ -25,12 +25,31 @@ issues with a platform credential, so all you provide is your EAT project key.
 
 ## Install
 
-Until the tool is published, install from source:
+Until the tool is published, install from source. First clone it:
 
 ```bash
 git clone git@github.com:EastAgile/GitHub-to-EAT.git
 cd GitHub-to-EAT
-pip install .
+```
+
+Then install into an **isolated environment** — installing into a Homebrew or
+system Python is blocked by [PEP 668](https://peps.python.org/pep-0668/)
+(`error: externally-managed-environment`).
+
+A virtual environment (needs only Python 3):
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install .
+```
+
+`github-to-eat` is then available whenever that venv is active. Or use
+[pipx](https://pipx.pypa.io) to install the command globally in its own
+isolated environment (`brew install pipx` first, if needed):
+
+```bash
+pipx install .
 ```
 
 ## Configure
@@ -53,22 +72,25 @@ cp .env.example .env
 ## Usage
 
 ```bash
-# Import github.com/octocat/hello-world into EAT project 91
-github-to-eat --project 91 --repo octocat/hello-world
+# Format
+github-to-eat --project <project id> --repo <owner>/<name>
+
+# Example: import github.com/octocat/hello-world into project 147
+github-to-eat --project 147 --repo octocat/hello-world
 ```
 
 Example output:
 
 ```
-Importing octocat/hello-world into project 91 (My Board)...
+Importing octocat/hello-world into project 147 (My Board)...
 Imported 42 stories (0 labels), skipped 0, 0 error(s).
-Board: https://eastagiletracker.com/projects/91
+Board: https://eastagiletracker.com/projects/147
 ```
 
 Other flags:
 
 ```bash
-github-to-eat --project 91 --repo octocat/hello-world --dry-run   # preflight only, no writes
+github-to-eat --project 147 --repo octocat/hello-world --dry-run   # preflight only, no writes
 github-to-eat --version
 github-to-eat --help
 ```
@@ -88,20 +110,6 @@ needs `repo`, or fine-grained *Issues: Read*, on that repo).
 | `0`  | Success                                                           |
 | `1`  | Runtime error (bad key, project not found, timeout) or the import reported per-item errors |
 | `2`  | Usage error (bad or missing arguments)                            |
-
-## Try it locally against the mock server
-
-The package ships a mock EAT server so you can exercise the full flow without a
-real project:
-
-```bash
-# Terminal 1 — start the mock on http://127.0.0.1:8080
-python -m github_to_eat.mockserver --port 8080
-
-# Terminal 2 — point the CLI at it
-EAT_AGENT_KEY=ea_demo EAT_API_BASE=http://127.0.0.1:8080 \
-  github-to-eat --project 91 --repo octocat/hello-world
-```
 
 ## Troubleshooting
 
