@@ -41,3 +41,6 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "e2e: end-to-end test against a real EAT (opt-in; requires EAT_E2E_* env)",
+]
