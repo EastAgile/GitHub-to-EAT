@@ -1,7 +1,7 @@
 """Command-line interface for github-to-eat.
 
-Parses arguments and resolves configuration, then hands off to the import flow.
-The preflight and import steps are implemented in later stories; see CONTRACT.md.
+Parses arguments, resolves configuration, runs preflight, then (in a later
+story) performs the import. See CONTRACT.md for the target behaviour.
 """
 
 from __future__ import annotations
@@ -10,7 +10,9 @@ import argparse
 import sys
 
 from . import __version__
+from .client import EATClient, EATError
 from .config import ConfigError, load_config
+from .preflight import preflight
 
 
 def parse_repo(value: str) -> tuple[str, str]:
@@ -67,10 +69,23 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    # Preflight + import are wired in the next stories (26490, 26491).
-    print(f"Ready to import {owner}/{repo} into project {args.project}.")
-    print(f"API base: {config.api_base}")
-    print("(preflight and import are not yet implemented)")
+    client = EATClient(config.api_base, config.agent_key)
+    try:
+        result = preflight(client, args.project)
+    except EATError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if result.non_empty:
+        print(
+            f"warning: project {args.project} ({result.project_title}) already has stories; "
+            "import appends, it does not replace.",
+            file=sys.stderr,
+        )
+
+    print(f"Preflight OK — project {args.project}: {result.project_title}")
+    print(f"Ready to import {owner}/{repo}.")
+    print("(import is implemented in the next story)")
     return 0
 
 

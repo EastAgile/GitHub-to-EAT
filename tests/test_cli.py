@@ -1,7 +1,9 @@
 import pytest
 
-from github_to_eat import __version__
+from github_to_eat import __version__, cli
 from github_to_eat.cli import main, parse_repo
+from github_to_eat.client import AuthError
+from github_to_eat.preflight import PreflightResult
 
 
 def test_parse_repo_valid():
@@ -41,11 +43,39 @@ def test_missing_key_returns_one(tmp_path, monkeypatch, capsys):
     assert "EAT_AGENT_KEY" in capsys.readouterr().err
 
 
-def test_happy_path_prints_plan(tmp_path, monkeypatch, capsys):
+def _patch_preflight(monkeypatch, result_or_exc):
+    def fake(_client, project_id):
+        if isinstance(result_or_exc, Exception):
+            raise result_or_exc
+        return result_or_exc
+
+    monkeypatch.setattr(cli, "preflight", fake)
+
+
+def test_happy_path_runs_preflight(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("EAT_AGENT_KEY", "key")
+    _patch_preflight(monkeypatch, PreflightResult(91, "Demo Board", non_empty=False))
     code = main(["--project", "91", "--repo", "octocat/hello-world"])
     assert code == 0
     out = capsys.readouterr().out
+    assert "Demo Board" in out
     assert "octocat/hello-world" in out
-    assert "91" in out
+
+
+def test_non_empty_project_warns(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EAT_AGENT_KEY", "key")
+    _patch_preflight(monkeypatch, PreflightResult(91, "Demo", non_empty=True))
+    code = main(["--project", "91", "--repo", "octocat/hello-world"])
+    assert code == 0
+    assert "already has stories" in capsys.readouterr().err
+
+
+def test_preflight_error_returns_one(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EAT_AGENT_KEY", "key")
+    _patch_preflight(monkeypatch, AuthError("bad token"))
+    code = main(["--project", "91", "--repo", "octocat/hello-world"])
+    assert code == 1
+    assert "bad token" in capsys.readouterr().err
