@@ -48,6 +48,7 @@ cp .env.example .env
 | `EAT_AGENT_KEY` | yes      | —                                         | Owner-role agent API key for the project      |
 | `EAT_API_BASE`  | no       | `https://api.eastagiletracker.com/api/v1` | API base URL (override for self-hosted/local) |
 | `EAT_APP_BASE`  | no       | `https://eastagiletracker.com`            | Web app base URL, used for the board link     |
+| `GITHUB_TOKEN`  | no       | —                                         | GitHub token for **private** repos (or use `--token`); public repos need none |
 
 ## Usage
 
@@ -60,7 +61,7 @@ Example output:
 
 ```
 Importing octocat/hello-world into project 91 (My Board)...
-Imported 42, skipped 0, 0 error(s).
+Imported 42 stories (0 labels), skipped 0, 0 error(s).
 Board: https://eastagiletracker.com/projects/91
 ```
 
@@ -74,6 +75,11 @@ github-to-eat --help
 
 `--dry-run` validates your key, the project, and connectivity (and warns if the
 project already has stories), then prints the plan without importing anything.
+
+**Private repos:** public repos need no GitHub token (the server uses its platform
+credential). For a **private** repo — or a server without that platform credential
+— supply a GitHub token with `--token <TOKEN>` or the `GITHUB_TOKEN` env var (it
+needs `repo`, or fine-grained *Issues: Read*, on that repo).
 
 ### Exit codes
 

@@ -23,8 +23,11 @@ truth for what the tool does and what it depends on from the East Agile Tracker
 2. **Import** — a single call:
    - `POST /projects/{id}/import/json` with body
      `{ "source": "github", "owner": "...", "repo": "..." }`.
-   - **No token field** — the EAT server fetches GitHub using a platform PAT
-     (`GITHUB_IMPORT_PAT`), so users never supply a GitHub token for public repos.
+   - **No token field** (public repos) — the EAT server fetches GitHub using a
+     platform PAT (`GITHUB_IMPORT_PAT`), so users never supply a GitHub token.
+   - **Private repos / no platform PAT** — the CLI may include an optional
+     `"token"` (a GitHub PAT) via `--token` / `GITHUB_TOKEN`; the server uses it
+     instead of the platform PAT.
    - Sent with an `Idempotency-Key` so a retried run does not double-import.
 3. **Report** — render the import result (see *Response shapes* below) and a link
    to the board.
