@@ -72,3 +72,19 @@ class EATClient:
         data = resp.json()
         items = data.get("stories", data) if isinstance(data, dict) else data
         return bool(items)
+
+    def import_github(
+        self, project_id: int, owner: str, repo: str, *, idempotency_key: str
+    ) -> dict[str, Any]:
+        """Trigger a GitHub import for a project.
+
+        Sends no token — the server fetches GitHub with its platform PAT. The
+        Idempotency-Key lets a retried request replay instead of double-importing.
+        """
+        resp = self._request(
+            "POST",
+            f"/projects/{project_id}/import/json",
+            json={"source": "github", "owner": owner, "repo": repo},
+            headers={"Idempotency-Key": idempotency_key},
+        )
+        return resp.json()

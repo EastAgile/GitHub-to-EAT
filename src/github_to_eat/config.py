@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_API_BASE = "https://api.eastagiletracker.com/api/v1"
+DEFAULT_APP_BASE = "https://eastagiletracker.com"
 
 
 class ConfigError(Exception):
@@ -19,6 +20,7 @@ class Config:
 
     agent_key: str
     api_base: str = DEFAULT_API_BASE
+    app_base: str = DEFAULT_APP_BASE
 
 
 def load_dotenv(path: str | Path = ".env") -> None:
@@ -52,4 +54,9 @@ def load_config(dotenv_path: str | Path = ".env") -> Config:
             "(see .env.example)."
         )
     api_base = os.environ.get("EAT_API_BASE", "").strip() or DEFAULT_API_BASE
-    return Config(agent_key=agent_key, api_base=api_base.rstrip("/"))
+    app_base = os.environ.get("EAT_APP_BASE", "").strip() or DEFAULT_APP_BASE
+    return Config(
+        agent_key=agent_key,
+        api_base=api_base.rstrip("/"),
+        app_base=app_base.rstrip("/"),
+    )
