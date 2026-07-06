@@ -75,3 +75,23 @@ def test_project_has_stories_false_on_empty():
 def test_project_has_stories_true_wrapped():
     responses.get(f"{BASE}/projects/91/stories", json={"stories": [{"id": 1}]}, status=200)
     assert make_client().project_has_stories(91) is True
+
+
+@responses.activate
+def test_project_has_stories_true_cursor_items():
+    responses.get(
+        f"{BASE}/projects/91/stories",
+        json={"items": [{"id": 1}], "next_cursor": None},
+        status=200,
+    )
+    assert make_client().project_has_stories(91) is True
+
+
+@responses.activate
+def test_project_has_stories_false_cursor_empty():
+    responses.get(
+        f"{BASE}/projects/91/stories",
+        json={"items": [], "next_cursor": None},
+        status=200,
+    )
+    assert make_client().project_has_stories(91) is False

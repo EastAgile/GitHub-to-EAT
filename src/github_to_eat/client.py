@@ -84,7 +84,12 @@ class EATClient:
         """Return True if the project already contains at least one story."""
         resp = self._request("GET", f"/projects/{project_id}/stories", params={"limit": 1})
         data = resp.json()
-        items = data.get("stories", data) if isinstance(data, dict) else data
+        # With ?limit, EAT returns a cursor page {"items": [...], "next_cursor": ...};
+        # a bare array (no query) is also tolerated.
+        if isinstance(data, dict):
+            items = data.get("items", data.get("stories", []))
+        else:
+            items = data
         return bool(items)
 
     def import_github(
