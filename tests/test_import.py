@@ -99,6 +99,7 @@ def test_full_import_against_mock(tmp_path, monkeypatch, capsys):
 
     out = capsys.readouterr().out
     assert code == 0
+    assert "Importing octocat/hello-world" in out
     assert "Imported 4" in out
     assert "skipped 2" in out
     assert "https://tracker.example/projects/91" in out
