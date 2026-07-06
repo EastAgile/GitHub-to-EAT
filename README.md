@@ -25,12 +25,31 @@ issues with a platform credential, so all you provide is your EAT project key.
 
 ## Install
 
-Until the tool is published, install from source:
+Until the tool is published, install from source. First clone it:
 
 ```bash
 git clone git@github.com:EastAgile/GitHub-to-EAT.git
 cd GitHub-to-EAT
-pip install .
+```
+
+Then install into an **isolated environment** — installing into a Homebrew or
+system Python is blocked by [PEP 668](https://peps.python.org/pep-0668/)
+(`error: externally-managed-environment`).
+
+A virtual environment (needs only Python 3):
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install .
+```
+
+`github-to-eat` is then available whenever that venv is active. Or use
+[pipx](https://pipx.pypa.io) to install the command globally in its own
+isolated environment (`brew install pipx` first, if needed):
+
+```bash
+pipx install .
 ```
 
 ## Configure
