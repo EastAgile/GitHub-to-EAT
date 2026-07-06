@@ -41,10 +41,9 @@ The tool assumes the EAT server provides:
 - **Re-import dedup** — re-running import skips issues already imported
   (by source + external id) rather than duplicating them.
 
-### Response shapes (verified against the v1 dev build, 2026-07-05)
+### Response shapes
 
-The API base is `.../api/v1` (e.g. `http://localhost:5175/api/v1` for a local dev
-app). Shapes the CLI parses:
+The API base is `.../api/v1`. Shapes the CLI parses:
 
 - **Import success** (`POST .../import/json`, HTTP 200 — synchronous):
   ```json
