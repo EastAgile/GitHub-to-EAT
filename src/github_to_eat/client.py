@@ -10,6 +10,8 @@ from typing import Any
 
 import requests
 
+DEFAULT_IMPORT_TIMEOUT = 300.0
+
 
 class EATError(Exception):
     """Base class for East Agile Tracker client errors."""
@@ -21,6 +23,10 @@ class AuthError(EATError):
 
 class NotFoundError(EATError):
     """The requested resource does not exist (HTTP 404)."""
+
+
+class EATTimeout(EATError):
+    """The request exceeded its timeout."""
 
 
 class EATClient:
@@ -41,10 +47,18 @@ class EATClient:
             {"X-TrackerToken": agent_key, "Accept": "application/json"}
         )
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
+    def _request(
+        self, method: str, path: str, *, timeout: float | None = None, **kwargs: Any
+    ) -> requests.Response:
         url = f"{self.api_base}{path}"
         try:
-            resp = self._session.request(method, url, timeout=self.timeout, **kwargs)
+            resp = self._session.request(
+                method, url, timeout=timeout or self.timeout, **kwargs
+            )
+        except requests.Timeout as exc:
+            raise EATTimeout(
+                f"request to {path} timed out after {timeout or self.timeout:.0f}s"
+            ) from exc
         except requests.RequestException as exc:
             raise EATError(f"could not reach {url}: {exc}") from exc
 
@@ -74,17 +88,25 @@ class EATClient:
         return bool(items)
 
     def import_github(
-        self, project_id: int, owner: str, repo: str, *, idempotency_key: str
+        self,
+        project_id: int,
+        owner: str,
+        repo: str,
+        *,
+        idempotency_key: str,
+        timeout: float = DEFAULT_IMPORT_TIMEOUT,
     ) -> dict[str, Any]:
         """Trigger a GitHub import for a project.
 
         Sends no token — the server fetches GitHub with its platform PAT. The
         Idempotency-Key lets a retried request replay instead of double-importing.
+        Uses a longer timeout since the v1 server import is synchronous.
         """
         resp = self._request(
             "POST",
             f"/projects/{project_id}/import/json",
             json={"source": "github", "owner": owner, "repo": repo},
             headers={"Idempotency-Key": idempotency_key},
+            timeout=timeout,
         )
         return resp.json()

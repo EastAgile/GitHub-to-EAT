@@ -1,7 +1,8 @@
 import pytest
+import requests
 import responses
 
-from github_to_eat.client import AuthError, EATClient, EATError, NotFoundError
+from github_to_eat.client import AuthError, EATClient, EATError, EATTimeout, NotFoundError
 
 BASE = "https://api.test/api/v1"
 
@@ -48,6 +49,13 @@ def test_not_found_on_404():
 def test_server_error_raises_eaterror():
     responses.get(f"{BASE}/meta", status=500, body="boom")
     with pytest.raises(EATError):
+        make_client().get_meta()
+
+
+@responses.activate
+def test_timeout_maps_to_eattimeout():
+    responses.get(f"{BASE}/meta", body=requests.exceptions.ReadTimeout())
+    with pytest.raises(EATTimeout):
         make_client().get_meta()
 
 
