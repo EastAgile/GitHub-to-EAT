@@ -1,14 +1,6 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-.eggs/
-build/
-dist/
-.venv/
-venv/
-.pytest_cache/
-.ruff_cache/
+# Node
+node_modules/
+npm-debug.log*
 
 # Env / secrets
 .env

@@ -1,0 +1,42 @@
+{
+  "name": "github-to-eat",
+  "version": "0.0.1",
+  "description": "Onboard a public GitHub repository's issues into an East Agile Tracker project",
+  "keywords": [
+    "github",
+    "east-agile-tracker",
+    "eat",
+    "issues",
+    "import",
+    "cli"
+  ],
+  "homepage": "https://github.com/EastAgile/GitHub-to-EAT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EastAgile/GitHub-to-EAT.git"
+  },
+  "license": "MIT",
+  "author": "East Agile",
+  "type": "module",
+  "bin": {
+    "github-to-eat": "bin/github-to-eat.js"
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test",
+    "lint": "biome check .",
+    "typecheck": "tsc --noEmit",
+    "mockserver": "node src/mockserver.js"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.2",
+    "@types/node": "^26.1.0",
+    "typescript": "^6.0.3"
+  }
+}
