@@ -35,7 +35,8 @@ import { parseArgs } from "node:util";
  * @property {Record<number, any[]>} stories
  * @property {any} meta
  * @property {any} importResult
- * @property {{ issues: number, prs: number, labels: number }} fixture
+ * @property {{ issues: number, prs: number, milestones: number, releases: number,
+ *   labels: number }} fixture
  * @property {Array<{ project_id: number, body: any, idempotency_key: string | null }>} imports
  */
 
@@ -51,7 +52,7 @@ export function makeState(overrides = {}) {
     stories: {},
     meta: { story_types: ["feature", "bug", "chore", "release"] },
     importResult: null,
-    fixture: { issues: 3, prs: 2, labels: 0 },
+    fixture: { issues: 3, prs: 2, milestones: 1, releases: 1, labels: 0 },
     imports: [],
     ...overrides,
   };
@@ -60,7 +61,8 @@ export function makeState(overrides = {}) {
 /**
  * Compute an import result from the fixture and the request body's flags,
  * the way the real server counts: issues always; other types only when the
- * corresponding include_* flag is set.
+ * corresponding include_* flag is set. Milestones become epics, which the
+ * response does not count — they never change the story numbers.
  *
  * @param {MockState} state
  * @param {any} body
@@ -68,6 +70,7 @@ export function makeState(overrides = {}) {
 function computeImportResult(state, body) {
   let stories = state.fixture.issues;
   if (body.include_pull_requests) stories += state.fixture.prs;
+  if (body.include_releases) stories += state.fixture.releases;
   return {
     imported: { stories, labels: state.fixture.labels },
     skipped: 0,
