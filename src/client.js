@@ -126,12 +126,14 @@ export class EATClient {
    * @param {number} projectId
    * @param {string} owner
    * @param {string} repo
-   * @param {{ idempotencyKey: string, token?: string, timeout?: number }} options
+   * @param {{ idempotencyKey: string, token?: string, timeout?: number,
+   *   flags?: Record<string, boolean> }} options `flags` are extra boolean
+   *   request fields (e.g. include_pull_requests) merged into the body
    * @returns {Promise<any>}
    */
-  async importGithub(projectId, owner, repo, { idempotencyKey, token, timeout }) {
-    /** @type {Record<string, string>} */
-    const body = { source: "github", owner, repo };
+  async importGithub(projectId, owner, repo, { idempotencyKey, token, timeout, flags }) {
+    /** @type {Record<string, string | boolean>} */
+    const body = { source: "github", owner, repo, ...flags };
     if (token) body.token = token;
     const response = await this.#request("POST", `/projects/${projectId}/import/json`, {
       json: body,

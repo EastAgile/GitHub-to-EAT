@@ -11,12 +11,14 @@ import { parseArgs } from "node:util";
 import { EATClient, EATError, EATTimeout } from "./client.js";
 import { ConfigError, loadConfig } from "./config.js";
 import { runImport as defaultRunImport } from "./importer.js";
+import { MAPPINGS, parseInclude, requestFlags } from "./mappings.js";
 import { preflight as defaultPreflight } from "./preflight.js";
 import { runWithProgress } from "./progress.js";
 import { VERSION } from "./version.js";
 
 const USAGE =
-  "usage: github-to-eat [-h] [-V] --project ID --repo OWNER/NAME [--dry-run] [--token GITHUB_TOKEN]";
+  "usage: github-to-eat [-h] [-V] --project ID --repo OWNER/NAME " +
+  "[--include TYPES] [--dry-run] [--token GITHUB_TOKEN]";
 
 const HELP = `${USAGE}
 
@@ -27,6 +29,7 @@ options:
   -V, --version         show program's version number and exit
   --project ID          target East Agile Tracker project id
   --repo OWNER/NAME     public GitHub repository, e.g. octocat/hello-world
+  --include TYPES       comma-separated types to import: ${Object.keys(MAPPINGS).join(",")} (default: issues)
   --dry-run             run preflight and show the plan without importing anything
   --token GITHUB_TOKEN  GitHub token for a private repo (or set GITHUB_TOKEN); public repos need none
 `;
@@ -90,6 +93,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
         version: { type: "boolean", short: "V" },
         project: { type: "string" },
         repo: { type: "string" },
+        include: { type: "string" },
         "dry-run": { type: "boolean" },
         token: { type: "string" },
       },
@@ -129,6 +133,14 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
   } catch (err) {
     return usageError(`argument --repo: ${err instanceof Error ? err.message : err}`);
   }
+
+  let included;
+  try {
+    included = parseInclude(values.include ?? "issues");
+  } catch (err) {
+    return usageError(`argument --include: ${err instanceof Error ? err.message : err}`);
+  }
+  const flags = requestFlags(included);
 
   let config;
   try {
@@ -173,7 +185,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
   let outcome;
   try {
     outcome = await runWithProgress(
-      () => runImport(client, project, owner, repo, { idempotencyKey: randomUUID(), token }),
+      () => runImport(client, project, owner, repo, { idempotencyKey: randomUUID(), token, flags }),
       "waiting for the server to import GitHub issues",
       { stream: stderr },
     );
