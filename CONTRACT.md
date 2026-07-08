@@ -65,7 +65,7 @@ The API base is `.../api/v1`. Shapes the CLI parses:
   returns a cursor page `{ "items": [...], "next_cursor": <str|null> }`; with no
   query it returns a bare JSON array.
 
-These shapes are mirrored by the bundled mock server (`github_to_eat.mockserver`).
+These shapes are mirrored by the bundled mock server (`src/mockserver.js`).
 
 ## v2 (reserved — not built yet)
 
