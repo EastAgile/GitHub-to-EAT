@@ -11,8 +11,10 @@ Onboard a public GitHub repository's issues into an [East Agile Tracker](https:/
 
 Point it at a public GitHub repo and an EAT project; the EAT server imports the
 repo's issues into your project's backlog as stories — title, body + a link back
-to the issue, open/closed state, labels, and milestones. Pull requests are
-excluded.
+to the issue, open/closed state, and labels. Pull requests, milestones, and
+releases are excluded by default; opt in with `--include` (see below).
+Re-running an import never duplicates: items that were already imported are
+skipped.
 
 You never supply a GitHub token for public repos: the EAT **server** fetches the
 issues with a platform credential, so all you provide is your EAT project key.

@@ -23,12 +23,24 @@ truth for what the tool does and what it depends on from the East Agile Tracker
 2. **Import** — a single call:
    - `POST /projects/{id}/import/json` with body
      `{ "source": "github", "owner": "...", "repo": "..." }`.
+   - **Type selection** — `--include` adds optional boolean fields:
+     `include_pull_requests`, `include_milestones`, `include_releases`
+     (issues are always imported; the flags only add types).
    - **No token field** (public repos) — the EAT server fetches GitHub using a
      platform PAT (`GITHUB_IMPORT_PAT`), so users never supply a GitHub token.
+     When neither a request token nor a platform PAT exists, the server
+     responds `400 import_github_no_token`; a bad token is
+     `400 import_github_auth`.
    - **Private repos / no platform PAT** — the CLI may include an optional
      `"token"` (a GitHub PAT) via `--token` / `GITHUB_TOKEN`; the server uses it
      instead of the platform PAT.
-   - Sent with an `Idempotency-Key` so a retried run does not double-import.
+   - Sent with an `Idempotency-Key`. The server does **not** process it today
+     (verified 2026-07-06); it is advisory. Retried runs are still safe
+     because of re-import dedup (below).
+   - **Re-import dedup** — imported rows persist their provenance
+     (`story.import_source` + `story.import_external_id`); a re-run skips
+     rows whose `(project, source, external_id)` already exist and counts
+     them in `skipped` — it never duplicates or updates.
 3. **Report** — render the import result (see *Response shapes* below) and a link
    to the board.
 
@@ -48,17 +60,23 @@ The tool assumes the EAT server provides:
 
 The API base is `.../api/v1`. Shapes the CLI parses:
 
-- **Import success** (`POST .../import/json`, HTTP 200 — synchronous):
+- **Import success** (`POST .../import/json`, HTTP 200 — synchronous; schema
+  pinned in the server's `GET .../openapi.json`):
   ```json
   {
+    "dry_run": false,
     "imported": { "stories": 39, "labels": 0 },
     "skipped": 0,
     "errors": ["Row 3: ..."],
     "unmatched": { "owners": [], "followers": [], "reviewers": [],
-                   "requesters": [], "comment_authors": [] }
+                   "requesters": [],
+                   "comment_authors": [{ "email": "x@users.noreply.github.com", "count": 2 }] }
   }
   ```
-  `imported` is an **object**, not an integer; `errors` is a list of strings.
+  `imported` is an **object**, not an integer; it counts stories and labels
+  only (epics created from milestones are not counted). `skipped` means
+  "already imported" (see re-import dedup above). `errors` is a list of
+  strings. `dry_run` echoes the request's `dry_run` field.
 - **Project** (`GET .../projects/{id}`): the name field is `project_title` (not
   `title`/`name`); also `project_id`, `project_desc`, etc.
 - **Stories** (`GET .../projects/{id}/stories`): with `?limit=` (or `?cursor=`) it

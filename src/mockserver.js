@@ -37,6 +37,8 @@ import { parseArgs } from "node:util";
  * @property {any} importResult
  * @property {{ issues: number, prs: number, milestones: number, releases: number,
  *   labels: number }} fixture
+ * @property {Record<number, string[]>} importedIds external ids already
+ *   imported per project — drives skip-if-exists on re-import (computed mode)
  * @property {Array<{ project_id: number, body: any, idempotency_key: string | null }>} imports
  */
 
@@ -53,6 +55,7 @@ export function makeState(overrides = {}) {
     meta: { story_types: ["feature", "bug", "chore", "release"] },
     importResult: null,
     fixture: { issues: 3, prs: 2, milestones: 1, releases: 1, labels: 0 },
+    importedIds: {},
     imports: [],
     ...overrides,
   };
@@ -64,16 +67,29 @@ export function makeState(overrides = {}) {
  * corresponding include_* flag is set. Milestones become epics, which the
  * response does not count — they never change the story numbers.
  *
+ * Mirrors the server's skip-if-exists dedup: each fixture row has a stable
+ * external id per (project, source); rows already imported into the project
+ * are counted in `skipped` instead of `imported`.
+ *
  * @param {MockState} state
+ * @param {number} projectId
  * @param {any} body
  */
-function computeImportResult(state, body) {
-  let stories = state.fixture.issues;
-  if (body.include_pull_requests) stories += state.fixture.prs;
-  if (body.include_releases) stories += state.fixture.releases;
+function computeImportResult(state, projectId, body) {
+  const ids = [];
+  for (let i = 1; i <= state.fixture.issues; i += 1) ids.push(`issue-${i}`);
+  if (body.include_pull_requests) {
+    for (let i = 1; i <= state.fixture.prs; i += 1) ids.push(`pr-${i}`);
+  }
+  if (body.include_releases) {
+    for (let i = 1; i <= state.fixture.releases; i += 1) ids.push(`release-${i}`);
+  }
+  const existing = new Set(state.importedIds[projectId] ?? []);
+  const fresh = ids.filter((id) => !existing.has(id));
+  state.importedIds[projectId] = [...existing, ...fresh];
   return {
-    imported: { stories, labels: state.fixture.labels },
-    skipped: 0,
+    imported: { stories: fresh.length, labels: fresh.length ? state.fixture.labels : 0 },
+    skipped: ids.length - fresh.length,
     errors: [],
     unmatched: {
       owners: [],
@@ -165,7 +181,7 @@ async function handle(state, req, res) {
         body,
         idempotency_key: /** @type {string | undefined} */ (req.headers["idempotency-key"]) ?? null,
       });
-      send(res, 200, state.importResult ?? computeImportResult(state, body));
+      send(res, 200, state.importResult ?? computeImportResult(state, projectId, body));
       return;
     }
   }

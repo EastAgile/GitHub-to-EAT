@@ -211,9 +211,10 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     throw err;
   }
 
+  const skippedNote = outcome.skipped ? " (already imported)" : "";
   stdout.write(
     `Imported ${outcome.importedStories} stories (${outcome.importedLabels} labels), ` +
-      `skipped ${outcome.skipped}, ${outcome.errors.length} error(s).\n`,
+      `skipped ${outcome.skipped}${skippedNote}, ${outcome.errors.length} error(s).\n`,
   );
   const unmatchedTotal = Object.values(outcome.unmatched).reduce((n, v) => n + v.length, 0);
   if (unmatchedTotal) {
