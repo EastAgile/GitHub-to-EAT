@@ -111,7 +111,10 @@ must contain `issues` — the other types only add to an issue import:
   notes → description, publish date kept).
 
 `--dry-run` validates your key, the project, and connectivity (and warns if the
-project already has stories), then prints the plan without importing anything.
+project already has stories), then asks the server for a real, dedup-aware
+import plan — how many stories it *would* import and how many it *would* skip
+as already imported — without writing anything. Against older servers that
+don't support plan computation, it falls back to a local preview.
 
 **Private repos:** public repos need no GitHub token (the server uses its platform
 credential). For a **private** repo — or a server without that platform credential

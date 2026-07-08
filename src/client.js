@@ -116,24 +116,66 @@ export class EATClient {
   }
 
   /**
+   * True when the server's import endpoint accepts a `dry_run` field.
+   *
+   * Feature-detected from the server's published OpenAPI spec — the pinned
+   * schemas live at `GET /openapi.json` under the API base. Servers without
+   * the spec (or without the field) predate server-side dry-run; sending
+   * `dry_run` to them could trigger a real import, so callers must check
+   * first. Any error (404, auth, parse) counts as "not supported".
+   *
+   * @returns {Promise<boolean>}
+   */
+  async supportsServerDryRun() {
+    let spec;
+    try {
+      spec = await (await this.#request("GET", "/openapi.json")).json();
+    } catch {
+      return false;
+    }
+    /** @param {any} node */
+    const resolve = (node) => {
+      while (node && typeof node === "object" && "$ref" in node) {
+        node = String(node.$ref)
+          .split("/")
+          .slice(1)
+          .reduce((acc, part) => acc?.[part], spec);
+      }
+      return node;
+    };
+    for (const [path, ops] of Object.entries(spec?.paths ?? {})) {
+      if (!path.endsWith("/import/json")) continue;
+      const schema = resolve(
+        resolve(ops?.post?.requestBody)?.content?.["application/json"]?.schema,
+      );
+      if (schema?.properties && "dry_run" in schema.properties) return true;
+    }
+    return false;
+  }
+
+  /**
    * Trigger a GitHub import for a project.
    *
    * With no `token` the server fetches GitHub using its platform PAT (public
    * repos). Supplying a `token` (a GitHub PAT) lets the server read a private
    * repo, or work when no platform PAT is configured. The Idempotency-Key lets a
-   * retried request replay instead of double-importing.
+   * retried request replay instead of double-importing. With `dryRun`, the
+   * server computes the dedup-aware plan without writing — only send it after
+   * {@link supportsServerDryRun} says yes.
    *
    * @param {number} projectId
    * @param {string} owner
    * @param {string} repo
    * @param {{ idempotencyKey: string, token?: string, timeout?: number,
-   *   flags?: Record<string, boolean> }} options `flags` are extra boolean
-   *   request fields (e.g. include_pull_requests) merged into the body
+   *   flags?: Record<string, boolean>, dryRun?: boolean }} options `flags` are
+   *   extra boolean request fields (e.g. include_pull_requests) merged into
+   *   the body
    * @returns {Promise<any>}
    */
-  async importGithub(projectId, owner, repo, { idempotencyKey, token, timeout, flags }) {
+  async importGithub(projectId, owner, repo, { idempotencyKey, token, timeout, flags, dryRun }) {
     /** @type {Record<string, string | boolean>} */
     const body = { source: "github", owner, repo, ...flags };
+    if (dryRun) body.dry_run = true;
     if (token) body.token = token;
     const response = await this.#request("POST", `/projects/${projectId}/import/json`, {
       json: body,

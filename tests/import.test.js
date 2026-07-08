@@ -65,6 +65,7 @@ test("runImport normalizes missing fields", async () => {
     skipped: 0,
     errors: [],
     unmatched: {},
+    dryRun: false,
   });
 });
 
@@ -76,6 +77,7 @@ test("runImport reads nested imported", async () => {
     skipped: 1,
     errors: ["x"],
     unmatched: {},
+    dryRun: false,
   });
 });
 
@@ -87,6 +89,7 @@ test("runImport tolerates flat imported", async () => {
     skipped: 0,
     errors: [],
     unmatched: {},
+    dryRun: false,
   });
 });
 
@@ -180,7 +183,9 @@ test("--dry-run makes no import", async () => {
   } finally {
     await mock.close();
   }
-  assert.deepEqual(mock.state.imports, []);
+  assert.equal(mock.state.imports.length, 1);
+  assert.equal(mock.state.imports[0].body.dry_run, true);
+  assert.deepEqual(mock.state.importedIds, {}); // nothing persisted
   assert.ok(out.buf.includes("Dry run"));
 });
 
@@ -397,4 +402,117 @@ test("a first import does not carry the already-imported note", async () => {
   }
   assert.ok(out.buf.includes("skipped 0,"));
   assert.ok(!out.buf.includes("already imported"));
+});
+
+test("supportsServerDryRun reads the published openapi (incl. $ref schemas)", async () => {
+  const mock = await startMockServer();
+  try {
+    assert.equal(await new EATClient(mock.baseUrl, "tok").supportsServerDryRun(), true);
+  } finally {
+    await mock.close();
+  }
+  const old = await startMockServer(makeState({ serverDryRun: false }));
+  try {
+    assert.equal(await new EATClient(old.baseUrl, "tok").supportsServerDryRun(), false);
+  } finally {
+    await old.close();
+  }
+});
+
+test("a server dry_run computes the plan without persisting", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "tok");
+    const plan = await client.importGithub(91, "o", "r", { idempotencyKey: "k1", dryRun: true });
+    assert.equal(plan.dry_run, true);
+    assert.equal(plan.imported.stories, 3);
+    assert.equal(plan.skipped, 0);
+    const real = await client.importGithub(91, "o", "r", { idempotencyKey: "k2" });
+    assert.equal(real.dry_run, false);
+    assert.equal(real.imported.stories, 3); // dry run persisted nothing
+  } finally {
+    await mock.close();
+  }
+});
+
+test("--dry-run renders the server plan and writes nothing", async () => {
+  const mock = await startMockServer();
+  const out = capture();
+  try {
+    await inTempDir(() =>
+      withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
+        assert.equal(
+          await main(["--project", "91", "--repo", "o/r", "--dry-run"], {
+            stdout: out,
+            stderr: capture(),
+          }),
+          0,
+        );
+      }),
+    );
+    assert.ok(out.buf.includes("would import 3 stories"));
+    assert.ok(out.buf.includes("No changes made."));
+    assert.deepEqual(mock.state.importedIds, {}); // nothing persisted
+    assert.equal(mock.state.imports[0].body.dry_run, true);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("--dry-run plan is dedup-aware after a real import", async () => {
+  const mock = await startMockServer();
+  const out = capture();
+  try {
+    await inTempDir(() =>
+      withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
+        assert.equal(
+          await main(["--project", "91", "--repo", "o/r"], {
+            stdout: capture(),
+            stderr: capture(),
+          }),
+          0,
+        );
+        assert.equal(
+          await main(["--project", "91", "--repo", "o/r", "--dry-run"], {
+            stdout: out,
+            stderr: capture(),
+          }),
+          0,
+        );
+      }),
+    );
+  } finally {
+    await mock.close();
+  }
+  assert.ok(out.buf.includes("would import 0 stories"));
+  assert.ok(out.buf.includes("would skip 3 (already imported)"));
+});
+
+test("--dry-run falls back to the local preview on older servers", async () => {
+  const mock = await startMockServer(makeState({ serverDryRun: false }));
+  const out = capture();
+  try {
+    await inTempDir(() =>
+      withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
+        assert.equal(
+          await main(["--project", "91", "--repo", "o/r", "--dry-run"], {
+            stdout: out,
+            stderr: capture(),
+          }),
+          0,
+        );
+      }),
+    );
+  } finally {
+    await mock.close();
+  }
+  assert.ok(out.buf.includes("Dry run: would import o/r into project 91"));
+  assert.equal(mock.state.imports.length, 0); // no import call at all
+});
+
+test("runImport surfaces the dry_run echo", async () => {
+  const fake = fakeClient({ dry_run: true, imported: { stories: 2, labels: 0 }, skipped: 1 });
+  const outcome = await runImport(fake, 91, "o", "r", { idempotencyKey: "k", dryRun: true });
+  assert.equal(outcome.dryRun, true);
+  assert.equal(outcome.skipped, 1);
 });

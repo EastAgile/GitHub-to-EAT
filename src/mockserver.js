@@ -39,6 +39,9 @@ import { parseArgs } from "node:util";
  *   labels: number }} fixture
  * @property {Record<number, string[]>} importedIds external ids already
  *   imported per project — drives skip-if-exists on re-import (computed mode)
+ * @property {boolean} serverDryRun when true (default), GET /openapi.json
+ *   advertises the import dry_run field and dry_run requests are honoured;
+ *   false simulates an older server (openapi 404s)
  * @property {Array<{ project_id: number, body: any, idempotency_key: string | null }>} imports
  */
 
@@ -56,10 +59,28 @@ export function makeState(overrides = {}) {
     importResult: null,
     fixture: { issues: 3, prs: 2, milestones: 1, releases: 1, labels: 0 },
     importedIds: {},
+    serverDryRun: true,
     imports: [],
     ...overrides,
   };
 }
+
+/** The minimal OpenAPI slice the client's dry-run feature detection reads. */
+const OPENAPI_SLICE = {
+  paths: {
+    "/api/v1/projects/{project_id}/import/json": {
+      post: {
+        requestBody: {
+          content: {
+            "application/json": {
+              schema: { properties: { dry_run: { type: ["boolean", "null"] } } },
+            },
+          },
+        },
+      },
+    },
+  },
+};
 
 /**
  * Compute an import result from the fixture and the request body's flags,
@@ -84,10 +105,14 @@ function computeImportResult(state, projectId, body) {
   if (body.include_releases) {
     for (let i = 1; i <= state.fixture.releases; i += 1) ids.push(`release-${i}`);
   }
+  const dryRun = state.serverDryRun && body.dry_run === true;
   const existing = new Set(state.importedIds[projectId] ?? []);
   const fresh = ids.filter((id) => !existing.has(id));
-  state.importedIds[projectId] = [...existing, ...fresh];
+  if (!dryRun) {
+    state.importedIds[projectId] = [...existing, ...fresh];
+  }
   return {
+    dry_run: dryRun,
     imported: { stories: fresh.length, labels: fresh.length ? state.fixture.labels : 0 },
     skipped: ids.length - fresh.length,
     errors: [],
@@ -131,6 +156,12 @@ async function handle(state, req, res) {
   if (req.method === "GET") {
     if (path === "/meta") {
       send(res, 200, state.meta);
+      return;
+    }
+
+    if (path === "/openapi.json") {
+      if (state.serverDryRun) send(res, 200, OPENAPI_SLICE);
+      else send(res, 404, { error: "not found" });
       return;
     }
 

@@ -26,6 +26,12 @@ truth for what the tool does and what it depends on from the East Agile Tracker
    - **Type selection** — `--include` adds optional boolean fields:
      `include_pull_requests`, `include_milestones`, `include_releases`
      (issues are always imported; the flags only add types).
+   - **Dry run** — `--dry-run` sends `dry_run: true`: the server fetches
+     GitHub and runs dedup but writes nothing, returning the would-import /
+     would-skip plan (response echoes `dry_run: true`). The CLI only sends
+     the field after confirming support via the server's published
+     `GET /openapi.json` (older servers would ignore it and import for
+     real); without support it falls back to a local preview.
    - **No token field** (public repos) — the EAT server fetches GitHub using a
      platform PAT (`GITHUB_IMPORT_PAT`), so users never supply a GitHub token.
      When neither a request token nor a platform PAT exists, the server

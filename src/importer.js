@@ -6,7 +6,7 @@
  * @typedef {object} ImportClient
  * @property {(projectId: number, owner: string, repo: string,
  *   options: { idempotencyKey: string, token?: string,
- *     flags?: Record<string, boolean> }) => Promise<any>} importGithub
+ *     flags?: Record<string, boolean>, dryRun?: boolean }) => Promise<any>} importGithub
  */
 
 /**
@@ -16,6 +16,8 @@
  * @property {number} skipped
  * @property {unknown[]} errors
  * @property {Record<string, unknown[]>} unmatched
+ * @property {boolean} dryRun true when the server confirmed this was a
+ *   dry-run plan (its response echoes the flag), not a real import
  */
 
 /**
@@ -30,11 +32,22 @@
  * @param {string} owner
  * @param {string} repo
  * @param {{ idempotencyKey: string, token?: string,
- *   flags?: Record<string, boolean> }} options
+ *   flags?: Record<string, boolean>, dryRun?: boolean }} options
  * @returns {Promise<ImportOutcome>}
  */
-export async function runImport(client, projectId, owner, repo, { idempotencyKey, token, flags }) {
-  const raw = await client.importGithub(projectId, owner, repo, { idempotencyKey, token, flags });
+export async function runImport(
+  client,
+  projectId,
+  owner,
+  repo,
+  { idempotencyKey, token, flags, dryRun },
+) {
+  const raw = await client.importGithub(projectId, owner, repo, {
+    idempotencyKey,
+    token,
+    flags,
+    dryRun,
+  });
   const imported = raw.imported;
   let stories = 0;
   let labels = 0;
@@ -50,5 +63,6 @@ export async function runImport(client, projectId, owner, repo, { idempotencyKey
     skipped: Number(raw.skipped ?? 0) || 0,
     errors: [...(raw.errors || [])],
     unmatched: { ...(raw.unmatched || {}) },
+    dryRun: raw.dry_run === true,
   };
 }
