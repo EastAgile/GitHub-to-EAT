@@ -26,11 +26,16 @@ import { parseArgs } from "node:util";
 /**
  * Configurable state and recorded requests for a mock server instance.
  *
+ * `importResult`, when set, is returned verbatim from the import endpoint
+ * (canned mode). When null, the result is computed from `fixture` and the
+ * request's include_* flags, mirroring the real server's behaviour.
+ *
  * @typedef {object} MockState
  * @property {Record<number, any>} projects
  * @property {Record<number, any[]>} stories
  * @property {any} meta
  * @property {any} importResult
+ * @property {{ issues: number, prs: number, labels: number }} fixture
  * @property {Array<{ project_id: number, body: any, idempotency_key: string | null }>} imports
  */
 
@@ -45,20 +50,35 @@ export function makeState(overrides = {}) {
     projects: { 91: { project_id: 91, project_title: "Mock Project" } },
     stories: {},
     meta: { story_types: ["feature", "bug", "chore", "release"] },
-    importResult: {
-      imported: { stories: 3, labels: 0 },
-      skipped: 0,
-      errors: [],
-      unmatched: {
-        owners: [],
-        followers: [],
-        reviewers: [],
-        requesters: [],
-        comment_authors: [],
-      },
-    },
+    importResult: null,
+    fixture: { issues: 3, prs: 2, labels: 0 },
     imports: [],
     ...overrides,
+  };
+}
+
+/**
+ * Compute an import result from the fixture and the request body's flags,
+ * the way the real server counts: issues always; other types only when the
+ * corresponding include_* flag is set.
+ *
+ * @param {MockState} state
+ * @param {any} body
+ */
+function computeImportResult(state, body) {
+  let stories = state.fixture.issues;
+  if (body.include_pull_requests) stories += state.fixture.prs;
+  return {
+    imported: { stories, labels: state.fixture.labels },
+    skipped: 0,
+    errors: [],
+    unmatched: {
+      owners: [],
+      followers: [],
+      reviewers: [],
+      requesters: [],
+      comment_authors: [],
+    },
   };
 }
 
@@ -142,7 +162,7 @@ async function handle(state, req, res) {
         body,
         idempotency_key: /** @type {string | undefined} */ (req.headers["idempotency-key"]) ?? null,
       });
-      send(res, 200, state.importResult);
+      send(res, 200, state.importResult ?? computeImportResult(state, body));
       return;
     }
   }

@@ -250,3 +250,63 @@ test("unmatched users are reported", async () => {
   }
   assert.ok(out.buf.includes("3 GitHub user"));
 });
+
+test("--include issues,prs sends include_pull_requests and counts PR stories", async () => {
+  const mock = await startMockServer(); // computed mode: 3 issues + 2 prs
+  const out = capture();
+  try {
+    await inTempDir(() =>
+      withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
+        const code = await main(["--project", "91", "--repo", "o/r", "--include", "issues,prs"], {
+          stdout: out,
+          stderr: capture(),
+        });
+        assert.equal(code, 0);
+      }),
+    );
+  } finally {
+    await mock.close();
+  }
+  assert.equal(mock.state.imports[0].body.include_pull_requests, true);
+  assert.ok(out.buf.includes("Imported 5"));
+});
+
+test("default import sends no include flags and imports issues only", async () => {
+  const mock = await startMockServer();
+  const out = capture();
+  try {
+    await inTempDir(() =>
+      withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
+        const code = await main(["--project", "91", "--repo", "o/r"], {
+          stdout: out,
+          stderr: capture(),
+        });
+        assert.equal(code, 0);
+      }),
+    );
+  } finally {
+    await mock.close();
+  }
+  assert.ok(!("include_pull_requests" in mock.state.imports[0].body));
+  assert.ok(out.buf.includes("Imported 3"));
+});
+
+test("--include prs alone is a usage error", async () => {
+  const err = capture();
+  const code = await main(["--project", "91", "--repo", "o/r", "--include", "prs"], {
+    stdout: capture(),
+    stderr: err,
+  });
+  assert.equal(code, 2);
+  assert.ok(err.buf.includes("must contain 'issues'"));
+});
+
+test("--include with an unknown type is a usage error", async () => {
+  const err = capture();
+  const code = await main(["--project", "91", "--repo", "o/r", "--include", "issues,wiki"], {
+    stdout: capture(),
+    stderr: err,
+  });
+  assert.equal(code, 2);
+  assert.ok(err.buf.includes("unknown import type 'wiki'"));
+});

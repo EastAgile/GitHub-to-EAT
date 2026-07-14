@@ -86,10 +86,18 @@ Board: https://eastagiletracker.com/projects/147
 Other flags:
 
 ```bash
+github-to-eat --project 147 --repo octocat/hello-world --include issues,prs   # also import pull requests
 github-to-eat --project 147 --repo octocat/hello-world --dry-run   # preflight only, no writes
 github-to-eat --version
 github-to-eat --help
 ```
+
+`--include` chooses what gets imported (default: `issues`). Adding `prs` also
+imports pull requests as stories — open → started, merged → accepted (with a
+`pull-request` label), closed-unmerged → rejected; a merged PR that closes an
+imported issue folds into that issue's story instead of creating its own.
+Every selection must contain `issues` (the other types only add to an issue
+import).
 
 `--dry-run` validates your key, the project, and connectivity (and warns if the
 project already has stories), then prints the plan without importing anything.

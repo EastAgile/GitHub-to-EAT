@@ -5,7 +5,8 @@
  *
  * @typedef {object} ImportClient
  * @property {(projectId: number, owner: string, repo: string,
- *   options: { idempotencyKey: string, token?: string }) => Promise<any>} importGithub
+ *   options: { idempotencyKey: string, token?: string,
+ *     flags?: Record<string, boolean> }) => Promise<any>} importGithub
  */
 
 /**
@@ -28,11 +29,12 @@
  * @param {number} projectId
  * @param {string} owner
  * @param {string} repo
- * @param {{ idempotencyKey: string, token?: string }} options
+ * @param {{ idempotencyKey: string, token?: string,
+ *   flags?: Record<string, boolean> }} options
  * @returns {Promise<ImportOutcome>}
  */
-export async function runImport(client, projectId, owner, repo, { idempotencyKey, token }) {
-  const raw = await client.importGithub(projectId, owner, repo, { idempotencyKey, token });
+export async function runImport(client, projectId, owner, repo, { idempotencyKey, token, flags }) {
+  const raw = await client.importGithub(projectId, owner, repo, { idempotencyKey, token, flags });
   const imported = raw.imported;
   let stories = 0;
   let labels = 0;
