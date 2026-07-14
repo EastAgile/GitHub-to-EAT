@@ -200,6 +200,47 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
   stdout.write(`${renderLegend(included)}\n`);
 
   if (values["dry-run"]) {
+    // Server-side dry_run is feature-detected first: sending the flag to a
+    // server that ignores unknown fields would run a real import.
+    if (await client.supportsServerDryRun()) {
+      const token = values.token || process.env.GITHUB_TOKEN || undefined;
+      let plan;
+      try {
+        plan = await runWithProgress(
+          () =>
+            runImport(client, project, owner, repo, {
+              idempotencyKey: randomUUID(),
+              token,
+              flags,
+              dryRun: true,
+            }),
+          "waiting for the server to compute the import plan",
+          { stream: stderr },
+        );
+      } catch (err) {
+        if (err instanceof EATError) {
+          stderr.write(`error: dry run failed: ${err.message}\n`);
+          return 1;
+        }
+        throw err;
+      }
+      if (!plan.dryRun) {
+        stderr.write(
+          "warning: the server did not confirm dry-run mode — check the board before re-running.\n",
+        );
+      }
+      const skippedNote = plan.skipped ? " (already imported)" : "";
+      stdout.write(
+        `Dry run plan for ${owner}/${repo} into project ${project} (${result.projectTitle}):\n` +
+          `  would import ${plan.importedStories} stories (${plan.importedLabels} labels), ` +
+          `would skip ${plan.skipped}${skippedNote}, ${plan.errors.length} error(s).\n` +
+          "No changes made.\n",
+      );
+      for (const err of plan.errors) {
+        stderr.write(`  - ${err}\n`);
+      }
+      return 0;
+    }
     stdout.write(
       `Dry run: would import ${owner}/${repo} into project ${project} ` +
         `(${result.projectTitle}). No changes made.\n`,

@@ -20,6 +20,7 @@ function outcome(overrides = {}) {
     skipped: 0,
     errors: [],
     unmatched: {},
+    dryRun: false,
     ...overrides,
   };
 }
@@ -123,7 +124,7 @@ test("preflight error returns one", async () => {
 
 test("--dry-run skips the import", async () => {
   await inTempDir(() =>
-    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+    withEnv({ EAT_AGENT_KEY: "key", EAT_API_BASE: "http://127.0.0.1:9/api/v1" }, async () => {
       /** @type {number[]} */
       const called = [];
       const out = capture();
@@ -145,7 +146,7 @@ test("--dry-run skips the import", async () => {
 
 test("the mapping legend derives from the registry and shows on dry-run", async () => {
   await inTempDir(() =>
-    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+    withEnv({ EAT_AGENT_KEY: "key", EAT_API_BASE: "http://127.0.0.1:9/api/v1" }, async () => {
       const out = capture();
       const code = await main(
         ["--project", "91", "--repo", "o/r", "--include", "issues,milestones", "--dry-run"],
@@ -229,7 +230,7 @@ test("--yes skips the confirm prompt entirely", async () => {
 
 test("--dry-run never prompts", async () => {
   await inTempDir(() =>
-    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+    withEnv({ EAT_AGENT_KEY: "key", EAT_API_BASE: "http://127.0.0.1:9/api/v1" }, async () => {
       const asked = [];
       const code = await main(["--project", "91", "--repo", "o/r", "--dry-run"], {
         stdout: capture(),
