@@ -333,3 +333,68 @@ test("--include issues,milestones,releases sends both flags; releases add storie
   assert.ok(!("include_pull_requests" in body));
   assert.ok(out.buf.includes("Imported 4")); // 3 issues + 1 release; milestones -> epics, uncounted
 });
+
+test("re-import against the mock skips already-imported rows", async () => {
+  const mock = await startMockServer(); // computed mode with dedup
+  try {
+    const client = new EATClient(mock.baseUrl, "tok");
+    const first = await client.importGithub(91, "o", "r", { idempotencyKey: "k1" });
+    assert.equal(first.imported.stories, 3);
+    assert.equal(first.skipped, 0);
+    const second = await client.importGithub(91, "o", "r", { idempotencyKey: "k2" });
+    assert.equal(second.imported.stories, 0);
+    assert.equal(second.skipped, 3);
+    const wider = await client.importGithub(91, "o", "r", {
+      idempotencyKey: "k3",
+      flags: { include_pull_requests: true },
+    });
+    assert.equal(wider.imported.stories, 2); // only the PRs are new
+    assert.equal(wider.skipped, 3);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("skipped rows are reported as already imported", async () => {
+  const mock = await startMockServer();
+  const out = capture();
+  try {
+    await inTempDir(() =>
+      withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
+        assert.equal(
+          await main(["--project", "91", "--repo", "o/r"], {
+            stdout: capture(),
+            stderr: capture(),
+          }),
+          0,
+        );
+        assert.equal(
+          await main(["--project", "91", "--repo", "o/r"], { stdout: out, stderr: capture() }),
+          0,
+        );
+      }),
+    );
+  } finally {
+    await mock.close();
+  }
+  assert.ok(out.buf.includes("skipped 3 (already imported)"));
+});
+
+test("a first import does not carry the already-imported note", async () => {
+  const mock = await startMockServer();
+  const out = capture();
+  try {
+    await inTempDir(() =>
+      withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
+        assert.equal(
+          await main(["--project", "91", "--repo", "o/r"], { stdout: out, stderr: capture() }),
+          0,
+        );
+      }),
+    );
+  } finally {
+    await mock.close();
+  }
+  assert.ok(out.buf.includes("skipped 0,"));
+  assert.ok(!out.buf.includes("already imported"));
+});
