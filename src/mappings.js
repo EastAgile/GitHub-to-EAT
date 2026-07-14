@@ -32,6 +32,14 @@ export const MAPPINGS = {
       "a merged PR that closes an imported issue folds into that issue's story",
     ],
   },
+  milestones: {
+    requestField: "include_milestones",
+    legend: ["milestone → epic (an issue keeps its milestone as the epic's label)"],
+  },
+  releases: {
+    requestField: "include_releases",
+    legend: ["release → release-type story (tag → title, notes → description, publish date kept)"],
+  },
 };
 
 /**
@@ -61,10 +69,9 @@ export function parseInclude(value) {
   }
   const selected = known.filter((type) => requested.includes(type));
   if (!selected.includes("issues")) {
-    const allowed = known.map((t, i) => known.slice(0, i + 1).join(",")).join(" | ");
     throw new Error(
       `--include must contain 'issues' (the other types only add to an issue import); ` +
-        `allowed: ${allowed}`,
+        `e.g. issues | issues,prs | issues,${selected.join(",")}`,
     );
   }
   return selected;

@@ -36,3 +36,22 @@ test("requestFlags maps prs to include_pull_requests", () => {
   assert.deepEqual(requestFlags(["issues"]), {});
   assert.deepEqual(requestFlags(["issues", "prs"]), { include_pull_requests: true });
 });
+
+test("parseInclude accepts milestones and releases", () => {
+  assert.deepEqual(parseInclude("issues,milestones,releases"), [
+    "issues",
+    "milestones",
+    "releases",
+  ]);
+});
+
+test("requestFlags maps milestones and releases to their server fields", () => {
+  assert.deepEqual(requestFlags(["issues", "milestones", "releases"]), {
+    include_milestones: true,
+    include_releases: true,
+  });
+});
+
+test("parseInclude still requires issues with the new types", () => {
+  assert.throws(() => parseInclude("milestones,releases"), /must contain 'issues'/);
+});

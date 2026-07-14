@@ -310,3 +310,26 @@ test("--include with an unknown type is a usage error", async () => {
   assert.equal(code, 2);
   assert.ok(err.buf.includes("unknown import type 'wiki'"));
 });
+
+test("--include issues,milestones,releases sends both flags; releases add stories", async () => {
+  const mock = await startMockServer(); // fixture: 3 issues + 1 release
+  const out = capture();
+  try {
+    await inTempDir(() =>
+      withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
+        const code = await main(
+          ["--project", "91", "--repo", "o/r", "--include", "issues,milestones,releases"],
+          { stdout: out, stderr: capture() },
+        );
+        assert.equal(code, 0);
+      }),
+    );
+  } finally {
+    await mock.close();
+  }
+  const body = mock.state.imports[0].body;
+  assert.equal(body.include_milestones, true);
+  assert.equal(body.include_releases, true);
+  assert.ok(!("include_pull_requests" in body));
+  assert.ok(out.buf.includes("Imported 4")); // 3 issues + 1 release; milestones -> epics, uncounted
+});
