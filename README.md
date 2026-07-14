@@ -94,6 +94,11 @@ github-to-eat --version
 github-to-eat --help
 ```
 
+Before importing, the CLI prints a **mapping legend** — exactly how each
+selected GitHub type lands in EAT — and, when run in a terminal, asks for
+confirmation (`[y/N]`). Pass `--yes`/`-y` to skip the prompt; non-interactive
+runs (pipes, CI) never prompt. `--dry-run` prints the same legend.
+
 `--include` chooses what gets imported (default: `issues`). Every selection
 must contain `issues` — the other types only add to an issue import:
 

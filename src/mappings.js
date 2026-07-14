@@ -78,6 +78,29 @@ export function parseInclude(value) {
 }
 
 /**
+ * Render the GitHub → EAT mapping legend for a selection ("show the mirror").
+ *
+ * One block per selected type, straight from the registry, ending with the
+ * append + dedup behaviour so users know a run never replaces or updates.
+ *
+ * @param {string[]} selected types from {@link parseInclude}
+ * @returns {string} multi-line legend text (no trailing newline)
+ */
+export function renderLegend(selected) {
+  const lines = ["Import mapping (GitHub → East Agile Tracker):"];
+  for (const type of selected) {
+    lines.push(`  ${type}:`);
+    for (const row of MAPPINGS[type].legend) {
+      lines.push(`    - ${row}`);
+    }
+  }
+  lines.push(
+    "Imports append to the project; re-runs skip already-imported items; nothing is updated or deleted.",
+  );
+  return lines.join("\n");
+}
+
+/**
  * Map a selection from {@link parseInclude} to the server request fields.
  *
  * @param {string[]} selected

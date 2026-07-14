@@ -6,19 +6,20 @@
  */
 
 import { randomUUID } from "node:crypto";
+import readline from "node:readline/promises";
 import { parseArgs } from "node:util";
 
 import { EATClient, EATError, EATTimeout } from "./client.js";
 import { ConfigError, loadConfig } from "./config.js";
 import { runImport as defaultRunImport } from "./importer.js";
-import { MAPPINGS, parseInclude, requestFlags } from "./mappings.js";
+import { MAPPINGS, parseInclude, renderLegend, requestFlags } from "./mappings.js";
 import { preflight as defaultPreflight } from "./preflight.js";
 import { runWithProgress } from "./progress.js";
 import { VERSION } from "./version.js";
 
 const USAGE =
   "usage: github-to-eat [-h] [-V] --project ID --repo OWNER/NAME " +
-  "[--include TYPES] [--dry-run] [--token GITHUB_TOKEN]";
+  "[--include TYPES] [--dry-run] [-y] [--token GITHUB_TOKEN]";
 
 const HELP = `${USAGE}
 
@@ -31,8 +32,27 @@ options:
   --repo OWNER/NAME     public GitHub repository, e.g. octocat/hello-world
   --include TYPES       comma-separated types to import: ${Object.keys(MAPPINGS).join(",")} (default: issues)
   --dry-run             run preflight and show the plan without importing anything
+  -y, --yes             skip the interactive confirmation prompt
   --token GITHUB_TOKEN  GitHub token for a private repo (or set GITHUB_TOKEN); public repos need none
 `;
+
+/**
+ * Ask a yes/no question on the controlling terminal; default no.
+ *
+ * @param {string} question
+ * @returns {Promise<boolean>}
+ */
+async function defaultConfirm(question) {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    const answer = await rl.question(question);
+    return /^y(es)?$/i.test(answer.trim());
+  } catch {
+    return false; // EOF (Ctrl-D) or closed input at the prompt means "no"
+  } finally {
+    rl.close();
+  }
+}
 
 /**
  * Split an `owner/name` string into `[owner, name]`.
@@ -58,6 +78,9 @@ export function parseRepo(value) {
  * @property {import("./progress.js").OutStream} [stderr]
  * @property {typeof defaultPreflight} [preflight]
  * @property {typeof defaultRunImport} [runImport]
+ * @property {((question: string) => Promise<boolean>) | null} [confirm] yes/no
+ *   prompt; defaults to a terminal prompt when stdin is a TTY, else null
+ *   (no prompt — scripts keep running unattended)
  */
 
 /**
@@ -76,6 +99,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     stderr = process.stderr,
     preflight = defaultPreflight,
     runImport = defaultRunImport,
+    confirm = process.stdin.isTTY ? defaultConfirm : null,
   } = deps;
 
   /** @param {string} message */
@@ -95,6 +119,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
         repo: { type: "string" },
         include: { type: "string" },
         "dry-run": { type: "boolean" },
+        yes: { type: "boolean", short: "y" },
         token: { type: "string" },
       },
       allowPositionals: false,
@@ -172,12 +197,24 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     );
   }
 
+  stdout.write(`${renderLegend(included)}\n`);
+
   if (values["dry-run"]) {
     stdout.write(
       `Dry run: would import ${owner}/${repo} into project ${project} ` +
         `(${result.projectTitle}). No changes made.\n`,
     );
     return 0;
+  }
+
+  if (!values.yes && confirm) {
+    const proceed = await confirm(
+      `Import ${owner}/${repo} into project ${project} (${result.projectTitle})? [y/N] `,
+    );
+    if (!proceed) {
+      stderr.write("Aborted — nothing imported.\n");
+      return 1;
+    }
   }
 
   const token = values.token || process.env.GITHUB_TOKEN || undefined;
