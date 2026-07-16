@@ -7,6 +7,8 @@
  * else from this table.
  */
 
+import { ISSUES_LEGEND } from "./mapping.js";
+
 /**
  * @typedef {object} Mapping
  * @property {string | null} requestField server import-request boolean that
@@ -18,11 +20,9 @@
 export const MAPPINGS = {
   issues: {
     requestField: null,
-    legend: [
-      "open issue → story (unstarted); closed issue → story (accepted, keeps the closed date)",
-      "labels → labels (with colors); issue-body checklists → story tasks",
-      "comments → comments (body only)",
-    ],
+    // Lives in mapping.js next to the functions that implement each line, so
+    // the legend and the direct engine's mapper can't drift apart.
+    legend: ISSUES_LEGEND,
   },
   prs: {
     requestField: "include_pull_requests",
