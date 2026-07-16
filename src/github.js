@@ -23,6 +23,22 @@ export class RateLimitError extends GitHubError {}
 export class GitHubAuthError extends GitHubError {}
 
 /**
+ * Human-readable "when does the budget come back" hint for a rate-limited
+ * response: prefer the secondary-limit `retry-after` (delay in seconds), else
+ * the primary-limit `x-ratelimit-reset` (epoch seconds), else `"later"`.
+ *
+ * @param {Response} response
+ * @returns {string}
+ */
+function rateLimitResetHint(response) {
+  const retryAfter = Number(response.headers.get("retry-after"));
+  if (Number.isFinite(retryAfter) && retryAfter > 0) return `in ${retryAfter}s`;
+  const reset = Number(response.headers.get("x-ratelimit-reset"));
+  if (Number.isFinite(reset) && reset > 0) return `at ${new Date(reset * 1000).toISOString()}`;
+  return "later";
+}
+
+/**
  * Extract the `rel="next"` URL from a `Link` response header, if present.
  *
  * @param {string | null} link
@@ -90,12 +106,22 @@ export class GitHubClient {
         `repo ${this.owner}/${this.repo} not found (private, renamed, or no access with this token)`,
       );
     }
-    if (response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0") {
-      const reset = Number(response.headers.get("x-ratelimit-reset"));
-      const when = Number.isFinite(reset) ? new Date(reset * 1000).toISOString() : "later";
-      throw new RateLimitError(
-        `GitHub rate limit exhausted; resets at ${when}. Pass --token / GITHUB_TOKEN to raise the limit (5000/h).`,
-      );
+    // Rate limiting. GitHub signals an exhausted budget with 403 *or* 429
+    // (docs.github.com/rest/using-the-rest-api/rate-limits-for-the-rest-api):
+    // a primary-limit hit zeroes x-ratelimit-remaining, while a secondary
+    // (abuse) limit sends a retry-after header and may leave remaining > 0.
+    // A plain permission 403 carries neither, so it falls through to the
+    // generic handler below rather than being mislabelled a rate limit.
+    if (response.status === 403 || response.status === 429) {
+      const rateLimited =
+        response.headers.get("x-ratelimit-remaining") === "0" ||
+        response.headers.get("retry-after") !== null;
+      if (rateLimited) {
+        throw new RateLimitError(
+          `GitHub rate limit exhausted; resets ${rateLimitResetHint(response)}. ` +
+            "Pass --token / GITHUB_TOKEN to raise the limit (5000/h).",
+        );
+      }
     }
     if (response.status === 401) {
       throw new GitHubAuthError("GitHub token rejected (401) — check --token / GITHUB_TOKEN");

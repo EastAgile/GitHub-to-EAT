@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { test } from "node:test";
 
-import { GitHubAuthError, GitHubClient, RateLimitError, RepoNotFoundError } from "../src/github.js";
+import {
+  GitHubAuthError,
+  GitHubClient,
+  GitHubError,
+  RateLimitError,
+  RepoNotFoundError,
+} from "../src/github.js";
 
 /**
  * Run `fn` against a throwaway local HTTP server standing in for api.github.com;
@@ -198,6 +204,59 @@ test("403 with a zeroed rate-limit maps to RateLimitError with the reset time", 
       await assert.rejects(new GitHubClient("o", "r", { apiBase: base }).listIssues(), (err) => {
         assert.ok(err instanceof RateLimitError);
         assert.match(err.message, /2030/);
+        return true;
+      });
+    },
+  );
+});
+
+test("429 with a zeroed rate-limit also maps to RateLimitError (GitHub uses 403 or 429)", async () => {
+  const reset = 1893456000; // 2030-01-01T00:00:00Z — stable, readable in the message
+  await withGitHub(
+    (_req, res) =>
+      json(
+        res,
+        429,
+        { message: "API rate limit exceeded" },
+        { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(reset) },
+      ),
+    async (base) => {
+      await assert.rejects(new GitHubClient("o", "r", { apiBase: base }).listIssues(), (err) => {
+        assert.ok(err instanceof RateLimitError);
+        assert.match(err.message, /2030/);
+        return true;
+      });
+    },
+  );
+});
+
+test("a secondary rate limit (403 + retry-after, remaining > 0) maps to RateLimitError", async () => {
+  await withGitHub(
+    (_req, res) =>
+      json(
+        res,
+        403,
+        { message: "You have exceeded a secondary rate limit" },
+        { "retry-after": "60", "x-ratelimit-remaining": "12" },
+      ),
+    async (base) => {
+      await assert.rejects(new GitHubClient("o", "r", { apiBase: base }).listIssues(), (err) => {
+        assert.ok(err instanceof RateLimitError);
+        assert.match(err.message, /in 60s/);
+        return true;
+      });
+    },
+  );
+});
+
+test("a plain permission 403 (no rate-limit headers) is not mistaken for a rate limit", async () => {
+  await withGitHub(
+    (_req, res) => json(res, 403, { message: "Resource not accessible by personal access token" }),
+    async (base) => {
+      await assert.rejects(new GitHubClient("o", "r", { apiBase: base }).listIssues(), (err) => {
+        assert.ok(err instanceof GitHubError);
+        assert.ok(!(err instanceof RateLimitError));
+        assert.match(err.message, /403/);
         return true;
       });
     },
