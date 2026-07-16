@@ -456,6 +456,66 @@ test("idempotency ledger is global: same key + same body replays across endpoint
   }
 });
 
+test("garbage POST bodies get a 400, not a crash", async () => {
+  const mock = await startMockServer();
+  try {
+    // JSON `null` parses fine but is not an object — property access on it threw
+    // an unhandled rejection that killed the whole process before the guard.
+    const nullBody = await post(mock.baseUrl, "/projects/91/labels", null);
+    assert.equal(nullBody.status, 400);
+    const nonArrayLabels = await post(mock.baseUrl, "/projects/91/stories", {
+      name: "s",
+      labels: 5,
+    });
+    assert.equal(nonArrayLabels.status, 400);
+    // Strings are iterable — without the array check this created labels b, u, g.
+    const stringLabels = await post(mock.baseUrl, "/projects/91/stories", {
+      name: "s",
+      labels: "bug",
+    });
+    assert.equal(stringLabels.status, 400);
+    assert.equal(mock.state.labels[91], undefined);
+    // The server must still be alive and serving.
+    const ok = await post(mock.baseUrl, "/projects/91/labels", { name: "alive" });
+    assert.equal(ok.status, 200);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("replayed responses are snapshots, not live state", async () => {
+  const mock = await startMockServer();
+  try {
+    const created = await (
+      await post(mock.baseUrl, "/projects/91/stories", { name: "snap" }, "k1")
+    ).json();
+    assert.deepEqual(created.tasks, []);
+    await post(mock.baseUrl, `/projects/91/stories/${created.story_id}/tasks`, {
+      description: "later",
+    });
+    const replay = await (
+      await post(mock.baseUrl, "/projects/91/stories", { name: "snap" }, "k1")
+    ).json();
+    assert.deepEqual(replay, created);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("failed responses are keyed and replay too", async () => {
+  const mock = await startMockServer();
+  try {
+    const first = await post(mock.baseUrl, "/projects/91/labels", {}, "e1");
+    assert.equal(first.status, 400);
+    const replay = await post(mock.baseUrl, "/projects/91/labels", {}, "e1");
+    assert.equal(replay.status, 400);
+    assert.deepEqual(await replay.json(), await first.json());
+    assert.equal(mock.state.labels[91], undefined);
+  } finally {
+    await mock.close();
+  }
+});
+
 test("import honors Idempotency-Key replay and conflict", async () => {
   const mock = await startMockServer();
   try {
