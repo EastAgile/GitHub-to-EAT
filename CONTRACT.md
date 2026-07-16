@@ -123,6 +123,24 @@ v3 adds a second import engine selectable with `--engine server|direct`
   following v3 stories. Until a stage exists, `--engine direct` reports that the
   engine is not implemented yet rather than importing nothing.
 
+### GitHub fetch stage
+
+The direct engine reads GitHub itself (the server engine never exposed this —
+EAT did the fetch). The client-side fetcher (`src/github.js`) uses the
+repo-wide list endpoints under `https://api.github.com`, all `per_page=100`
+with `Link`-header pagination:
+
+- `GET /repos/{owner}/{repo}/issues?state=all` — issues. The endpoint mixes in
+  pull requests (tagged with a `pull_request` key); the fetcher drops them.
+- `GET /repos/{owner}/{repo}/issues/comments` — every issue comment, repo-wide.
+- `GET /repos/{owner}/{repo}/labels` — the repo's labels.
+
+Anonymous requests share GitHub's 60 req/h budget; a bats-sized repo stays
+~15–25 requests. `--token` / `GITHUB_TOKEN` is sent as `Authorization: Bearer`
+and raises the ceiling to 5000/h (and reaches private repos). Error mapping:
+404 → repo-not-found; 403 with `x-ratelimit-remaining: 0` → rate-limit
+(message carries the `x-ratelimit-reset` time); 401 → token rejected.
+
 ### Server-side dependencies (EAT [V3] use cases)
 
 The direct engine's writes rely on the EAT API surface the writer stage
