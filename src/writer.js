@@ -1,9 +1,6 @@
 /**
- * The direct engine's write stage: execute a mapped plan against the EAT API.
- *
- * Order matters — labels first (so colors land; the story payload's own
- * get-or-create would create them colorless), then stories oldest-first to
- * preserve board ordering, then each story's tasks and comments.
+ * The direct engine's write stage. Labels go first (the story payload's own
+ * get-or-create would create them colorless), then stories oldest-first to keep board order.
  */
 
 import { randomUUID } from "node:crypto";
@@ -40,9 +37,8 @@ import { runWithProgress } from "./progress.js";
  */
 
 /**
- * Timeouts, network failures, and 5xx responses are worth retrying — the
- * per-op Idempotency-Key makes a retried write replay instead of duplicating.
- * Typed 4xx errors are deterministic; retrying them just repeats the failure.
+ * Timeouts, network failures, and 5xx are retried — the per-op Idempotency-Key
+ * makes a retried write replay, not duplicate. Typed 4xx just repeat the failure.
  *
  * @param {unknown} err
  * @returns {boolean}
@@ -75,9 +71,8 @@ async function withRetry(fn, attempts, delayMs) {
 }
 
 /**
- * Execute the mapped plan against a project. Fails fast once retries are
- * exhausted — a partial run is safe to redo because every write is
- * idempotency-keyed and the dedup stage skips already-imported stories.
+ * Execute the mapped plan; fails fast once retries exhaust. A partial run is
+ * safe to redo — writes are idempotency-keyed and dedup skips already-imported stories.
  *
  * @param {WriterClient} client
  * @param {number} projectId

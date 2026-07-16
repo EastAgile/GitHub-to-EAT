@@ -20,9 +20,8 @@ export class AuthError extends EATError {}
 export class NotFoundError extends EATError {}
 
 /**
- * HTTP 409 — either a domain conflict (`code: "conflict"`, e.g. a label name
- * that already exists) or an Idempotency-Key replay conflict
- * (`code: "idempotency_conflict"`). Callers branch on {@link ConflictError#code}.
+ * HTTP 409 — a domain conflict (`code: "conflict"`, e.g. duplicate label name) or
+ * an Idempotency-Key replay (`code: "idempotency_conflict"`); callers branch on `code`.
  */
 export class ConflictError extends EATError {
   /** @type {string | undefined} the server's error `code` field */
@@ -197,9 +196,8 @@ export class EATClient {
   }
 
   /**
-   * Create a story (direct engine). Labels named on the payload are attached
-   * get-or-create by the server; `current_state: "accepted"` is accepted at
-   * create time (no estimate guard) — see CONTRACT.md "Write surface".
+   * Create a story (direct engine). Payload labels are attached get-or-create;
+   * `current_state: "accepted"` works at create time (no estimate guard) — see CONTRACT.md.
    *
    * @param {number} projectId
    * @param {Record<string, unknown>} story create body (`name` required)
