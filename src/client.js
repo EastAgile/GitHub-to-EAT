@@ -79,12 +79,16 @@ export class EATClient {
     }
 
     if (response.status === 401 || response.status === 403) {
-      throw new AuthError(
+      const error = new AuthError(
         "authentication failed — check EAT_AGENT_KEY and its access to the project",
       );
+      error.status = response.status;
+      throw error;
     }
     if (response.status === 404) {
-      throw new NotFoundError(`not found: ${path}`);
+      const error = new NotFoundError(`not found: ${path}`);
+      error.status = 404;
+      throw error;
     }
     if (response.status === 409) {
       const text = await response.text();

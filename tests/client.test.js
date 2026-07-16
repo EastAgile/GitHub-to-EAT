@@ -2,7 +2,15 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { test } from "node:test";
 
-import { AuthError, EATClient, EATError, EATTimeout, NotFoundError } from "../src/client.js";
+import {
+  AuthError,
+  ConflictError,
+  EATClient,
+  EATError,
+  EATTimeout,
+  NotFoundError,
+} from "../src/client.js";
+import { startMockServer } from "../src/mockserver.js";
 
 /**
  * Run `fn` against a throwaway local HTTP server; always tears it down.
@@ -167,8 +175,6 @@ test("projectHasStories false on an empty cursor page", async () => {
 });
 
 test("write methods create against the mock and 409 maps to ConflictError", async () => {
-  const { startMockServer } = await import("../src/mockserver.js");
-  const { ConflictError } = await import("../src/client.js");
   const mock = await startMockServer();
   try {
     const client = new EATClient(mock.baseUrl, "ea_token");

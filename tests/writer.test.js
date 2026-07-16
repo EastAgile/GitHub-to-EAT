@@ -96,6 +96,26 @@ test("writePlan writes labels, then stories oldest-first with their subresources
   }
 });
 
+test("emoji and CJK label names survive the idempotency-key path", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const result = await writePlan(
+      client,
+      91,
+      { labels: [{ name: "🐛 bug" }, { name: "機能" }], stories: [] },
+      { stream: capture() },
+    );
+    assert.equal(result.labelsCreated, 2);
+    assert.deepEqual(
+      mock.state.labels[91].map((/** @type {any} */ l) => l.label_name),
+      ["🐛 bug", "機能"],
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
 test("a label that already exists counts as existing, not an error", async () => {
   const mock = await startMockServer();
   try {

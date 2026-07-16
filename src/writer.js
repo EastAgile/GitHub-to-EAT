@@ -39,6 +39,8 @@ import { runWithProgress } from "./progress.js";
 /**
  * Timeouts, network failures, and 5xx are retried — the per-op Idempotency-Key
  * makes a retried write replay, not duplicate. Typed 4xx just repeat the failure.
+ * A 5xx the ledger stored replays as that same 5xx; retries only rescue
+ * failures that never reached the ledger (connection drop, timeout, crash).
  *
  * @param {unknown} err
  * @returns {boolean}
@@ -92,11 +94,11 @@ export async function writePlan(client, projectId, plan, options = {}) {
   if (plan.labels.length) {
     await runWithProgress(
       async () => {
-        for (const label of plan.labels) {
+        // Keys carry no user content — header values must be Latin-1 (undici
+        // rejects emoji/CJK), so ops are keyed by stable plan position.
+        for (const [i, label] of plan.labels.entries()) {
           try {
-            await retrying(() =>
-              client.createLabel(projectId, label, `${runId}:label:${label.name.toLowerCase()}`),
-            );
+            await retrying(() => client.createLabel(projectId, label, `${runId}:label:${i}`));
             result.labelsCreated += 1;
           } catch (err) {
             if (err instanceof ConflictError && err.code === "conflict") {
@@ -112,9 +114,11 @@ export async function writePlan(client, projectId, plan, options = {}) {
     );
   }
 
-  const ordered = [...plan.stories].sort((a, b) =>
-    (a.created_at ?? "").localeCompare(b.created_at ?? ""),
-  );
+  const ordered = [...plan.stories].sort((a, b) => {
+    const ka = a.created_at ?? "";
+    const kb = b.created_at ?? "";
+    return ka < kb ? -1 : ka > kb ? 1 : 0;
+  });
   if (ordered.length) {
     await runWithProgress(
       async () => {
