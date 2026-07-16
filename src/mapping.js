@@ -53,7 +53,7 @@ export function inferStoryType(labels, title) {
  * @returns {string | null}
  */
 export function normalizeHexColor(raw) {
-  const h = raw.trim().replace(/^#/, "");
+  const h = raw.trim().replace(/^#+/, "");
   return /^[0-9a-fA-F]{6}$/.test(h) ? `#${h.toLowerCase()}` : null;
 }
 
@@ -81,7 +81,7 @@ export function contrastTextColor(bg) {
 export function parseChecklist(body) {
   /** @type {{ description: string, complete: boolean }[]} */
   const out = [];
-  for (const line of body.split("\n")) {
+  for (const line of body.split(/\r?\n/)) {
     const match = line.trimStart().match(/^[-*+] \[( |x|X)\](.*)$/);
     if (!match) continue;
     const description = match[2].trim();
@@ -140,12 +140,15 @@ function commentText(comment) {
  * @returns {{ labels: LabelOp[], stories: StoryOp[] }}
  */
 export function mapRepo({ issues, comments, labels }) {
-  /** @type {Map<string, string | null>} repo-level color authority, by name */
+  /** @type {Map<string, string | null>} repo-level color authority, by lowercased name */
   const repoColors = new Map(
-    labels.map((l) => [l.name, l.color ? normalizeHexColor(String(l.color)) : null]),
+    labels.map((l) => [
+      String(l.name ?? "").toLowerCase(),
+      l.color ? normalizeHexColor(String(l.color)) : null,
+    ]),
   );
 
-  /** @type {Map<string, LabelOp>} */
+  /** @type {Map<string, LabelOp>} keyed by lowercased name, like the server's label cache */
   const labelOps = new Map();
   /** @type {Map<string, { text: string }[]>} comments per issue number */
   const byIssue = new Map();
@@ -161,11 +164,12 @@ export function mapRepo({ issues, comments, labels }) {
       const name = String(label.name ?? "").trim();
       if (!name) continue;
       names.push(name);
-      if (!labelOps.has(name)) {
+      const key = name.toLowerCase();
+      if (!labelOps.has(key)) {
         const color =
-          (label.color ? normalizeHexColor(String(label.color)) : null) ?? repoColors.get(name);
+          (label.color ? normalizeHexColor(String(label.color)) : null) ?? repoColors.get(key);
         labelOps.set(
-          name,
+          key,
           color
             ? { name, background_color_hex: color, text_color_hex: contrastTextColor(color) }
             : { name },
@@ -173,13 +177,14 @@ export function mapRepo({ issues, comments, labels }) {
       }
     }
 
+    const title = String(issue.title ?? "");
     const body = (issue.body ?? "").trim();
     const closed = String(issue.state ?? "").toLowerCase() === "closed";
     const story = {
       external_id: String(issue.number),
-      name: issue.title,
+      name: title,
       description: body || null,
-      story_type: inferStoryType(names, issue.title),
+      story_type: inferStoryType(names, title),
       current_state: /** @type {"unstarted" | "accepted"} */ (closed ? "accepted" : "unstarted"),
       created_at: issue.created_at ?? null,
       completed_at: (closed ? issue.closed_at : null) ?? null,

@@ -42,6 +42,7 @@ for (const [raw, expected] of /** @type {[string, string | null][]} */ ([
   ["  0e8a16 ", "#0e8a16"],
   ["zzz", null],
   ["fff", null], // 3-digit shorthand is not accepted (server rule)
+  ["##d73a4a", "#d73a4a"], // server strips every leading '#'
   ["", null],
 ])) {
   test(`normalizeHexColor(${JSON.stringify(raw)}) -> ${expected}`, () => {
@@ -83,6 +84,13 @@ test("parseChecklist parses -,*,+ markers with [ ]/[x]/[X], keeps body order", (
 
 test("parseChecklist on empty body -> []", () => {
   assert.deepEqual(parseChecklist(""), []);
+});
+
+test("parseChecklist handles CRLF bodies (the GitHub web-UI default)", () => {
+  assert.deepEqual(parseChecklist("- [ ] first\r\n- [x] second\r\n"), [
+    { description: "first", complete: false },
+    { description: "second", complete: true },
+  ]);
 });
 
 // --- mapRepo — fetchAll shape in, write-op plan out ---------------------------
@@ -182,6 +190,38 @@ test("a label shared by two issues appears once in the plan", () => {
     labels: [],
   });
   assert.equal(plan.labels.length, 1);
+});
+
+test("label dedup is case-insensitive with first-seen casing, like the server", () => {
+  const plan = mapRepo({
+    issues: [
+      ghIssue({ number: 1, labels: [{ name: "Bug", color: "d73a4a" }] }),
+      ghIssue({ number: 2, labels: [{ name: "bug", color: "d73a4a" }] }),
+    ],
+    comments: [],
+    labels: [],
+  });
+  assert.deepEqual(
+    plan.labels.map((l) => l.name),
+    ["Bug"],
+  );
+});
+
+test("repo-list color fill matches label names case-insensitively", () => {
+  const plan = mapRepo({
+    issues: [ghIssue({ labels: [{ name: "Docs" }] })],
+    comments: [],
+    labels: [{ name: "docs", color: "0075ca" }],
+  });
+  assert.deepEqual(plan.labels, [
+    { name: "Docs", background_color_hex: "#0075ca", text_color_hex: "#ffffff" },
+  ]);
+});
+
+test("a null title maps without throwing", () => {
+  const plan = mapRepo({ issues: [ghIssue({ title: null })], comments: [], labels: [] });
+  assert.equal(plan.stories[0].name, "");
+  assert.equal(plan.stories[0].story_type, "feature");
 });
 
 test("issue-body checklists become the story's tasks; the body keeps the lines", () => {
