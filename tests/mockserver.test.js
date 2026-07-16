@@ -210,11 +210,92 @@ test("POST stories accepts current_state accepted (no estimate guard, like the r
   }
 });
 
-test("POST stories without a name returns 400", async () => {
+test("POST stories without a name returns 400 validation_failed", async () => {
   const mock = await startMockServer();
   try {
     const response = await post(mock.baseUrl, "/projects/91/stories", { description: "x" });
     assert.equal(response.status, 400);
+    const payload = await response.json();
+    assert.equal(payload.code, "validation_failed");
+    assert.deepEqual(payload.details.fields, ["name"]);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("duplicate label name returns 409 conflict, case-insensitive", async () => {
+  const mock = await startMockServer();
+  try {
+    assert.equal((await post(mock.baseUrl, "/projects/91/labels", { name: "Dup" })).status, 200);
+    const conflict = await post(mock.baseUrl, "/projects/91/labels", { name: "dup" });
+    assert.equal(conflict.status, 409);
+    const payload = await conflict.json();
+    assert.equal(payload.code, "conflict");
+    assert.equal(mock.state.labels[91].length, 1);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("omitted label colors get the server's defaults", async () => {
+  const mock = await startMockServer();
+  try {
+    const label = await (await post(mock.baseUrl, "/projects/91/labels", { name: "plain" })).json();
+    assert.equal(label.background_color_hex, "#3498db");
+    assert.equal(label.text_color_hex, "#ffffff");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("story create get-or-creates unknown labels with default colors", async () => {
+  const mock = await startMockServer();
+  try {
+    const story = await (
+      await post(mock.baseUrl, "/projects/91/stories", { name: "s", labels: ["brand-new"] })
+    ).json();
+    assert.equal(story.labels[0].label_name, "brand-new");
+    assert.equal(story.labels[0].background_color_hex, "#3498db");
+    assert.equal(mock.state.labels[91].length, 1);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("empty label/task/comment bodies return 400 invalid_parameter", async () => {
+  const mock = await startMockServer();
+  try {
+    const story = await (await post(mock.baseUrl, "/projects/91/stories", { name: "s" })).json();
+    const label = await post(mock.baseUrl, "/projects/91/labels", {});
+    assert.equal(label.status, 400);
+    assert.equal((await label.json()).code, "invalid_parameter");
+    const task = await post(mock.baseUrl, `/projects/91/stories/${story.story_id}/tasks`, {});
+    assert.equal(task.status, 400);
+    assert.equal((await task.json()).code, "invalid_parameter");
+    const comment = await post(mock.baseUrl, `/projects/91/stories/${story.story_id}/comments`, {});
+    assert.equal(comment.status, 400);
+    assert.equal((await comment.json()).code, "invalid_parameter");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("task and comment request-field aliases are accepted like the real server", async () => {
+  const mock = await startMockServer();
+  try {
+    const story = await (await post(mock.baseUrl, "/projects/91/stories", { name: "s" })).json();
+    const task = await (
+      await post(mock.baseUrl, `/projects/91/stories/${story.story_id}/tasks`, {
+        task_desc: "via alias",
+      })
+    ).json();
+    assert.equal(task.task_desc, "via alias");
+    const comment = await (
+      await post(mock.baseUrl, `/projects/91/stories/${story.story_id}/comments`, {
+        comment_text: "via alias",
+      })
+    ).json();
+    assert.equal(comment.comment_text, "via alias");
   } finally {
     await mock.close();
   }
@@ -249,6 +330,16 @@ test("POST tasks and comments append to the story", async () => {
     const row = mock.state.stories[91][0];
     assert.equal(row.tasks.length, 1);
     assert.equal(row.comments.length, 1);
+
+    // `comments` is state-only — not a read-side field, so no HTTP payload carries it.
+    assert.ok(!("comments" in story));
+    const listed = await (
+      await fetch(`${mock.baseUrl}/projects/91/stories`, {
+        headers: { "X-TrackerToken": "ea_token" },
+      })
+    ).json();
+    assert.ok(!("comments" in listed[0]));
+    assert.equal(listed[0].comment_count, 1);
   } finally {
     await mock.close();
   }
@@ -321,6 +412,45 @@ test("unknown fields= values return 400 validation_failed", async () => {
     const payload = await response.json();
     assert.equal(payload.code, "validation_failed");
     assert.deepEqual(payload.details.fields, ["bogus"]);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("invalid limit or cursor returns 400 validation_failed", async () => {
+  const mock = await startMockServer();
+  try {
+    for (const name of ["one", "two"]) await post(mock.baseUrl, "/projects/91/stories", { name });
+    const headers = { "X-TrackerToken": "ea_token" };
+    for (const [query, field] of [
+      ["limit=abc", "limit"],
+      ["limit=0", "limit"],
+      ["limit=-5", "limit"],
+      ["cursor=abc&limit=2", "cursor"],
+      ["cursor=-1&limit=2", "cursor"],
+      ["cursor=999&limit=2", "cursor"],
+    ]) {
+      const response = await fetch(`${mock.baseUrl}/projects/91/stories?${query}`, { headers });
+      assert.equal(response.status, 400, query);
+      const payload = await response.json();
+      assert.equal(payload.code, "validation_failed", query);
+      assert.deepEqual(payload.details.fields, [field], query);
+    }
+  } finally {
+    await mock.close();
+  }
+});
+
+test("idempotency ledger is global: same key + same body replays across endpoints", async () => {
+  const mock = await startMockServer();
+  try {
+    const body = { name: "xpath" };
+    const label = await (await post(mock.baseUrl, "/projects/91/labels", body, "k1")).json();
+    // Verified on the real server 2026-07-16: the stories endpoint replays the label payload.
+    const replay = await post(mock.baseUrl, "/projects/91/stories", body, "k1");
+    assert.equal(replay.status, 200);
+    assert.deepEqual(await replay.json(), label);
+    assert.equal(mock.state.stories[91], undefined);
   } finally {
     await mock.close();
   }

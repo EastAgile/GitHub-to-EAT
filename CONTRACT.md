@@ -181,24 +181,36 @@ The writer stage targets this EAT API surface, all under
 real server 2026-07-16 and mirrored by `src/mockserver.js`):
 
 - **`POST /labels`** — body `{ "name": "...", "background_color_hex": "#rrggbb",
-  "text_color_hex": "#rrggbb" }` (colors optional) → 200
+  "text_color_hex": "#rrggbb" }` (colors optional; omitted colors get server
+  defaults, observed `#3498db` / `#ffffff`) → 200
   `{ label_id, label_name, project_id, background_color_hex, text_color_hex }`.
-- **`POST /stories`** — body requires `name` (the read-side field is `title`);
-  optional `description`, `story_type`, `current_state`, `icebox`, and
-  `labels` as bare strings or `{ "name": "..." }` objects — the server
-  attaches by name, get-or-creating, and embeds the full label objects in the
-  response. `current_state: "accepted"` is accepted at create time for an
-  unestimated feature (verified 2026-07-16) — no estimate guard, so no
+  A duplicate name — case-insensitive — is a `409 conflict`, so "ensure
+  label" means treating 409 as already-exists; a missing name is a
+  `400 invalid_parameter`.
+- **`POST /stories`** — body requires `name` (the read-side field is `title`;
+  missing → `400 validation_failed`); optional `description`, `story_type`,
+  `current_state`, `icebox`, and `labels` as bare strings or
+  `{ "name": "..." }` objects — the server attaches by name, get-or-creating
+  with default colors (unlike `POST /labels`, the story payload never 409s on
+  an existing name), and embeds the full label objects in the response.
+  `current_state: "accepted"` is accepted at create time for an unestimated
+  feature (verified 2026-07-16) — no estimate guard, so no
   create-then-transition fallback is needed. 200 → the full story object
   (`story_id`, `title`, `current_state`, `labels`, …).
 - **`POST /stories/{id}/tasks`** — body `{ "description": "...",
-  "complete": bool }` → 200 `{ task_id, story_id, task_desc, complete,
-  task_order, created }`.
-- **`POST /stories/{id}/comments`** — body `{ "text": "..." }` → 200
+  "complete": bool }` (`task_desc` is an accepted request alias; empty →
+  `400 invalid_parameter`, "task_desc is required") → 200
+  `{ task_id, story_id, task_desc, complete, task_order, created }`.
+- **`POST /stories/{id}/comments`** — body `{ "text": "..." }`
+  (`comment_text` is an accepted request alias; empty →
+  `400 invalid_parameter`, "comment must have text or emoji") → 200
   `{ comment_id, story_comment_id, story_id, comment_text, created }`.
 - **Idempotency** — every `POST` replays on same key + same body and returns
-  `409 idempotency_conflict` on same key + different body (see the v1
-  import note; the layer is global, not per-endpoint).
+  `409 idempotency_conflict` on same key + different body (see the v1 import
+  note). The ledger is keyed by key + body only: a same-key + same-body
+  request replays the stored response **even on a different endpoint**, and
+  failed responses are keyed too (probed 2026-07-16) — so the writer must
+  mint one unique key per logical write, never reuse keys across ops.
 
 ### Marker dedup (direct engine)
 
@@ -212,8 +224,10 @@ marker-based:
   `GET /stories?limit=…&cursor=…&fields=story_id,description` (cursor mode
   whenever `cursor=` or `limit=` is present; `fields=` is a sparse-fieldset
   allowlist, unknown values → `400 validation_failed`, `story_id` always
-  included) — and skips items whose marker already exists, reported as
-  `skipped N (already imported)`, the server engine's wording.
+  included; invalid `limit`/`cursor` values — including out-of-range
+  cursors — are also `400 validation_failed`, so a paging loop fails loudly
+  rather than spinning) — and skips items whose marker already exists,
+  reported as `skipped N (already imported)`, the server engine's wording.
 
 ### Fidelity limitations (direct engine)
 

@@ -218,7 +218,7 @@ async function handle(state, req, res) {
     if (m) {
       const stories = state.stories[Number(m[1])] ?? [];
       /** @type {(rows: any[]) => any[]} */
-      let project = (rows) => rows;
+      let applyFields = (rows) => rows;
       const fieldsParam = url.searchParams.get("fields");
       if (fieldsParam !== null) {
         const requested = fieldsParam
@@ -235,21 +235,50 @@ async function handle(state, req, res) {
           return;
         }
         const keep = new Set(["story_id", ...requested]);
-        project = (rows) =>
+        applyFields = (rows) =>
           rows.map((row) => Object.fromEntries(Object.entries(row).filter(([k]) => keep.has(k))));
       }
+      // The real server 400s any pagination garbage (probed 2026-07-16) — a silently
+      // non-advancing page would hang the direct engine's prescan loop forever.
+      const limitParam = url.searchParams.get("limit");
+      if (limitParam !== null && !(/^\d+$/.test(limitParam) && Number(limitParam) >= 1)) {
+        send(res, 400, {
+          code: "validation_failed",
+          details: { fields: ["limit"] },
+          error: "limit must be ≥ 1",
+        });
+        return;
+      }
+      // A valid cursor is one this mock could have issued: 1 ≤ n < row count. The real
+      // server rejects even out-of-range cursors, not just unparseable ones.
+      const cursorParam = url.searchParams.get("cursor");
+      if (
+        cursorParam !== null &&
+        !(
+          /^\d+$/.test(cursorParam) &&
+          Number(cursorParam) >= 1 &&
+          Number(cursorParam) < stories.length
+        )
+      ) {
+        send(res, 400, {
+          code: "validation_failed",
+          details: { fields: ["cursor"] },
+          error: "invalid cursor",
+        });
+        return;
+      }
       // Cursor mode when ?limit/?cursor is present; a bare (projected) array otherwise.
-      if (url.searchParams.has("limit") || url.searchParams.has("cursor")) {
-        const offset = Number(url.searchParams.get("cursor") ?? 0);
-        const limit = url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : 50;
-        const items = stories.slice(offset, offset + limit);
+      if (limitParam !== null || cursorParam !== null) {
+        const offset = Number(cursorParam ?? 0);
+        const limit = limitParam !== null ? Number(limitParam) : 50;
+        const items = stories.slice(offset, offset + limit).map(toStoryPayload);
         const end = offset + items.length;
         send(res, 200, {
-          items: project(items),
+          items: applyFields(items),
           next_cursor: end < stories.length ? String(end) : null,
         });
       } else {
-        send(res, 200, project(stories));
+        send(res, 200, applyFields(stories.map(toStoryPayload)));
       }
       return;
     }
@@ -305,6 +334,22 @@ async function handle(state, req, res) {
 /** @type {MockResponse} */
 const NOT_FOUND = { status: 404, payload: { error: "not found" } };
 
+/** Colors the real server assigns when a label is created without any (observed 2026-07-16). */
+const LABEL_DEFAULT_BACKGROUND = "#3498db";
+const LABEL_DEFAULT_TEXT = "#ffffff";
+
+/**
+ * `comments` on a story row is bookkeeping for tests — the real read shape
+ * never carries it (it isn't in the fields= allowlist either).
+ *
+ * @param {any} row
+ * @returns {any}
+ */
+function toStoryPayload(row) {
+  const { comments, ...payload } = row;
+  return payload;
+}
+
 /**
  * Dispatch a parsed POST to its endpoint handler. Runs only for requests the
  * idempotency layer did not short-circuit, so handlers always execute at most
@@ -352,16 +397,33 @@ function routePost(state, path, body, idempotencyKey) {
 function createLabel(state, projectId, body) {
   if (!(projectId in state.projects)) return NOT_FOUND;
   const name = String(body.name ?? body.label_name ?? "").trim();
-  if (!name)
-    return { status: 400, payload: { code: "validation_failed", error: "name is required" } };
+  if (!name) {
+    return {
+      status: 400,
+      payload: {
+        code: "invalid_parameter",
+        details: { constraint: "required", fields: ["label_name"] },
+        error: "This field is required.",
+      },
+    };
+  }
+  state.labels[projectId] ??= [];
+  const duplicate = state.labels[projectId].some(
+    (l) => l.label_name.toLowerCase() === name.toLowerCase(),
+  );
+  if (duplicate) {
+    return {
+      status: 409,
+      payload: { code: "conflict", error: `Label '${name}' already exists in this project` },
+    };
+  }
   const label = {
     label_id: state.nextId++,
     label_name: name,
     project_id: projectId,
-    background_color_hex: body.background_color_hex ?? null,
-    text_color_hex: body.text_color_hex ?? null,
+    background_color_hex: body.background_color_hex ?? LABEL_DEFAULT_BACKGROUND,
+    text_color_hex: body.text_color_hex ?? LABEL_DEFAULT_TEXT,
   };
-  state.labels[projectId] ??= [];
   state.labels[projectId].push(label);
   return { status: 200, payload: label };
 }
@@ -375,8 +437,16 @@ function createLabel(state, projectId, body) {
 function createStory(state, projectId, body) {
   if (!(projectId in state.projects)) return NOT_FOUND;
   const name = String(body.name ?? "").trim();
-  if (!name)
-    return { status: 400, payload: { code: "validation_failed", error: "name is required" } };
+  if (!name) {
+    return {
+      status: 400,
+      payload: {
+        code: "validation_failed",
+        details: { fields: ["name"] },
+        error: "Some of the submitted data was invalid. Please check your input and try again.",
+      },
+    };
+  }
 
   state.labels[projectId] ??= [];
   const projectLabels = state.labels[projectId];
@@ -384,15 +454,16 @@ function createStory(state, projectId, body) {
   for (const input of body.labels ?? []) {
     const labelName = String(typeof input === "string" ? input : (input?.name ?? "")).trim();
     if (!labelName) continue;
-    // The real server get-or-creates labels named on the story payload.
+    // Unlike POST /labels (409 on duplicates), the story payload get-or-creates
+    // labels by name, with default colors — probed 2026-07-16.
     let label = projectLabels.find((l) => l.label_name.toLowerCase() === labelName.toLowerCase());
     if (!label) {
       label = {
         label_id: state.nextId++,
         label_name: labelName,
         project_id: projectId,
-        background_color_hex: null,
-        text_color_hex: null,
+        background_color_hex: LABEL_DEFAULT_BACKGROUND,
+        text_color_hex: LABEL_DEFAULT_TEXT,
       };
       projectLabels.push(label);
     }
@@ -417,7 +488,7 @@ function createStory(state, projectId, body) {
   };
   state.stories[projectId] ??= [];
   state.stories[projectId].push(story);
-  return { status: 200, payload: story };
+  return { status: 200, payload: toStoryPayload(story) };
 }
 
 /**
@@ -440,10 +511,15 @@ function findStory(state, projectId, storyId) {
 function createTask(state, projectId, storyId, body) {
   const story = findStory(state, projectId, storyId);
   if (!story) return NOT_FOUND;
+  // `description`/`task_desc` are both real request fields (openapi + probe).
+  const description = String(body.description ?? body.task_desc ?? "");
+  if (!description.trim()) {
+    return { status: 400, payload: { code: "invalid_parameter", error: "task_desc is required" } };
+  }
   const task = {
     task_id: state.nextId++,
     story_id: storyId,
-    task_desc: String(body.description ?? body.task_desc ?? ""),
+    task_desc: description,
     complete: body.complete === true,
     task_order: body.task_order ?? story.tasks.length,
     created: new Date().toISOString(),
@@ -462,11 +538,21 @@ function createTask(state, projectId, storyId, body) {
 function createComment(state, projectId, storyId, body) {
   const story = findStory(state, projectId, storyId);
   if (!story) return NOT_FOUND;
+  // `text`/`comment_text` are both real request fields (openapi + probe).
+  const text = String(body.text ?? body.comment_text ?? "");
+  if (!text.trim()) {
+    return {
+      status: 400,
+      payload: { code: "invalid_parameter", error: "comment must have text or emoji" },
+    };
+  }
+  // The real server returns the same value for both ids (probed 2026-07-16).
+  const id = state.nextId++;
   const comment = {
-    comment_id: state.nextId,
-    story_comment_id: state.nextId++,
+    comment_id: id,
+    story_comment_id: id,
     story_id: storyId,
-    comment_text: String(body.text ?? body.comment_text ?? ""),
+    comment_text: text,
     created: new Date().toISOString(),
   };
   story.comments.push(comment);
