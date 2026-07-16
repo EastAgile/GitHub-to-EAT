@@ -8,13 +8,26 @@
 export const DEFAULT_IMPORT_TIMEOUT = 300;
 
 /** Base class for East Agile Tracker client errors. */
-export class EATError extends Error {}
+export class EATError extends Error {
+  /** @type {number | undefined} HTTP status when the error came from a response */
+  status;
+}
 
 /** Authentication or authorization failed (HTTP 401/403). */
 export class AuthError extends EATError {}
 
 /** The requested resource does not exist (HTTP 404). */
 export class NotFoundError extends EATError {}
+
+/**
+ * HTTP 409 — either a domain conflict (`code: "conflict"`, e.g. a label name
+ * that already exists) or an Idempotency-Key replay conflict
+ * (`code: "idempotency_conflict"`). Callers branch on {@link ConflictError#code}.
+ */
+export class ConflictError extends EATError {
+  /** @type {string | undefined} the server's error `code` field */
+  code;
+}
 
 /** The request exceeded its timeout. */
 export class EATTimeout extends EATError {}
@@ -74,9 +87,22 @@ export class EATClient {
     if (response.status === 404) {
       throw new NotFoundError(`not found: ${path}`);
     }
+    if (response.status === 409) {
+      const text = await response.text();
+      const error = new ConflictError(`conflict on ${path}: ${text.slice(0, 200)}`);
+      error.status = 409;
+      try {
+        error.code = JSON.parse(text)?.code;
+      } catch {}
+      throw error;
+    }
     if (response.status >= 400) {
       const text = await response.text();
-      throw new EATError(`request to ${path} failed (${response.status}): ${text.slice(0, 200)}`);
+      const error = new EATError(
+        `request to ${path} failed (${response.status}): ${text.slice(0, 200)}`,
+      );
+      error.status = response.status;
+      throw error;
     }
     return response;
   }
@@ -151,6 +177,80 @@ export class EATClient {
       if (schema?.properties && "dry_run" in schema.properties) return true;
     }
     return false;
+  }
+
+  /**
+   * Create a label in a project (direct engine). A name that already exists
+   * — case-insensitive — raises {@link ConflictError} with `code: "conflict"`.
+   *
+   * @param {number} projectId
+   * @param {{ name: string, background_color_hex?: string, text_color_hex?: string }} label
+   * @param {string} idempotencyKey
+   * @returns {Promise<any>}
+   */
+  async createLabel(projectId, label, idempotencyKey) {
+    const response = await this.#request("POST", `/projects/${projectId}/labels`, {
+      json: label,
+      headers: { "Idempotency-Key": idempotencyKey },
+    });
+    return response.json();
+  }
+
+  /**
+   * Create a story (direct engine). Labels named on the payload are attached
+   * get-or-create by the server; `current_state: "accepted"` is accepted at
+   * create time (no estimate guard) — see CONTRACT.md "Write surface".
+   *
+   * @param {number} projectId
+   * @param {Record<string, unknown>} story create body (`name` required)
+   * @param {string} idempotencyKey
+   * @returns {Promise<any>}
+   */
+  async createStory(projectId, story, idempotencyKey) {
+    const response = await this.#request("POST", `/projects/${projectId}/stories`, {
+      json: story,
+      headers: { "Idempotency-Key": idempotencyKey },
+    });
+    return response.json();
+  }
+
+  /**
+   * Create a task on a story (direct engine).
+   *
+   * @param {number} projectId
+   * @param {number} storyId
+   * @param {{ description: string, complete?: boolean }} task
+   * @param {string} idempotencyKey
+   * @returns {Promise<any>}
+   */
+  async createTask(projectId, storyId, task, idempotencyKey) {
+    const response = await this.#request(
+      "POST",
+      `/projects/${projectId}/stories/${storyId}/tasks`,
+      {
+        json: task,
+        headers: { "Idempotency-Key": idempotencyKey },
+      },
+    );
+    return response.json();
+  }
+
+  /**
+   * Create a comment on a story (direct engine).
+   *
+   * @param {number} projectId
+   * @param {number} storyId
+   * @param {string} text
+   * @param {string} idempotencyKey
+   * @returns {Promise<any>}
+   */
+  async createComment(projectId, storyId, text, idempotencyKey) {
+    const response = await this.#request(
+      "POST",
+      `/projects/${projectId}/stories/${storyId}/comments`,
+      { json: { text }, headers: { "Idempotency-Key": idempotencyKey } },
+    );
+    return response.json();
   }
 
   /**

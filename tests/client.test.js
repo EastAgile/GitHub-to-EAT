@@ -165,3 +165,39 @@ test("projectHasStories false on an empty cursor page", async () => {
     },
   );
 });
+
+test("write methods create against the mock and 409 maps to ConflictError", async () => {
+  const { startMockServer } = await import("../src/mockserver.js");
+  const { ConflictError } = await import("../src/client.js");
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const label = await client.createLabel(
+      91,
+      { name: "bug", background_color_hex: "#ff0000" },
+      "k-label",
+    );
+    assert.equal(label.label_name, "bug");
+    await assert.rejects(
+      client.createLabel(91, { name: "Bug" }, "k-label-dup"),
+      (err) => err instanceof ConflictError && err.code === "conflict",
+    );
+
+    const story = await client.createStory(91, { name: "s", current_state: "accepted" }, "k-story");
+    assert.equal(typeof story.story_id, "number");
+    assert.equal(story.current_state, "accepted");
+
+    const task = await client.createTask(
+      91,
+      story.story_id,
+      { description: "t", complete: true },
+      "k-task",
+    );
+    assert.equal(task.task_desc, "t");
+
+    const comment = await client.createComment(91, story.story_id, "hello", "k-comment");
+    assert.equal(comment.comment_text, "hello");
+  } finally {
+    await mock.close();
+  }
+});
