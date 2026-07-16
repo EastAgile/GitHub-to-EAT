@@ -29,7 +29,31 @@ test("parseRepo splits owner/name", () => {
   assert.deepEqual(parseRepo("octocat/hello-world"), ["octocat", "hello-world"]);
 });
 
-for (const bad of ["", "noslash", "a/b/c", "/name", "owner/"]) {
+for (const pasted of [
+  "https://github.com/octocat/hello-world",
+  "https://github.com/octocat/hello-world/",
+  "https://github.com/octocat/hello-world.git",
+  "http://github.com/octocat/hello-world",
+  "https://www.github.com/octocat/hello-world",
+  "github.com/octocat/hello-world",
+  "git@github.com:octocat/hello-world.git",
+  "git@github.com:octocat/hello-world",
+]) {
+  test(`parseRepo normalizes ${JSON.stringify(pasted)}`, () => {
+    assert.deepEqual(parseRepo(pasted), ["octocat", "hello-world"]);
+  });
+}
+
+for (const bad of [
+  "",
+  "noslash",
+  "a/b/c",
+  "/name",
+  "owner/",
+  "https://github.com/octocat",
+  "https://github.com/octocat/hello-world/issues/1",
+  "https://gitlab.com/octocat/hello-world",
+]) {
   test(`parseRepo rejects ${JSON.stringify(bad)}`, () => {
     assert.throws(() => parseRepo(bad));
   });

@@ -75,6 +75,9 @@ github-to-eat --project <project id> --repo <owner>/<name>
 
 # Example: import github.com/octocat/hello-world into project 147
 github-to-eat --project 147 --repo octocat/hello-world
+
+# A pasted GitHub URL (or git@github.com: SSH address) works too
+github-to-eat --project 147 --repo https://github.com/octocat/hello-world
 ```
 
 Example output:

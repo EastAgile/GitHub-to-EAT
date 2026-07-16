@@ -30,6 +30,7 @@ options:
   -V, --version         show program's version number and exit
   --project ID          target East Agile Tracker project id
   --repo OWNER/NAME     public GitHub repository, e.g. octocat/hello-world
+                        (a pasted github.com URL or SSH address also works)
   --include TYPES       comma-separated types to import: ${Object.keys(MAPPINGS).join(",")} (default: issues)
   --dry-run             run preflight and show the plan without importing anything
   -y, --yes             skip the interactive confirmation prompt
@@ -55,15 +56,30 @@ async function defaultConfirm(question) {
 }
 
 /**
+ * A pasted github.com address for a repo root: an https/http URL (optional
+ * `www.`), a bare `github.com/owner/name`, or the `git@github.com:` SSH form,
+ * each with an optional `.git` suffix or trailing slash. Deeper paths
+ * (e.g. `/issues/1`) deliberately do not match.
+ */
+const GITHUB_ADDRESS =
+  /^(?:git@github\.com:|(?:https?:\/\/)?(?:www\.)?github\.com\/)([^/]+\/[^/]+?)(?:\.git)?\/?$/i;
+
+/**
  * Split an `owner/name` string into `[owner, name]`.
  *
- * Throws an `Error` if the value is not exactly two non-empty parts.
+ * Pasted github.com addresses (https/http URL, bare `github.com/...`, or
+ * `git@github.com:` SSH, with or without `.git`) are normalized to
+ * `owner/name` first, so `--repo https://github.com/octocat/hello-world`
+ * works as-is. Throws an `Error` if the value is not exactly two non-empty
+ * parts after normalization.
  *
  * @param {string} value
  * @returns {[string, string]}
  */
 export function parseRepo(value) {
-  const parts = value.trim().split("/");
+  const trimmed = value.trim();
+  const normalized = GITHUB_ADDRESS.exec(trimmed)?.[1] ?? trimmed;
+  const parts = normalized.split("/");
   if (parts.length !== 2 || !parts.every(Boolean)) {
     throw new Error(`invalid repository '${value}'; expected the form OWNER/NAME`);
   }
