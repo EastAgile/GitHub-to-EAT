@@ -1,19 +1,11 @@
 /**
- * The direct engine's default mapping profile: GitHub issue JSON in → EAT
- * write-op plan out. Pure functions, no HTTP — the contributor surface for
- * changing how issues become stories.
- *
- * Mirrors the server importer's issue mapping (agile-tracker
- * `services/import/github.rs` + `common.rs`) so both engines classify the same
- * repo identically: state mapping, label/title type inference, label color
- * normalization + contrast, and `- [ ]` checklist parsing all follow the
- * server's rules verbatim.
+ * The direct engine's default mapping profile: GitHub issue JSON in → EAT write-op plan out (pure, no HTTP).
+ * Mirrors the server importer's issue mapping (agile-tracker github.rs + common.rs) so both engines classify identically.
  */
 
 /**
- * The issues legend shown by the CLI. Lives here — next to the functions that
- * implement each line — and is re-exported through the MAPPINGS registry, so
- * the legend and the mapper can't drift apart.
+ * The issues legend shown by the CLI. Lives next to the functions that implement each line
+ * and is re-exported through the MAPPINGS registry, so legend and mapper can't drift apart.
  */
 export const ISSUES_LEGEND = [
   "open issue → story (unstarted); closed issue → story (accepted, keeps the closed date)",
@@ -22,10 +14,8 @@ export const ISSUES_LEGEND = [
 ];
 
 /**
- * Infer an EAT story type from a GitHub issue's labels + title.
- *
- * GitHub issues carry no native type; the conventional labels are a reliable
- * signal. Bug is checked first, so a row that matches both rules is a bug.
+ * GitHub issues carry no native type, so infer one from the conventional labels + the title.
+ * Bug is checked first: a row that matches both rules is a bug.
  *
  * @param {string[]} labels label names
  * @param {string} title
@@ -82,10 +72,8 @@ export function contrastTextColor(bg) {
 }
 
 /**
- * Parse GitHub-flavored checklist items (`- [ ]` / `- [x]`) out of an issue
- * body, in body order. A list marker (`-`, `*`, `+`) + a space + a checkbox,
- * then the item text; indentation is allowed (nested items flatten), blank
- * items are dropped. The checklist lines stay in the description verbatim.
+ * Parse GitHub-flavored checklist items (`- [ ]` / `- [x]`, also `*`/`+` markers) in body order.
+ * Nested items flatten, blank items are dropped; the lines stay in the description verbatim.
  *
  * @param {string} body
  * @returns {{ description: string, complete: boolean }[]}
@@ -110,10 +98,8 @@ function issueNumberFromUrl(issueUrl) {
 }
 
 /**
- * Render one comment's body with the `@user on <date>:` prefix. The public
- * EAT API carries no comment-author attribution (EAT-team ask pending), so
- * the author + date ride in the text; a deleted GitHub account renders as
- * `@ghost`, GitHub's own convention.
+ * The public EAT API has no comment-author attribution (EAT-team ask pending), so author + date
+ * ride in the text as `@login on <date>:`; a deleted GitHub account renders as `@ghost`.
  *
  * @param {{ user?: { login?: string } | null, created_at?: string | null, body?: string | null }} comment
  * @returns {string}
@@ -147,12 +133,8 @@ function commentText(comment) {
  */
 
 /**
- * Map a fetched repo ({@link import("./github.js").GitHubClient#fetchAll}'s
- * shape) to the write-op plan the direct writer executes.
- *
- * Comments join to their issue via `issue_url`, which also drops PR
- * conversation comments — the repo-wide comments endpoint includes them, but
- * their issue numbers point at PRs that are never mapped.
+ * Map a fetched repo ({@link import("./github.js").GitHubClient#fetchAll}'s shape) to the direct
+ * writer's plan. Joining comments by `issue_url` drops PR chatter — those numbers are unmapped PRs.
  *
  * @param {{ issues: any[], comments: any[], labels: any[] }} repo
  * @returns {{ labels: LabelOp[], stories: StoryOp[] }}
