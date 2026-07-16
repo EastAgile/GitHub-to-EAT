@@ -352,7 +352,8 @@ function routePost(state, path, body, idempotencyKey) {
 function createLabel(state, projectId, body) {
   if (!(projectId in state.projects)) return NOT_FOUND;
   const name = String(body.name ?? body.label_name ?? "").trim();
-  if (!name) return { status: 400, payload: { code: "validation_failed", error: "name is required" } };
+  if (!name)
+    return { status: 400, payload: { code: "validation_failed", error: "name is required" } };
   const label = {
     label_id: state.nextId++,
     label_name: name,
@@ -360,7 +361,8 @@ function createLabel(state, projectId, body) {
     background_color_hex: body.background_color_hex ?? null,
     text_color_hex: body.text_color_hex ?? null,
   };
-  (state.labels[projectId] ??= []).push(label);
+  state.labels[projectId] ??= [];
+  state.labels[projectId].push(label);
   return { status: 200, payload: label };
 }
 
@@ -373,9 +375,11 @@ function createLabel(state, projectId, body) {
 function createStory(state, projectId, body) {
   if (!(projectId in state.projects)) return NOT_FOUND;
   const name = String(body.name ?? "").trim();
-  if (!name) return { status: 400, payload: { code: "validation_failed", error: "name is required" } };
+  if (!name)
+    return { status: 400, payload: { code: "validation_failed", error: "name is required" } };
 
-  const projectLabels = (state.labels[projectId] ??= []);
+  state.labels[projectId] ??= [];
+  const projectLabels = state.labels[projectId];
   const labels = [];
   for (const input of body.labels ?? []) {
     const labelName = String(typeof input === "string" ? input : (input?.name ?? "")).trim();
@@ -411,7 +415,8 @@ function createStory(state, projectId, body) {
     created: now,
     updated_at: now,
   };
-  (state.stories[projectId] ??= []).push(story);
+  state.stories[projectId] ??= [];
+  state.stories[projectId].push(story);
   return { status: 200, payload: story };
 }
 

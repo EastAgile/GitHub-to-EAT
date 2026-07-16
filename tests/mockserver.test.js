@@ -170,7 +170,10 @@ test("POST stories creates a story, attaching labels by name", async () => {
   const mock = await startMockServer();
   try {
     const label = await (
-      await post(mock.baseUrl, "/projects/91/labels", { name: "bug", background_color_hex: "#ff0000" })
+      await post(mock.baseUrl, "/projects/91/labels", {
+        name: "bug",
+        background_color_hex: "#ff0000",
+      })
     ).json();
     const response = await post(mock.baseUrl, "/projects/91/stories", {
       name: "Crash on save",
