@@ -141,6 +141,36 @@ and raises the ceiling to 5000/h (and reaches private repos). Error mapping:
 404 → repo-not-found; 403 with `x-ratelimit-remaining: 0` → rate-limit
 (message carries the `x-ratelimit-reset` time); 401 → token rejected.
 
+### Default mapping profile (issues → stories)
+
+The direct engine maps fetched GitHub JSON to an EAT write-op plan client-side
+(`src/mapping.js` — pure functions, no HTTP), mirroring the server importer's
+issue mapping so both engines classify the same repo identically:
+
+- **State** — open issue → `unstarted` story; closed → `accepted`, keeping the
+  GitHub closed date (`completed_at`).
+- **Type inference** (labels + title, bug checked first) — a label containing
+  `bug`/`fix`/`defect`, or a title starting with `fix`/`bug` → `bug`; a label
+  containing `chore`/`maintenance`/`devops`/`infra` → `chore`; else `feature`.
+- **Labels** — names trimmed (blank dropped); colors normalized to lowercase
+  `#rrggbb` (anything else dropped, never an error) with a
+  perceptual-luminance text color (black on light, white on dark). The issue
+  payload's own color wins; the repo label list fills gaps. Only labels on
+  mapped issues are created.
+- **Checklists** — `- [ ]` / `- [x]` items (also `*`/`+` markers, indentation
+  allowed) become story tasks; the lines stay in the description verbatim.
+- **Comments** — joined to their issue by `issue_url`, which also drops PR
+  conversation comments (the repo-wide comments endpoint includes them; their
+  issue numbers point at PRs that are never mapped). The public EAT API has
+  no comment-author attribution, so each body is prefixed
+  `@<login> on <YYYY-MM-DD>:` (deleted accounts render as `@ghost`).
+- **Identity** — `external_id` is the issue number as a string; rows carrying
+  a `pull_request` key are dropped (v3 is issues-only).
+
+The CLI legend's `issues` lines render from this module's own table
+(re-exported through the `MAPPINGS` registry), so legend and mapper cannot
+drift; the server engine's legend output stays byte-identical.
+
 ### Server-side dependencies (EAT [V3] use cases)
 
 The direct engine's writes rely on the EAT API surface the writer stage
