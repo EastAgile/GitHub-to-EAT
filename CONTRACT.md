@@ -40,9 +40,12 @@ truth for what the tool does and what it depends on from the East Agile Tracker
    - **Private repos / no platform PAT** — the CLI may include an optional
      `"token"` (a GitHub PAT) via `--token` / `GITHUB_TOKEN`; the server uses it
      instead of the platform PAT.
-   - Sent with an `Idempotency-Key`. The server does **not** process it today
-     (verified 2026-07-06); it is advisory. Retried runs are still safe
-     because of re-import dedup (below).
+   - Sent with an `Idempotency-Key`, which the server now processes on every
+     `POST` — import included (openapi 2026-07-14, verified 2026-07-16;
+     supersedes the 2026-07-06 note that it was advisory): same key + same
+     body replays the stored response; same key + different body is a
+     `409 idempotency_conflict` carrying both body hashes. Retried runs with
+     fresh keys are still safe because of re-import dedup (below).
    - **Re-import dedup** — imported rows persist their provenance
      (`story.import_source` + `story.import_external_id`); a re-run skips
      rows whose `(project, source, external_id)` already exist and counts
@@ -171,9 +174,58 @@ The CLI legend's `issues` lines render from this module's own table
 (re-exported through the `MAPPINGS` registry), so legend and mapper cannot
 drift; the server engine's legend output stays byte-identical.
 
-### Server-side dependencies (EAT [V3] use cases)
+### Write surface (direct engine)
 
-The direct engine's writes rely on the EAT API surface the writer stage
-targets (labels, stories, tasks, comments) and marker-based dedup; those
-endpoints and shapes are pinned by the v3 writer and dedup stories, not this
-plumbing story.
+The writer stage targets this EAT API surface, all under
+`/projects/{id}`, one `Idempotency-Key` per write (shapes probed against the
+real server 2026-07-16 and mirrored by `src/mockserver.js`):
+
+- **`POST /labels`** — body `{ "name": "...", "background_color_hex": "#rrggbb",
+  "text_color_hex": "#rrggbb" }` (colors optional) → 200
+  `{ label_id, label_name, project_id, background_color_hex, text_color_hex }`.
+- **`POST /stories`** — body requires `name` (the read-side field is `title`);
+  optional `description`, `story_type`, `current_state`, `icebox`, and
+  `labels` as bare strings or `{ "name": "..." }` objects — the server
+  attaches by name, get-or-creating, and embeds the full label objects in the
+  response. `current_state: "accepted"` is accepted at create time for an
+  unestimated feature (verified 2026-07-16) — no estimate guard, so no
+  create-then-transition fallback is needed. 200 → the full story object
+  (`story_id`, `title`, `current_state`, `labels`, …).
+- **`POST /stories/{id}/tasks`** — body `{ "description": "...",
+  "complete": bool }` → 200 `{ task_id, story_id, task_desc, complete,
+  task_order, created }`.
+- **`POST /stories/{id}/comments`** — body `{ "text": "..." }` → 200
+  `{ comment_id, story_comment_id, story_id, comment_text, created }`.
+- **Idempotency** — every `POST` replays on same key + same body and returns
+  `409 idempotency_conflict` on same key + different body (see the v1
+  import note; the layer is global, not per-endpoint).
+
+### Marker dedup (direct engine)
+
+Server-side provenance (`import_source` / `import_external_id`) is not
+exposed by the public API, so the direct engine's re-run safety is
+marker-based:
+
+- Every story it writes ends its description with a stable marker line:
+  `Imported from https://github.com/{owner}/{repo}/issues/{n}`.
+- Before writing, it prescans the target project —
+  `GET /stories?limit=…&cursor=…&fields=story_id,description` (cursor mode
+  whenever `cursor=` or `limit=` is present; `fields=` is a sparse-fieldset
+  allowlist, unknown values → `400 validation_failed`, `story_id` always
+  included) — and skips items whose marker already exists, reported as
+  `skipped N (already imported)`, the server engine's wording.
+
+### Fidelity limitations (direct engine)
+
+- **Timestamps** — `POST /stories` accepts no `created_at` / `completed_at`,
+  so GitHub's creation and close dates cannot be preserved; `created` is the
+  import time. The mapping profile still carries both in its plan for when
+  the API grows the fields.
+- **Comment authorship** — the API has no comment-author attribution;
+  comments are authored by the importing key, with the GitHub author and
+  date riding in the body prefix (`@login on YYYY-MM-DD:`).
+- **No provenance interop** — marker dedup cannot see rows imported by the
+  server engine (which stores provenance internally), and the server engine
+  cannot see markers. Mixing engines against one project can duplicate
+  stories; keep a project on one engine until the EAT-team ask to expose
+  provenance lands.
