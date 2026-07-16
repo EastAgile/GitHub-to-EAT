@@ -12,9 +12,8 @@
  *     POST /projects/{id}/stories/{id}/tasks
  *     POST /projects/{id}/stories/{id}/comments
  *
- * Every POST honours Idempotency-Key the way the real server does (verified
- * 2026-07-16): same key + same body replays the stored response; same key +
- * different body is a 409 idempotency_conflict.
+ * Every POST honours Idempotency-Key like the real server (verified 2026-07-16):
+ * same key + same body replays; same key + different body → 409 idempotency_conflict.
  *
  * Use in tests:
  *
@@ -42,7 +41,7 @@ import { parseArgs } from "node:util";
  * @typedef {object} MockState
  * @property {Record<number, any>} projects
  * @property {Record<number, any[]>} stories
- * @property {Record<number, any[]>} labels labels created per project
+ * @property {Record<number, any[]>} labels
  * @property {any} meta
  * @property {any} importResult
  * @property {{ issues: number, prs: number, milestones: number, releases: number,
@@ -267,7 +266,7 @@ async function handle(state, req, res) {
         });
         return;
       }
-      // Cursor mode when ?limit/?cursor is present; a bare (projected) array otherwise.
+      // With ?limit/?cursor EAT returns a cursor page; a bare array otherwise.
       if (limitParam !== null || cursorParam !== null) {
         const offset = Number(cursorParam ?? 0);
         const limit = limitParam !== null ? Number(limitParam) : 50;
@@ -351,9 +350,8 @@ function toStoryPayload(row) {
 }
 
 /**
- * Dispatch a parsed POST to its endpoint handler. Runs only for requests the
- * idempotency layer did not short-circuit, so handlers always execute at most
- * once per key.
+ * Runs only for POSTs the idempotency layer did not short-circuit, so handlers
+ * execute at most once per key.
  *
  * @param {MockState} state
  * @param {string} path
