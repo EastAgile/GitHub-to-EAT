@@ -97,3 +97,35 @@ These shapes are mirrored by the bundled mock server (`src/mockserver.js`).
   `GET /projects/{id}/imports/{import_id}` for progress.
 - **Private repos** — a GitHub App authorization flow so users can import their
   own private repositories.
+
+## v3 — the direct engine
+
+v3 adds a second import engine selectable with `--engine server|direct`
+(default `server`).
+
+- **`server`** (default) — today's behavior, byte-identical: one
+  `POST /projects/{id}/import/json` call; EAT does the GitHub fetch, mapping,
+  and writes. Selecting `server` (or omitting `--engine`) changes nothing —
+  same flags, exit codes, and output.
+- **`direct`** — the CLI runs the pipeline client-side: fetch the repo from
+  GitHub, map issues to EAT story shapes, and write them through the EAT API.
+  The active engine is named in the legend header (`… [engine: direct]`); the
+  `server` header is unchanged.
+
+### v3 scope
+
+- **Issues only.** `--engine direct` composes with `--include`, but v3 supports
+  `issues` only; `prs`, `milestones`, and `releases` exit with a usage error
+  ("not supported by the direct engine yet") — those land in v4.
+- **Staged build.** This epic ships across several stories. The `--engine` flag
+  and the engine dispatch are the plumbing; the fetch → map → write stages and
+  the direct engine's own dedup and local dry-run are filled in by the
+  following v3 stories. Until a stage exists, `--engine direct` reports that the
+  engine is not implemented yet rather than importing nothing.
+
+### Server-side dependencies (EAT [V3] use cases)
+
+The direct engine's writes rely on the EAT API surface the writer stage
+targets (labels, stories, tasks, comments) and marker-based dedup; those
+endpoints and shapes are pinned by the v3 writer and dedup stories, not this
+plumbing story.
