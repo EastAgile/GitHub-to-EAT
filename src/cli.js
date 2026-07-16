@@ -11,6 +11,8 @@ import { parseArgs } from "node:util";
 
 import { EATClient, EATError, EATTimeout } from "./client.js";
 import { ConfigError, loadConfig } from "./config.js";
+import { DirectEngineError, runDirect as defaultRunDirect } from "./direct.js";
+import { assertDirectSupportsIncludes, DEFAULT_ENGINE, ENGINES, parseEngine } from "./engine.js";
 import { runImport as defaultRunImport } from "./importer.js";
 import { MAPPINGS, parseInclude, renderLegend, requestFlags } from "./mappings.js";
 import { preflight as defaultPreflight } from "./preflight.js";
@@ -19,7 +21,7 @@ import { VERSION } from "./version.js";
 
 const USAGE =
   "usage: github-to-eat [-h] [-V] --project ID --repo OWNER/NAME " +
-  "[--include TYPES] [--dry-run] [-y] [--token GITHUB_TOKEN]";
+  "[--include TYPES] [--engine NAME] [--dry-run] [-y] [--token GITHUB_TOKEN]";
 
 const HELP = `${USAGE}
 
@@ -31,6 +33,7 @@ options:
   --project ID          target East Agile Tracker project id
   --repo OWNER/NAME     public GitHub repository, e.g. octocat/hello-world
   --include TYPES       comma-separated types to import: ${Object.keys(MAPPINGS).join(",")} (default: issues)
+  --engine NAME         import engine: ${ENGINES.join("|")} (default: ${DEFAULT_ENGINE})
   --dry-run             run preflight and show the plan without importing anything
   -y, --yes             skip the interactive confirmation prompt
   --token GITHUB_TOKEN  GitHub token for a private repo (or set GITHUB_TOKEN); public repos need none
@@ -71,6 +74,33 @@ export function parseRepo(value) {
 }
 
 /**
+ * Write the import result and board link; return the process exit code (1 when
+ * the server reported per-item errors, else 0). Shared by both engines so their
+ * output convention is identical.
+ *
+ * @param {import("./importer.js").ImportOutcome} outcome
+ * @param {{ stdout: import("./progress.js").OutStream,
+ *   stderr: import("./progress.js").OutStream, project: number, appBase: string }} ctx
+ * @returns {number}
+ */
+function reportImport(outcome, { stdout, stderr, project, appBase }) {
+  const skippedNote = outcome.skipped ? " (already imported)" : "";
+  stdout.write(
+    `Imported ${outcome.importedStories} stories (${outcome.importedLabels} labels), ` +
+      `skipped ${outcome.skipped}${skippedNote}, ${outcome.errors.length} error(s).\n`,
+  );
+  const unmatchedTotal = Object.values(outcome.unmatched).reduce((n, v) => n + v.length, 0);
+  if (unmatchedTotal) {
+    stdout.write(`note: ${unmatchedTotal} GitHub user(s) could not be matched to members.\n`);
+  }
+  stdout.write(`Board: ${appBase}/projects/${project}\n`);
+  for (const err of outcome.errors) {
+    stderr.write(`  - ${err}\n`);
+  }
+  return outcome.errors.length ? 1 : 0;
+}
+
+/**
  * Injectable seams and streams for tests; production callers pass nothing.
  *
  * @typedef {object} MainDeps
@@ -78,6 +108,7 @@ export function parseRepo(value) {
  * @property {import("./progress.js").OutStream} [stderr]
  * @property {typeof defaultPreflight} [preflight]
  * @property {typeof defaultRunImport} [runImport]
+ * @property {typeof defaultRunDirect} [runDirect]
  * @property {((question: string) => Promise<boolean>) | null} [confirm] yes/no
  *   prompt; defaults to a terminal prompt when stdin is a TTY, else null
  *   (no prompt — scripts keep running unattended)
@@ -99,6 +130,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     stderr = process.stderr,
     preflight = defaultPreflight,
     runImport = defaultRunImport,
+    runDirect = defaultRunDirect,
     confirm = process.stdin.isTTY ? defaultConfirm : null,
   } = deps;
 
@@ -118,6 +150,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
         project: { type: "string" },
         repo: { type: "string" },
         include: { type: "string" },
+        engine: { type: "string" },
         "dry-run": { type: "boolean" },
         yes: { type: "boolean", short: "y" },
         token: { type: "string" },
@@ -167,6 +200,14 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
   }
   const flags = requestFlags(included);
 
+  let engine;
+  try {
+    engine = parseEngine(values.engine ?? DEFAULT_ENGINE);
+    if (engine === "direct") assertDirectSupportsIncludes(included);
+  } catch (err) {
+    return usageError(`argument --engine: ${err instanceof Error ? err.message : err}`);
+  }
+
   let config;
   try {
     config = loadConfig();
@@ -197,7 +238,31 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     );
   }
 
-  stdout.write(`${renderLegend(included)}\n`);
+  stdout.write(`${renderLegend(included, engine)}\n`);
+
+  if (engine === "direct") {
+    const token = values.token || process.env.GITHUB_TOKEN || undefined;
+    let outcome;
+    try {
+      outcome = await runWithProgress(
+        () =>
+          runDirect(client, project, owner, repo, {
+            token,
+            included,
+            dryRun: values["dry-run"],
+          }),
+        "running the direct import pipeline",
+        { stream: stderr },
+      );
+    } catch (err) {
+      if (err instanceof DirectEngineError || err instanceof EATError) {
+        stderr.write(`error: ${err.message}\n`);
+        return 1;
+      }
+      throw err;
+    }
+    return reportImport(outcome, { stdout, stderr, project, appBase: config.appBase });
+  }
 
   if (values["dry-run"]) {
     // Server-side dry_run is feature-detected first: sending the flag to a
@@ -289,18 +354,5 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     throw err;
   }
 
-  const skippedNote = outcome.skipped ? " (already imported)" : "";
-  stdout.write(
-    `Imported ${outcome.importedStories} stories (${outcome.importedLabels} labels), ` +
-      `skipped ${outcome.skipped}${skippedNote}, ${outcome.errors.length} error(s).\n`,
-  );
-  const unmatchedTotal = Object.values(outcome.unmatched).reduce((n, v) => n + v.length, 0);
-  if (unmatchedTotal) {
-    stdout.write(`note: ${unmatchedTotal} GitHub user(s) could not be matched to members.\n`);
-  }
-  stdout.write(`Board: ${config.appBase}/projects/${project}\n`);
-  for (const err of outcome.errors) {
-    stderr.write(`  - ${err}\n`);
-  }
-  return outcome.errors.length ? 1 : 0;
+  return reportImport(outcome, { stdout, stderr, project, appBase: config.appBase });
 }

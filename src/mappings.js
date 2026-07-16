@@ -81,13 +81,17 @@ export function parseInclude(value) {
  * Render the GitHub → EAT mapping legend for a selection ("show the mirror").
  *
  * One block per selected type, straight from the registry, ending with the
- * append + dedup behaviour so users know a run never replaces or updates.
+ * append + dedup behaviour so users know a run never replaces or updates. The
+ * header names the active engine only when it isn't the default `server`, so
+ * the default output stays byte-identical.
  *
  * @param {string[]} selected types from {@link parseInclude}
+ * @param {import("./engine.js").Engine} [engine] active import engine
  * @returns {string} multi-line legend text (no trailing newline)
  */
-export function renderLegend(selected) {
-  const lines = ["Import mapping (GitHub → East Agile Tracker):"];
+export function renderLegend(selected, engine = "server") {
+  const engineTag = engine === "server" ? "" : ` [engine: ${engine}]`;
+  const lines = [`Import mapping (GitHub → East Agile Tracker)${engineTag}:`];
   for (const type of selected) {
     lines.push(`  ${type}:`);
     for (const row of MAPPINGS[type].legend) {
