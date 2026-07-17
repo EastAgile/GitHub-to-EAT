@@ -294,7 +294,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
       });
     } catch (err) {
       if (err instanceof EATError || err instanceof GitHubError) {
-        stderr.write(`error: ${err.message}\n`);
+        stderr.write(`error: ${values["dry-run"] ? "dry run failed: " : ""}${err.message}\n`);
         return 1;
       }
       throw err;

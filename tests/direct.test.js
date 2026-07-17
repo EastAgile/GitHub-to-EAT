@@ -100,6 +100,7 @@ test("dry-run computes the plan locally and writes nothing", async () => {
     assert.equal(plan.dryRun, true);
     assert.deepEqual(plan.errors, []);
     assert.equal((mock.state.stories[91] ?? []).length, 0);
+    assert.equal((mock.state.labels[91] ?? []).length, 0);
 
     // After a real import, a dry-run re-run reports everything as would-skip.
     await runDirect(client, 91, "o", "r", options);

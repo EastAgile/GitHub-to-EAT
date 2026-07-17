@@ -361,6 +361,7 @@ test("--engine direct with --dry-run renders the same plan block as the server p
       const out = capture();
       /** @type {boolean[]} */
       const dryRuns = [];
+      const asked = [];
       const code = await main(
         ["--project", "91", "--repo", "o/r", "--engine", "direct", "--dry-run"],
         {
@@ -371,10 +372,15 @@ test("--engine direct with --dry-run renders the same plan block as the server p
             dryRuns.push(opts.dryRun ?? false);
             return outcome({ importedStories: 2, importedLabels: 1, skipped: 1, dryRun: true });
           },
+          confirm: async () => {
+            asked.push(1);
+            return false;
+          },
         },
       );
       assert.equal(code, 0);
       assert.deepEqual(dryRuns, [true]);
+      assert.equal(asked.length, 0);
       assert.ok(out.buf.includes("Dry run plan for o/r into project 91 (Demo):"));
       assert.ok(
         out.buf.includes("would import 2 stories (1 labels), would skip 1 (already imported)"),
