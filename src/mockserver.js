@@ -51,6 +51,10 @@ import { parseArgs } from "node:util";
  * @property {boolean} serverDryRun when true (default), GET /openapi.json
  *   advertises the import dry_run field and dry_run requests are honoured;
  *   false simulates an older server (openapi 404s)
+ * @property {{ name?: number, description?: number, task_desc?: number,
+ *   comment_text?: number }} maxLengths per-field write limits — when set,
+ *   over-long values are rejected `400 too_long` and the limits are published
+ *   as `maxLength` in /openapi.json (default: none, like today's real server)
  * @property {Array<{ project_id: number, body: any, idempotency_key: string | null }>} imports
  * @property {Record<string, { bodyHash: string, status: number, payload: any }>} idempotency
  *   stored first responses per Idempotency-Key — drives replay/409
@@ -73,6 +77,7 @@ export function makeState(overrides = {}) {
     fixture: { issues: 3, prs: 2, milestones: 1, releases: 1, labels: 0 },
     importedIds: {},
     serverDryRun: true,
+    maxLengths: {},
     imports: [],
     idempotency: {},
     nextId: 1,
@@ -105,22 +110,84 @@ const STORY_FIELDS = new Set([
   "blockers",
 ]);
 
-/** The minimal OpenAPI slice the client's dry-run feature detection reads. */
-const OPENAPI_SLICE = {
-  paths: {
-    "/api/v1/projects/{project_id}/import/json": {
-      post: {
-        requestBody: {
-          content: {
-            "application/json": {
-              schema: { properties: { dry_run: { type: ["boolean", "null"] } } },
+/**
+ * The minimal OpenAPI slice the client's feature detections read: the import
+ * dry_run field, plus the write paths with `maxLength` only where configured
+ * (today's real server publishes the paths but no limits).
+ *
+ * @param {MockState} state
+ */
+function openapiDoc(state) {
+  const ml = state.maxLengths ?? {};
+  /** @param {Record<string, number | undefined>} fields */
+  const post = (fields) => ({
+    post: {
+      requestBody: {
+        content: {
+          "application/json": {
+            schema: {
+              properties: Object.fromEntries(
+                Object.entries(fields).map(([name, max]) => [
+                  name,
+                  max ? { type: "string", maxLength: max } : { type: "string" },
+                ]),
+              ),
             },
           },
         },
       },
     },
-  },
-};
+  });
+  return {
+    paths: {
+      "/api/v1/projects/{project_id}/import/json": {
+        post: {
+          requestBody: {
+            content: {
+              "application/json": {
+                schema: { properties: { dry_run: { type: ["boolean", "null"] } } },
+              },
+            },
+          },
+        },
+      },
+      "/api/v1/projects/{project_id}/stories": post({
+        name: ml.name,
+        description: ml.description,
+      }),
+      "/api/v1/projects/{project_id}/stories/{story_id}/tasks": post({
+        description: ml.task_desc,
+        task_desc: ml.task_desc,
+      }),
+      "/api/v1/projects/{project_id}/stories/{story_id}/comments": post({
+        text: ml.comment_text,
+        comment_text: ml.comment_text,
+      }),
+    },
+  };
+}
+
+/**
+ * The real server's `too_long` rejection (observed 2026-07-17), or null when
+ * the value fits (or no limit is configured).
+ *
+ * @param {MockState} state
+ * @param {"name" | "description" | "task_desc" | "comment_text"} field
+ * @param {string} value
+ * @returns {MockResponse | null}
+ */
+function tooLong(state, field, value) {
+  const max = (state.maxLengths ?? {})[field];
+  if (!max || value.length <= max) return null;
+  return {
+    status: 400,
+    payload: {
+      code: "invalid_parameter",
+      details: { constraint: "too_long", fields: [field] },
+      error: "This value is too long.",
+    },
+  };
+}
 
 /**
  * Compute an import result from the fixture and the request body's flags,
@@ -200,7 +267,7 @@ async function handle(state, req, res) {
     }
 
     if (path === "/openapi.json") {
-      if (state.serverDryRun) send(res, 200, OPENAPI_SLICE);
+      if (state.serverDryRun) send(res, 200, openapiDoc(state));
       else send(res, 404, { error: "not found" });
       return;
     }
@@ -455,6 +522,9 @@ function createStory(state, projectId, body) {
       },
     };
   }
+  const overLong =
+    tooLong(state, "name", name) ?? tooLong(state, "description", String(body.description ?? ""));
+  if (overLong) return overLong;
 
   if (body.labels != null && !Array.isArray(body.labels)) {
     return {
@@ -536,6 +606,8 @@ function createTask(state, projectId, storyId, body) {
   if (!description.trim()) {
     return { status: 400, payload: { code: "invalid_parameter", error: "task_desc is required" } };
   }
+  const overLong = tooLong(state, "task_desc", description);
+  if (overLong) return overLong;
   const task = {
     task_id: state.nextId++,
     story_id: storyId,
@@ -567,6 +639,8 @@ function createComment(state, projectId, storyId, body) {
       payload: { code: "invalid_parameter", error: "comment must have text or emoji" },
     };
   }
+  const overLong = tooLong(state, "comment_text", text);
+  if (overLong) return overLong;
   // The real server returns the same value for both ids (probed 2026-07-16).
   const id = state.nextId++;
   const comment = {

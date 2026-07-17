@@ -3,9 +3,9 @@
  * instead of on the EAT server. The local dry-run stage is still pending — `--dry-run` rejects.
  */
 
-import { applyDedup, prescanImported } from "./dedup.js";
+import { applyDedup, markerFor, prescanImported } from "./dedup.js";
 import { GitHubClient } from "./github.js";
-import { mapRepo } from "./mapping.js";
+import { clampPlan, FALLBACK_LIMITS, mapRepo } from "./mapping.js";
 import { runWithProgress } from "./progress.js";
 import { writePlan } from "./writer.js";
 
@@ -17,7 +17,8 @@ export class DirectEngineError extends Error {}
  * prescan page reader (structural, so tests can pass stubs).
  *
  * @typedef {import("./writer.js").WriterClient
- *   & import("./dedup.js").PrescanClient} DirectClient
+ *   & import("./dedup.js").PrescanClient
+ *   & { fieldLimits?: () => Promise<Partial<import("./mapping.js").FieldLimits>> }} DirectClient
  */
 
 /**
@@ -49,7 +50,13 @@ export async function runDirect(client, projectId, owner, repo, options) {
     `fetching ${owner}/${repo} from GitHub`,
     { stream },
   );
-  const mapped = mapRepo(fetched);
+  // Clamp before the marker lands so the description budget can reserve room
+  // for it — one giant GitHub comment must not 400 the whole run.
+  const limits = { ...FALLBACK_LIMITS, ...(await (client.fieldLimits?.() ?? {})) };
+  const mapped = clampPlan(mapRepo(fetched), limits, {
+    reserveDescription: (op) => markerFor(owner, repo, op.external_id).length + 2,
+    warn: (message) => stream?.write(message),
+  });
 
   const imported = await runWithProgress(
     () => prescanImported(client, projectId, owner, repo),

@@ -537,3 +537,37 @@ test("import honors Idempotency-Key replay and conflict", async () => {
     await mock.close();
   }
 });
+
+test("comment_text over the configured maxLength returns 400 too_long", async () => {
+  const mock = await startMockServer(makeState({ maxLengths: { comment_text: 50 } }));
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const story = await client.createStory(91, { name: "s" }, "k-story");
+    await assert.rejects(
+      client.createComment(91, story.story_id, "x".repeat(51), "k-long"),
+      (err) => {
+        assert.match(String(err), /too_long/);
+        return true;
+      },
+    );
+    const ok = await client.createComment(91, story.story_id, "y".repeat(50), "k-fits");
+    assert.equal(ok.comment_text.length, 50);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("story name and task_desc over their maxLength are rejected too_long", async () => {
+  const mock = await startMockServer(makeState({ maxLengths: { name: 10, task_desc: 10 } }));
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await assert.rejects(client.createStory(91, { name: "n".repeat(11) }, "k-n"), /too_long/);
+    const story = await client.createStory(91, { name: "short" }, "k-s");
+    await assert.rejects(
+      client.createTask(91, story.story_id, { description: "t".repeat(11) }, "k-t"),
+      /too_long/,
+    );
+  } finally {
+    await mock.close();
+  }
+});

@@ -204,3 +204,84 @@ export function mapRepo({ issues, comments, labels }) {
 
   return { labels: [...labelOps.values()], stories };
 }
+
+/**
+ * @typedef {object} FieldLimits max chars per write field
+ * @property {number} storyName
+ * @property {number} storyDescription
+ * @property {number} taskDescription
+ * @property {number} commentText
+ */
+
+/**
+ * Applied when the server's openapi.json publishes no `maxLength` (today's
+ * servers publish none). Text limits sit between the longest comment a real
+ * server accepted (13,101 chars) and one it rejected `too_long` (46,411).
+ *
+ * @type {FieldLimits}
+ */
+export const FALLBACK_LIMITS = {
+  storyName: 255,
+  storyDescription: 16_000,
+  taskDescription: 16_000,
+  commentText: 16_000,
+};
+
+export const TRUNCATION_NOTICE =
+  "[truncated by github-to-eat: the full text exceeds the server's length limit]";
+
+/**
+ * @param {string} text
+ * @param {number} limit
+ * @returns {string} within `limit`, ending with {@link TRUNCATION_NOTICE} when cut
+ */
+function clampBlock(text, limit) {
+  if (text.length <= limit) return text;
+  const room = limit - TRUNCATION_NOTICE.length - 2;
+  if (room <= 0) return text.slice(0, Math.max(0, limit));
+  return `${text.slice(0, room)}\n\n${TRUNCATION_NOTICE}`;
+}
+
+/**
+ * Cut every plan text field down to the server's limits so one giant GitHub
+ * comment cannot 400 the whole run. Returns a new plan; the input is untouched.
+ *
+ * @param {{ labels: LabelOp[], stories: StoryOp[] }} plan
+ * @param {FieldLimits} limits
+ * @param {{ reserveDescription?: (op: StoryOp) => number,
+ *   warn?: (message: string) => void }} [options] `reserveDescription` holds
+ *   back room per story for text appended later (the dedup marker)
+ * @returns {{ labels: LabelOp[], stories: StoryOp[] }}
+ */
+export function clampPlan(plan, limits, { reserveDescription = () => 0, warn = () => {} } = {}) {
+  const stories = plan.stories.map((op) => {
+    const out = { ...op };
+    /** @param {string} field @param {number} limit */
+    const notice = (field, limit) =>
+      warn(
+        `warning: issue #${op.external_id}: ${field} truncated to ${limit} chars (server limit)\n`,
+      );
+
+    if (out.name.length > limits.storyName) {
+      out.name = `${out.name.slice(0, limits.storyName - 1)}…`;
+      notice("name", limits.storyName);
+    }
+    const descriptionLimit = limits.storyDescription - reserveDescription(op);
+    if (out.description !== null && out.description.length > descriptionLimit) {
+      out.description = clampBlock(out.description, descriptionLimit);
+      notice("description", descriptionLimit);
+    }
+    out.tasks = op.tasks.map((task, i) => {
+      if (task.description.length <= limits.taskDescription) return task;
+      notice(`task ${i + 1}`, limits.taskDescription);
+      return { ...task, description: clampBlock(task.description, limits.taskDescription) };
+    });
+    out.comments = op.comments.map((comment, i) => {
+      if (comment.text.length <= limits.commentText) return comment;
+      notice(`comment ${i + 1}`, limits.commentText);
+      return { text: clampBlock(comment.text, limits.commentText) };
+    });
+    return out;
+  });
+  return { labels: plan.labels, stories };
+}

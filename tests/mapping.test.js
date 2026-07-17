@@ -2,12 +2,15 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  clampPlan,
   contrastTextColor,
+  FALLBACK_LIMITS,
   ISSUES_LEGEND,
   inferStoryType,
   mapRepo,
   normalizeHexColor,
   parseChecklist,
+  TRUNCATION_NOTICE,
 } from "../src/mapping.js";
 import { MAPPINGS } from "../src/mappings.js";
 
@@ -308,4 +311,82 @@ test("MAPPINGS issues legend is the mapping module's own table, byte-identical",
     "labels → labels (with colors); issue-body checklists → story tasks",
     "comments → comments (body only)",
   ]);
+});
+
+// --- clampPlan — server length limits -----------------------------------------
+
+/** @param {Partial<import("../src/mapping.js").StoryOp>} [overrides] */
+function storyOp(overrides = {}) {
+  return {
+    external_id: "7",
+    name: "t",
+    description: "",
+    story_type: /** @type {const} */ ("feature"),
+    current_state: /** @type {const} */ ("unstarted"),
+    created_at: "2024-01-01T00:00:00Z",
+    completed_at: null,
+    labels: [],
+    tasks: [],
+    comments: [],
+    ...overrides,
+  };
+}
+
+test("clampPlan truncates an over-long comment to fit the limit, notice included", () => {
+  /** @type {string[]} */
+  const warnings = [];
+  const op = storyOp({ comments: [{ text: "x".repeat(500) }] });
+  const { stories } = clampPlan(
+    { labels: [], stories: [op] },
+    { ...FALLBACK_LIMITS, commentText: 200 },
+    { warn: (m) => warnings.push(m) },
+  );
+  const text = stories[0].comments[0].text;
+  assert.ok(text.length <= 200);
+  assert.ok(text.endsWith(TRUNCATION_NOTICE));
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /issue #7: comment 1/);
+  assert.equal(op.comments[0].text.length, 500); // the input plan is untouched
+});
+
+test("clampPlan reserves description room for the dedup marker", () => {
+  const op = storyOp({ description: "d".repeat(300) });
+  const { stories } = clampPlan(
+    { labels: [], stories: [op] },
+    { ...FALLBACK_LIMITS, storyDescription: 200 },
+    { reserveDescription: () => 50 },
+  );
+  assert.ok(stories[0].description !== null);
+  assert.ok(String(stories[0].description).length <= 150);
+  assert.ok(String(stories[0].description).endsWith(TRUNCATION_NOTICE));
+});
+
+test("clampPlan clamps name and task text, warning for each", () => {
+  /** @type {string[]} */
+  const warnings = [];
+  const op = storyOp({
+    name: "n".repeat(300),
+    tasks: [{ description: "t".repeat(300), complete: false }],
+  });
+  const { stories } = clampPlan(
+    { labels: [], stories: [op] },
+    { ...FALLBACK_LIMITS, storyName: 255, taskDescription: 200 },
+    { warn: (m) => warnings.push(m) },
+  );
+  assert.equal(stories[0].name.length, 255);
+  assert.ok(stories[0].tasks[0].description.length <= 200);
+  assert.equal(warnings.length, 2);
+  assert.match(warnings[0], /issue #7: name/);
+  assert.match(warnings[1], /issue #7: task 1/);
+});
+
+test("clampPlan leaves under-limit text untouched and silent", () => {
+  const op = storyOp({ name: "short", description: "fine", comments: [{ text: "ok" }] });
+  /** @type {string[]} */
+  const warnings = [];
+  const { stories } = clampPlan({ labels: [], stories: [op] }, FALLBACK_LIMITS, {
+    warn: (m) => warnings.push(m),
+  });
+  assert.deepEqual(stories[0], op);
+  assert.equal(warnings.length, 0);
 });

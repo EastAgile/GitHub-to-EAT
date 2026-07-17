@@ -144,6 +144,57 @@ export class EATClient {
     return items.length > 0;
   }
 
+  /** @type {any} the parsed /openapi.json, null when unavailable, undefined until fetched */
+  #spec;
+
+  /**
+   * Fetch and cache `GET /openapi.json`; any error (404, auth, parse) caches
+   * null — feature detections must degrade, not fail the run.
+   *
+   * @returns {Promise<any>}
+   */
+  async #openapi() {
+    if (this.#spec === undefined) {
+      try {
+        this.#spec = await (await this.#request("GET", "/openapi.json")).json();
+      } catch {
+        this.#spec = null;
+      }
+    }
+    return this.#spec;
+  }
+
+  /**
+   * Resolve `$ref` nodes against a spec document.
+   *
+   * @param {any} spec
+   * @param {any} node
+   */
+  static #deref(spec, node) {
+    while (node && typeof node === "object" && "$ref" in node) {
+      node = String(node.$ref)
+        .split("/")
+        .slice(1)
+        .reduce((acc, part) => acc?.[part], spec);
+    }
+    return node;
+  }
+
+  /**
+   * The request-body properties of a path item's POST, `$ref`s resolved.
+   *
+   * @param {any} spec
+   * @param {any} ops
+   * @returns {Record<string, any>}
+   */
+  static #postProperties(spec, ops) {
+    const schema = EATClient.#deref(
+      spec,
+      EATClient.#deref(spec, ops?.post?.requestBody)?.content?.["application/json"]?.schema,
+    );
+    return schema?.properties ?? {};
+  }
+
   /**
    * True when the server's import endpoint accepts a `dry_run` field.
    *
@@ -156,30 +207,53 @@ export class EATClient {
    * @returns {Promise<boolean>}
    */
   async supportsServerDryRun() {
-    let spec;
-    try {
-      spec = await (await this.#request("GET", "/openapi.json")).json();
-    } catch {
-      return false;
-    }
-    /** @param {any} node */
-    const resolve = (node) => {
-      while (node && typeof node === "object" && "$ref" in node) {
-        node = String(node.$ref)
-          .split("/")
-          .slice(1)
-          .reduce((acc, part) => acc?.[part], spec);
-      }
-      return node;
-    };
+    const spec = await this.#openapi();
     for (const [path, ops] of Object.entries(spec?.paths ?? {})) {
       if (!path.endsWith("/import/json")) continue;
-      const schema = resolve(
-        resolve(ops?.post?.requestBody)?.content?.["application/json"]?.schema,
-      );
-      if (schema?.properties && "dry_run" in schema.properties) return true;
+      if ("dry_run" in EATClient.#postProperties(spec, ops)) return true;
     }
     return false;
+  }
+
+  /**
+   * The write fields' `maxLength` limits from the published spec, when any.
+   *
+   * Aliased request fields (`text`/`comment_text`, `description`/`task_desc`)
+   * share server-side storage, so the smallest published alias limit wins.
+   * Absent fields are omitted — callers overlay these onto fallback defaults.
+   *
+   * @returns {Promise<Partial<import("./mapping.js").FieldLimits>>}
+   */
+  async fieldLimits() {
+    const spec = await this.#openapi();
+    /** @param {Record<string, any>} props @param {string[]} names */
+    const minLength = (props, names) => {
+      const values = names
+        .map((name) => props[name]?.maxLength)
+        .filter((v) => typeof v === "number" && v > 0);
+      return values.length ? Math.min(...values) : undefined;
+    };
+    /** @type {Partial<import("./mapping.js").FieldLimits>} */
+    const limits = {};
+    /** @param {"storyName" | "storyDescription" | "taskDescription" | "commentText"} key
+     * @param {number | undefined} value */
+    const set = (key, value) => {
+      if (value !== undefined && limits[key] === undefined) limits[key] = value;
+    };
+    for (const [path, ops] of Object.entries(spec?.paths ?? {})) {
+      const inStories = path.includes("/stories/");
+      if (!path.endsWith("/stories") && !inStories) continue;
+      const props = EATClient.#postProperties(spec, ops);
+      if (path.endsWith("/stories")) {
+        set("storyName", minLength(props, ["name"]));
+        set("storyDescription", minLength(props, ["description"]));
+      } else if (inStories && path.endsWith("/tasks")) {
+        set("taskDescription", minLength(props, ["description", "task_desc"]));
+      } else if (inStories && path.endsWith("/comments")) {
+        set("commentText", minLength(props, ["text", "comment_text"]));
+      }
+    }
+    return limits;
   }
 
   /**
