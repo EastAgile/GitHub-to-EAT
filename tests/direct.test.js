@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { AuthError, EATClient } from "../src/client.js";
 import { markerFor } from "../src/dedup.js";
 import { runDirect } from "../src/direct.js";
-import { startMockServer } from "../src/mockserver.js";
+import { makeState, startMockServer } from "../src/mockserver.js";
 import { capture } from "./helpers.js";
 
 /** A fetched-repo stub shaped like GitHubClient#fetchAll's result. */
@@ -148,6 +148,43 @@ test("a story left incomplete by an interrupted run stays skipped but warns", as
     assert.match(out.buf, /warning: issue #3 .*comments 0\/1/);
     assert.doesNotMatch(out.buf, /issue #7/);
     assert.equal(mock.state.stories[91].length, 2);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("over-long text is clamped to the published limits and the import completes", async () => {
+  const mock = await startMockServer(
+    makeState({ maxLengths: { comment_text: 200, description: 300 } }),
+  );
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const repo = fetchedRepo();
+    repo.issues[0].body = "B".repeat(1000);
+    repo.comments.push({
+      issue_url: "https://api.github.com/repos/o/r/issues/7",
+      user: { login: "bob" },
+      created_at: "2024-05-02T00:00:00Z",
+      body: "b".repeat(5000),
+    });
+    const out = capture();
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: out,
+      github: { fetchAll: async () => repo },
+    });
+    assert.equal(result.importedStories, 2);
+    assert.deepEqual(result.errors, []);
+    assert.match(out.buf, /warning: issue #7: description truncated/);
+    assert.match(out.buf, /warning: issue #7: comment 1 truncated/);
+
+    const rows = mock.state.stories[91];
+    const newer = rows.find((r) => r.title === "newer open issue");
+    // The clamped description still ends with the dedup marker, inside the limit.
+    assert.ok(newer.description.length <= 300);
+    assert.ok(newer.description.endsWith(markerFor("o", "r", "7")));
+    assert.ok(newer.comments[0].comment_text.length <= 200);
+    assert.ok(newer.comments[0].comment_text.includes("[truncated by github-to-eat"));
   } finally {
     await mock.close();
   }

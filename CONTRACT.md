@@ -219,6 +219,31 @@ real server 2026-07-16 and mirrored by `src/mockserver.js`):
   failed responses are keyed too (probed 2026-07-16) — so the writer must
   mint one unique key per logical write, never reuse keys across ops.
 
+### Length limits (direct engine)
+
+The server rejects over-long write values with
+`400 invalid_parameter {"constraint":"too_long","fields":[<field>]}` — a
+typed 4xx the writer correctly never retries, so one giant GitHub comment
+would otherwise abort the whole run (observed 2026-07-17: a 46,411-char
+comment body). The direct engine therefore clamps plan text client-side
+before writing:
+
+- **Limit source** — the field's `maxLength` in `GET /openapi.json` when
+  published (aliased request fields share storage, so the smallest alias
+  limit wins). Today's servers publish none, so **fallback defaults**
+  apply: story name 255; story description, task description, and comment
+  text 16,000 chars each — chosen between the longest comment a real server
+  accepted (13,101) and one it rejected (46,411). Tune the fallbacks (or ask
+  the EAT team to publish `maxLength`) if a server still rejects.
+- **Clamp shape** — block text is cut and suffixed with a visible notice
+  (`[truncated by github-to-eat: …]`), total within the limit; names are cut
+  to the limit with a trailing ellipsis. Story descriptions reserve room for
+  the dedup marker line before clamping, so the marker always survives
+  intact. Each clamp warns on stderr naming the issue and field
+  (`warning: issue #64: comment 1 truncated to 16000 chars (server limit)`).
+- The mock server mirrors the rejection and, when configured with limits,
+  publishes them as `maxLength` in its `/openapi.json`.
+
 ### Marker dedup (direct engine)
 
 Server-side provenance (`import_source` / `import_external_id`) is not

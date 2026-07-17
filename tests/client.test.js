@@ -10,7 +10,7 @@ import {
   EATTimeout,
   NotFoundError,
 } from "../src/client.js";
-import { startMockServer } from "../src/mockserver.js";
+import { makeState, startMockServer } from "../src/mockserver.js";
 
 /**
  * Run `fn` against a throwaway local HTTP server; always tears it down.
@@ -203,6 +203,43 @@ test("write methods create against the mock and 409 maps to ConflictError", asyn
 
     const comment = await client.createComment(91, story.story_id, "hello", "k-comment");
     assert.equal(comment.comment_text, "hello");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("fieldLimits reads maxLength from the published spec, min across aliases", async () => {
+  const mock = await startMockServer(
+    makeState({ maxLengths: { name: 60, description: 500, task_desc: 120, comment_text: 150 } }),
+  );
+  try {
+    const client = new EATClient(mock.baseUrl, "key");
+    assert.deepEqual(await client.fieldLimits(), {
+      storyName: 60,
+      storyDescription: 500,
+      taskDescription: 120,
+      commentText: 150,
+    });
+  } finally {
+    await mock.close();
+  }
+});
+
+test("fieldLimits is empty when the spec publishes no maxLength", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "key");
+    assert.deepEqual(await client.fieldLimits(), {});
+  } finally {
+    await mock.close();
+  }
+});
+
+test("fieldLimits is empty for servers without an openapi spec", async () => {
+  const mock = await startMockServer(makeState({ serverDryRun: false }));
+  try {
+    const client = new EATClient(mock.baseUrl, "key");
+    assert.deepEqual(await client.fieldLimits(), {});
   } finally {
     await mock.close();
   }
