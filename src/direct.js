@@ -51,12 +51,28 @@ export async function runDirect(client, projectId, owner, repo, options) {
   );
   const mapped = mapRepo(fetched);
 
-  const importedIds = await runWithProgress(
+  const imported = await runWithProgress(
     () => prescanImported(client, projectId, owner, repo),
     `scanning project ${projectId} for already-imported stories`,
     { stream },
   );
-  const { plan, skipped } = applyDedup(mapped, importedIds, owner, repo);
+  const { plan, skipped } = applyDedup(mapped, imported, owner, repo);
+
+  // The marker lands at story-create, before tasks/comments — a run that died
+  // in that window left a skipped-but-incomplete story. Surface it, loudly.
+  for (const op of mapped.stories) {
+    const row = imported.get(op.external_id);
+    if (!row) continue;
+    const tasksCount = Number(row.tasks_count ?? 0);
+    const commentCount = Number(row.comment_count ?? 0);
+    if (tasksCount < op.tasks.length || commentCount < op.comments.length) {
+      stream?.write(
+        `warning: issue #${op.external_id} was only partially imported by an earlier run ` +
+          `(tasks ${tasksCount}/${op.tasks.length}, comments ${commentCount}/${op.comments.length}); ` +
+          "it stays skipped — delete that story in EAT and re-run to repair.\n",
+      );
+    }
+  }
 
   const written = await writePlan(client, projectId, plan, { stream, runId });
   return {

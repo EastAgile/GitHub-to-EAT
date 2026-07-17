@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { EATClient } from "../src/client.js";
+import { AuthError, EATClient } from "../src/client.js";
 import { markerFor } from "../src/dedup.js";
 import { DirectEngineError, runDirect } from "../src/direct.js";
 import { startMockServer } from "../src/mockserver.js";
@@ -86,6 +86,50 @@ test("runDirect imports once, then a re-run skips everything via the markers", a
     assert.equal(rerun.importedStories, 0);
     assert.equal(rerun.importedLabels, 0);
     assert.equal(rerun.skipped, 2);
+    assert.equal(mock.state.stories[91].length, 2);
+
+    // GitHub slugs are case-insensitive — a differently-cased re-run must skip too.
+    const recased = await runDirect(client, 91, "O", "R", options);
+    assert.equal(recased.importedStories, 0);
+    assert.equal(recased.skipped, 2);
+    assert.equal(mock.state.stories[91].length, 2);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a story left incomplete by an interrupted run stays skipped but warns", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const github = { fetchAll: async () => fetchedRepo() };
+    // First run dies on the closed issue's comment, after its story (and marker) landed.
+    const failing = {
+      createLabel: client.createLabel.bind(client),
+      createStory: client.createStory.bind(client),
+      createTask: client.createTask.bind(client),
+      listStoryPage: client.listStoryPage.bind(client),
+      createComment: async () => {
+        throw new AuthError("simulated mid-run failure");
+      },
+    };
+    await assert.rejects(
+      runDirect(failing, 91, "o", "r", { included: ["issues"], stream: capture(), github }),
+      AuthError,
+    );
+    assert.equal(mock.state.stories[91].length, 1);
+
+    const out = capture();
+    const rerun = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: out,
+      github,
+    });
+    // The incomplete story stays skipped (with a warning); the unwritten one imports.
+    assert.equal(rerun.skipped, 1);
+    assert.equal(rerun.importedStories, 1);
+    assert.match(out.buf, /warning: issue #3 .*comments 0\/1/);
+    assert.doesNotMatch(out.buf, /issue #7/);
     assert.equal(mock.state.stories[91].length, 2);
   } finally {
     await mock.close();

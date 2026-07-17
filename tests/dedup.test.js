@@ -42,7 +42,20 @@ test("markedExternalIds escapes regex metacharacters in repo names", () => {
   assert.deepEqual([...markedExternalIds(rows, "o", "r.j")], ["5"]);
 });
 
-test("prescanImported walks every cursor page with the sparse fieldset", () => {
+test("marker matching ignores repo-slug casing, like GitHub does", () => {
+  const rows = [{ story_id: 1, description: markerFor("Octocat", "Hello-World", "3") }];
+  assert.deepEqual([...markedExternalIds(rows, "octocat", "hello-world")], ["3"]);
+});
+
+test("a marker-shaped line mid-body is not a marker — only the last line counts", () => {
+  const quoted = `see also:\n${markerFor("o", "r", "7")}\nmore discussion below`;
+  assert.deepEqual([...markedExternalIds([{ description: quoted }], "o", "r")], []);
+  // The writer appends the real marker after any quoting body — that still matches.
+  const written = `${quoted}\n\n${markerFor("o", "r", "9")}`;
+  assert.deepEqual([...markedExternalIds([{ description: written }], "o", "r")], ["9"]);
+});
+
+test("prescanImported walks every cursor page and keeps the matched rows", () => {
   /** @type {any[]} */
   const calls = [];
   const client = {
@@ -51,17 +64,25 @@ test("prescanImported walks every cursor page with the sparse fieldset", () => {
       calls.push({ projectId, ...opts });
       if (!opts.cursor) {
         return {
-          items: [{ story_id: 1, description: markerFor("o", "r", "3") }],
+          items: [
+            {
+              story_id: 1,
+              description: markerFor("o", "r", "3"),
+              tasks_count: 2,
+              comment_count: 0,
+            },
+          ],
           next_cursor: "1",
         };
       }
       return { items: [{ story_id: 2, description: markerFor("o", "r", "7") }], next_cursor: null };
     },
   };
-  return prescanImported(client, 91, "o", "r", { pageSize: 1 }).then((ids) => {
-    assert.deepEqual([...ids].sort(), ["3", "7"]);
+  return prescanImported(client, 91, "o", "r", { pageSize: 1 }).then((imported) => {
+    assert.deepEqual([...imported.keys()].sort(), ["3", "7"]);
+    assert.equal(imported.get("3").tasks_count, 2);
     assert.equal(calls.length, 2);
-    assert.equal(calls[0].fields, "story_id,description");
+    assert.equal(calls[0].fields, "story_id,description,tasks_count,comment_count");
     assert.equal(calls[0].limit, 1);
     assert.equal(calls[1].cursor, "1");
   });

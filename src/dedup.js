@@ -28,6 +28,29 @@ function escapeRegExp(s) {
 }
 
 /**
+ * Read the marker off one story description, or null. Only the last non-blank
+ * line counts — that is the one place the writer ever puts it, and an issue
+ * body merely quoting the marker sentence mid-text must not poison the dedup.
+ * Case-insensitive: GitHub slugs are, and forbid same-name-other-case repos.
+ *
+ * @param {string | null | undefined} description
+ * @param {string} owner
+ * @param {string} repo
+ * @returns {string | null}
+ */
+export function markerExternalId(description, owner, repo) {
+  const lines = (description ?? "").trimEnd().split("\n");
+  const last = lines[lines.length - 1].trim();
+  const match = last.match(
+    new RegExp(
+      `^Imported from https://github\\.com/${escapeRegExp(owner)}/${escapeRegExp(repo)}/issues/(\\d+)$`,
+      "i",
+    ),
+  );
+  return match ? match[1] : null;
+}
+
+/**
  * Extract the external ids of this repo's markers from prescanned story rows.
  * Markers for other repos are ignored — dedup is scoped per (owner, repo).
  *
@@ -37,15 +60,10 @@ function escapeRegExp(s) {
  * @returns {Set<string>}
  */
 export function markedExternalIds(rows, owner, repo) {
-  const pattern = new RegExp(
-    `^Imported from https://github\\.com/${escapeRegExp(owner)}/${escapeRegExp(repo)}/issues/(\\d+)\\s*$`,
-    "gm",
-  );
   const ids = new Set();
   for (const row of rows) {
-    for (const match of (row.description ?? "").matchAll(pattern)) {
-      ids.add(match[1]);
-    }
+    const id = markerExternalId(row.description, owner, repo);
+    if (id !== null) ids.add(id);
   }
   return ids;
 }
@@ -59,30 +77,34 @@ export function markedExternalIds(rows, owner, repo) {
  */
 
 /**
- * Cursor-walk the whole project with the sparse fieldset and collect the
- * already-imported external ids for this repo.
+ * Cursor-walk the whole project and map each already-imported external id to
+ * its story row. Rows carry `tasks_count`/`comment_count` so the caller can
+ * spot stories an interrupted run left without their sub-resources.
  *
  * @param {PrescanClient} client
  * @param {number} projectId
  * @param {string} owner
  * @param {string} repo
  * @param {{ pageSize?: number }} [options]
- * @returns {Promise<Set<string>>}
+ * @returns {Promise<Map<string, any>>}
  */
 export async function prescanImported(client, projectId, owner, repo, { pageSize = 200 } = {}) {
-  const ids = new Set();
+  const imported = new Map();
   /** @type {string | undefined} */
   let cursor;
   do {
     const page = await client.listStoryPage(projectId, {
       limit: pageSize,
       ...(cursor ? { cursor } : {}),
-      fields: "story_id,description",
+      fields: "story_id,description,tasks_count,comment_count",
     });
-    for (const id of markedExternalIds(page.items ?? [], owner, repo)) ids.add(id);
+    for (const row of page.items ?? []) {
+      const id = markerExternalId(row.description, owner, repo);
+      if (id !== null && !imported.has(id)) imported.set(id, row);
+    }
     cursor = page.next_cursor ?? undefined;
   } while (cursor);
-  return ids;
+  return imported;
 }
 
 /**
@@ -90,7 +112,7 @@ export async function prescanImported(client, projectId, owner, repo, { pageSize
  * prune labels no surviving story references. Returns a new plan; the input is untouched.
  *
  * @param {import("./writer.js").WritePlan} plan
- * @param {Set<string>} importedIds
+ * @param {{ has(id: string): boolean }} importedIds Set or prescan Map
  * @param {string} owner
  * @param {string} repo
  * @returns {{ plan: import("./writer.js").WritePlan, skipped: number }}

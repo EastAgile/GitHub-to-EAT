@@ -231,8 +231,16 @@ marker-based:
   rather than spinning) — and skips items whose marker already exists,
   reported as `skipped N (already imported)`, the server engine's wording.
 - Dedup is scoped per `(owner, repo)`: markers pointing at other repos never
-  suppress an import. Labels referenced only by skipped stories are not
-  re-created.
+  suppress an import. Matching is case-insensitive (GitHub slugs are, and
+  GitHub forbids same-name-other-case repos) and honors only the last
+  non-blank line of a description — an issue body merely quoting the marker
+  sentence mid-text cannot poison the dedup. Labels referenced only by
+  skipped stories are not re-created.
+- The marker lands at story-create, before that story's tasks and comments.
+  A run interrupted in that window leaves an incomplete story that stays
+  skipped on re-runs; the prescan fetches `tasks_count`/`comment_count` and
+  the next run warns (`tasks X/Y, comments X/Y`) with the repair path —
+  delete that story in EAT and re-run.
 
 ### Fidelity limitations (direct engine)
 

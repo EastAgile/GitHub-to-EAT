@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import { main, parseRepo } from "../src/cli.js";
 import { AuthError } from "../src/client.js";
+import { GitHubError } from "../src/github.js";
 import { MAPPINGS } from "../src/mappings.js";
 import { VERSION } from "../src/version.js";
 import { capture, inTempDir, withEnv } from "./helpers.js";
@@ -391,6 +392,46 @@ test("the direct engine prompts for confirmation like the server engine", async 
       assert.equal(code, 1);
       assert.equal(direct.length, 0);
       assert.ok(err.buf.includes("Aborted"));
+    }),
+  );
+});
+
+test("accepting the prompt runs the direct import", async () => {
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      const out = capture();
+      const direct = [];
+      const code = await main(["--project", "91", "--repo", "o/r", "--engine", "direct"], {
+        stdout: out,
+        stderr: capture(),
+        preflight: async () => preflightResult(),
+        runDirect: async () => {
+          direct.push(1);
+          return outcome({ importedStories: 4 });
+        },
+        confirm: async () => true,
+      });
+      assert.equal(code, 0);
+      assert.equal(direct.length, 1);
+      assert.ok(out.buf.includes("Imported 4"));
+    }),
+  );
+});
+
+test("a GitHub failure in the direct engine maps to a clean exit 1", async () => {
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      const err = capture();
+      const code = await main(["--project", "91", "--repo", "o/r", "--engine", "direct", "-y"], {
+        stdout: capture(),
+        stderr: err,
+        preflight: async () => preflightResult(),
+        runDirect: async () => {
+          throw new GitHubError("GitHub request failed (404): repo not found");
+        },
+      });
+      assert.equal(code, 1);
+      assert.ok(err.buf.includes("error: GitHub request failed (404)"));
     }),
   );
 });

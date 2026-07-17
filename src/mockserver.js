@@ -500,6 +500,7 @@ function createStory(state, projectId, body) {
     icebox: body.icebox ?? false,
     labels,
     tasks: [],
+    tasks_count: 0,
     comments: [],
     comment_count: 0,
     created: now,
@@ -544,6 +545,7 @@ function createTask(state, projectId, storyId, body) {
     created: new Date().toISOString(),
   };
   story.tasks.push(task);
+  story.tasks_count = story.tasks.length;
   return { status: 200, payload: task };
 }
 

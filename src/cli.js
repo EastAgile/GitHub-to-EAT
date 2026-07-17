@@ -241,16 +241,18 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
 
   stdout.write(`${renderLegend(included, engine)}\n`);
 
-  if (engine === "direct") {
-    if (!values["dry-run"] && !values.yes && confirm) {
-      const proceed = await confirm(
-        `Import ${owner}/${repo} into project ${project} (${result.projectTitle})? [y/N] `,
-      );
-      if (!proceed) {
-        stderr.write("Aborted — nothing imported.\n");
-        return 1;
-      }
+  // One prompt for both engines — dry-run paths never prompt (they write nothing).
+  if (!values["dry-run"] && !values.yes && confirm) {
+    const proceed = await confirm(
+      `Import ${owner}/${repo} into project ${project} (${result.projectTitle})? [y/N] `,
+    );
+    if (!proceed) {
+      stderr.write("Aborted — nothing imported.\n");
+      return 1;
     }
+  }
+
+  if (engine === "direct") {
     const token = values.token || process.env.GITHUB_TOKEN || undefined;
     if (!values["dry-run"]) {
       stdout.write(
@@ -327,16 +329,6 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
         `(${result.projectTitle}). No changes made.\n`,
     );
     return 0;
-  }
-
-  if (!values.yes && confirm) {
-    const proceed = await confirm(
-      `Import ${owner}/${repo} into project ${project} (${result.projectTitle})? [y/N] `,
-    );
-    if (!proceed) {
-      stderr.write("Aborted — nothing imported.\n");
-      return 1;
-    }
   }
 
   const token = values.token || process.env.GITHUB_TOKEN || undefined;
