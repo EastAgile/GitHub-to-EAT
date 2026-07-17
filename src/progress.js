@@ -37,11 +37,15 @@ export async function runWithProgress(func, message, { stream, intervalMs = 500 
   };
   draw();
   const timer = setInterval(draw, intervalMs);
+  let failed = false;
   try {
     return await func();
+  } catch (err) {
+    failed = true;
+    throw err;
   } finally {
     clearInterval(timer);
     const total = (performance.now() - start) / 1000;
-    out.write(`\r${message} — done in ${total.toFixed(0)}s\n`);
+    out.write(`\r${message} — ${failed ? "failed after" : "done in"} ${total.toFixed(0)}s\n`);
   }
 }
