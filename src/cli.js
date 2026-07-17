@@ -11,7 +11,7 @@ import { parseArgs } from "node:util";
 
 import { EATClient, EATError, EATTimeout } from "./client.js";
 import { ConfigError, loadConfig } from "./config.js";
-import { DirectEngineError, runDirect as defaultRunDirect } from "./direct.js";
+import { runDirect as defaultRunDirect } from "./direct.js";
 import { assertDirectSupportsIncludes, DEFAULT_ENGINE, ENGINES, parseEngine } from "./engine.js";
 import { GitHubError } from "./github.js";
 import { runImport as defaultRunImport } from "./importer.js";
@@ -99,6 +99,30 @@ function reportImport(outcome, { stdout, stderr, project, appBase }) {
     stderr.write(`  - ${err}\n`);
   }
   return outcome.errors.length ? 1 : 0;
+}
+
+/**
+ * Write the would-import / would-skip plan; return exit code 0. Shared by the
+ * server dry-run and the direct engine's local dry-run so the block is identical.
+ *
+ * @param {import("./importer.js").ImportOutcome} plan
+ * @param {{ stdout: import("./progress.js").OutStream,
+ *   stderr: import("./progress.js").OutStream, owner: string, repo: string,
+ *   project: number, projectTitle: string }} ctx
+ * @returns {number}
+ */
+function reportDryRunPlan(plan, { stdout, stderr, owner, repo, project, projectTitle }) {
+  const skippedNote = plan.skipped ? " (already imported)" : "";
+  stdout.write(
+    `Dry run plan for ${owner}/${repo} into project ${project} (${projectTitle}):\n` +
+      `  would import ${plan.importedStories} stories (${plan.importedLabels} labels), ` +
+      `would skip ${plan.skipped}${skippedNote}, ${plan.errors.length} error(s).\n` +
+      "No changes made.\n",
+  );
+  for (const err of plan.errors) {
+    stderr.write(`  - ${err}\n`);
+  }
+  return 0;
 }
 
 /**
@@ -269,15 +293,21 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
         stream: stderr,
       });
     } catch (err) {
-      if (
-        err instanceof DirectEngineError ||
-        err instanceof EATError ||
-        err instanceof GitHubError
-      ) {
-        stderr.write(`error: ${err.message}\n`);
+      if (err instanceof EATError || err instanceof GitHubError) {
+        stderr.write(`error: ${values["dry-run"] ? "dry run failed: " : ""}${err.message}\n`);
         return 1;
       }
       throw err;
+    }
+    if (values["dry-run"]) {
+      return reportDryRunPlan(outcome, {
+        stdout,
+        stderr,
+        owner,
+        repo,
+        project,
+        projectTitle: result.projectTitle,
+      });
     }
     return reportImport(outcome, { stdout, stderr, project, appBase: config.appBase });
   }
@@ -312,17 +342,14 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
           "warning: the server did not confirm dry-run mode — check the board before re-running.\n",
         );
       }
-      const skippedNote = plan.skipped ? " (already imported)" : "";
-      stdout.write(
-        `Dry run plan for ${owner}/${repo} into project ${project} (${result.projectTitle}):\n` +
-          `  would import ${plan.importedStories} stories (${plan.importedLabels} labels), ` +
-          `would skip ${plan.skipped}${skippedNote}, ${plan.errors.length} error(s).\n` +
-          "No changes made.\n",
-      );
-      for (const err of plan.errors) {
-        stderr.write(`  - ${err}\n`);
-      }
-      return 0;
+      return reportDryRunPlan(plan, {
+        stdout,
+        stderr,
+        owner,
+        repo,
+        project,
+        projectTitle: result.projectTitle,
+      });
     }
     stdout.write(
       `Dry run: would import ${owner}/${repo} into project ${project} ` +
