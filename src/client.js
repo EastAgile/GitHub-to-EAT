@@ -183,6 +183,22 @@ export class EATClient {
   }
 
   /**
+   * Fetch one cursor page of a project's stories (direct-engine prescan).
+   * `limit`/`cursor` drive cursor mode; `fields` is the sparse-fieldset allowlist.
+   *
+   * @param {number} projectId
+   * @param {{ limit?: number, cursor?: string, fields?: string }} [options]
+   * @returns {Promise<{ items: any[], next_cursor: string | null }>}
+   */
+  async listStoryPage(projectId, { limit = 200, cursor, fields } = {}) {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (cursor) params.set("cursor", cursor);
+    if (fields) params.set("fields", fields);
+    const response = await this.#request("GET", `/projects/${projectId}/stories?${params}`);
+    return response.json();
+  }
+
+  /**
    * Create a label in a project (direct engine). A name that already exists
    * — case-insensitive — raises {@link ConflictError} with `code: "conflict"`.
    *

@@ -13,6 +13,7 @@ import { EATClient, EATError, EATTimeout } from "./client.js";
 import { ConfigError, loadConfig } from "./config.js";
 import { DirectEngineError, runDirect as defaultRunDirect } from "./direct.js";
 import { assertDirectSupportsIncludes, DEFAULT_ENGINE, ENGINES, parseEngine } from "./engine.js";
+import { GitHubError } from "./github.js";
 import { runImport as defaultRunImport } from "./importer.js";
 import { MAPPINGS, parseInclude, renderLegend, requestFlags } from "./mappings.js";
 import { preflight as defaultPreflight } from "./preflight.js";
@@ -240,22 +241,39 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
 
   stdout.write(`${renderLegend(included, engine)}\n`);
 
+  // One prompt for both engines — dry-run paths never prompt (they write nothing).
+  if (!values["dry-run"] && !values.yes && confirm) {
+    const proceed = await confirm(
+      `Import ${owner}/${repo} into project ${project} (${result.projectTitle})? [y/N] `,
+    );
+    if (!proceed) {
+      stderr.write("Aborted — nothing imported.\n");
+      return 1;
+    }
+  }
+
   if (engine === "direct") {
     const token = values.token || process.env.GITHUB_TOKEN || undefined;
+    if (!values["dry-run"]) {
+      stdout.write(
+        `Importing ${owner}/${repo} into project ${project} (${result.projectTitle})...\n`,
+      );
+    }
     let outcome;
     try {
-      outcome = await runWithProgress(
-        () =>
-          runDirect(client, project, owner, repo, {
-            token,
-            included,
-            dryRun: values["dry-run"],
-          }),
-        "running the direct import pipeline",
-        { stream: stderr },
-      );
+      // The pipeline renders its own per-stage progress on stderr.
+      outcome = await runDirect(client, project, owner, repo, {
+        token,
+        included,
+        dryRun: values["dry-run"],
+        stream: stderr,
+      });
     } catch (err) {
-      if (err instanceof DirectEngineError || err instanceof EATError) {
+      if (
+        err instanceof DirectEngineError ||
+        err instanceof EATError ||
+        err instanceof GitHubError
+      ) {
         stderr.write(`error: ${err.message}\n`);
         return 1;
       }
@@ -311,16 +329,6 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
         `(${result.projectTitle}). No changes made.\n`,
     );
     return 0;
-  }
-
-  if (!values.yes && confirm) {
-    const proceed = await confirm(
-      `Import ${owner}/${repo} into project ${project} (${result.projectTitle})? [y/N] `,
-    );
-    if (!proceed) {
-      stderr.write("Aborted — nothing imported.\n");
-      return 1;
-    }
   }
 
   const token = values.token || process.env.GITHUB_TOKEN || undefined;

@@ -120,11 +120,11 @@ v3 adds a second import engine selectable with `--engine server|direct`
 - **Issues only.** `--engine direct` composes with `--include`, but v3 supports
   `issues` only; `prs`, `milestones`, and `releases` exit with a usage error
   ("not supported by the direct engine yet") — those land in v4.
-- **Staged build.** This epic ships across several stories. The `--engine` flag
-  and the engine dispatch are the plumbing; the fetch → map → write stages and
-  the direct engine's own dedup and local dry-run are filled in by the
-  following v3 stories. Until a stage exists, `--engine direct` reports that the
-  engine is not implemented yet rather than importing nothing.
+- **Staged build.** This epic ships across several stories. The fetch → map →
+  prescan → write pipeline is wired end-to-end: `--engine direct` performs real
+  imports (issues only), prompting for confirmation exactly like the server
+  engine. The one stage still pending is the local dry-run — `--dry-run` with
+  `--engine direct` exits with an error naming it until that story lands.
 
 ### GitHub fetch stage
 
@@ -223,13 +223,27 @@ marker-based:
 - Every story it writes ends its description with a stable marker line:
   `Imported from https://github.com/{owner}/{repo}/issues/{n}`.
 - Before writing, it prescans the target project —
-  `GET /stories?limit=…&cursor=…&fields=story_id,description` (cursor mode
+  `GET /stories?limit=…&cursor=…&fields=story_id,description,tasks_count,comment_count`
+  (cursor mode
   whenever `cursor=` or `limit=` is present; `fields=` is a sparse-fieldset
   allowlist, unknown values → `400 validation_failed`, `story_id` always
   included; invalid `limit`/`cursor` values — including out-of-range
   cursors — are also `400 validation_failed`, so a paging loop fails loudly
   rather than spinning) — and skips items whose marker already exists,
   reported as `skipped N (already imported)`, the server engine's wording.
+- Dedup is scoped per `(owner, repo)`: markers pointing at other repos never
+  suppress an import. Matching is case-insensitive (GitHub slugs are, and
+  GitHub forbids same-name-other-case repos) and honors only the last
+  non-blank line of a description — an issue body merely quoting the marker
+  sentence mid-text cannot poison the dedup. Labels referenced only by
+  skipped stories are not re-created.
+- The marker lands at story-create, before that story's tasks and comments.
+  A run interrupted in that window leaves an incomplete story that stays
+  skipped on re-runs; when a marker-matched story has fewer
+  tasks/comments than the current GitHub issue, the next run warns
+  (`tasks X/Y, comments X/Y`) naming both possible causes — an interrupted
+  run, or the issue changing since import — with the repair path: delete
+  that story in EAT and re-run.
 
 ### Fidelity limitations (direct engine)
 
