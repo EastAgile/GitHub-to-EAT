@@ -1,29 +1,72 @@
 /**
  * The "direct" import engine: run the import pipeline client-side instead of
- * delegating to the EAT server.
- *
- * V3 introduces the `--engine` dispatch and this seam; the pipeline stages —
- * fetch from GitHub, map issues to EAT story shapes, write via the API — are
- * filled in by the following V3 stories. Until then `runDirect` reports that it
- * is not built rather than silently importing nothing.
+ * delegating to the EAT server — fetch from GitHub, map issues to EAT shapes,
+ * prescan for markers, write the survivors. Local dry-run is the one stage
+ * still pending (next story); until it lands `--dry-run` rejects loudly.
  */
+
+import { applyDedup, prescanImported } from "./dedup.js";
+import { GitHubClient } from "./github.js";
+import { mapRepo } from "./mapping.js";
+import { runWithProgress } from "./progress.js";
+import { writePlan } from "./writer.js";
 
 /** Raised by the direct engine (kept distinct from the EAT HTTP errors). */
 export class DirectEngineError extends Error {}
 
 /**
+ * The client surface the pipeline needs — the writer's methods plus the
+ * prescan page reader (structural, so tests can pass stubs).
+ *
+ * @typedef {import("./writer.js").WriterClient
+ *   & import("./dedup.js").PrescanClient} DirectClient
+ */
+
+/**
  * Run the client-side import pipeline and return the same
  * {@link import("./importer.js").ImportOutcome} shape the server engine yields.
  *
- * @param {import("./client.js").EATClient} _client
- * @param {number} _projectId
- * @param {string} _owner
- * @param {string} _repo
- * @param {{ token?: string, included: string[], dryRun?: boolean }} _options
+ * @param {DirectClient} client
+ * @param {number} projectId
+ * @param {string} owner
+ * @param {string} repo
+ * @param {{ token?: string, included: string[], dryRun?: boolean,
+ *   stream?: import("./progress.js").OutStream, runId?: string,
+ *   github?: { fetchAll(): Promise<{ issues: any[], comments: any[],
+ *     labels: any[] }> } }} options `github` is a test seam; production
+ *   builds a {@link GitHubClient}
  * @returns {Promise<import("./importer.js").ImportOutcome>}
  */
-export async function runDirect(_client, _projectId, _owner, _repo, _options) {
-  throw new DirectEngineError(
-    "the direct engine is not implemented yet — run with --engine server (the default) for now",
+export async function runDirect(client, projectId, owner, repo, options) {
+  const { token, dryRun, stream, runId, github } = options;
+  if (dryRun) {
+    throw new DirectEngineError(
+      "the direct engine's local dry-run is not built yet — drop --dry-run or use --engine server",
+    );
+  }
+
+  const source = github ?? new GitHubClient(owner, repo, { token });
+  const fetched = await runWithProgress(
+    () => source.fetchAll(),
+    `fetching ${owner}/${repo} from GitHub`,
+    { stream },
   );
+  const mapped = mapRepo(fetched);
+
+  const importedIds = await runWithProgress(
+    () => prescanImported(client, projectId, owner, repo),
+    `scanning project ${projectId} for already-imported stories`,
+    { stream },
+  );
+  const { plan, skipped } = applyDedup(mapped, importedIds, owner, repo);
+
+  const written = await writePlan(client, projectId, plan, { stream, runId });
+  return {
+    importedStories: written.stories,
+    importedLabels: written.labelsCreated,
+    skipped,
+    errors: [],
+    unmatched: {},
+    dryRun: false,
+  };
 }

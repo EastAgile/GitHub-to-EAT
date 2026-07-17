@@ -120,11 +120,11 @@ v3 adds a second import engine selectable with `--engine server|direct`
 - **Issues only.** `--engine direct` composes with `--include`, but v3 supports
   `issues` only; `prs`, `milestones`, and `releases` exit with a usage error
   ("not supported by the direct engine yet") — those land in v4.
-- **Staged build.** This epic ships across several stories. The `--engine` flag
-  and the engine dispatch are the plumbing; the fetch → map → write stages and
-  the direct engine's own dedup and local dry-run are filled in by the
-  following v3 stories. Until a stage exists, `--engine direct` reports that the
-  engine is not implemented yet rather than importing nothing.
+- **Staged build.** This epic ships across several stories. The fetch → map →
+  prescan → write pipeline is wired end-to-end: `--engine direct` performs real
+  imports (issues only), prompting for confirmation exactly like the server
+  engine. The one stage still pending is the local dry-run — `--dry-run` with
+  `--engine direct` exits with an error naming it until that story lands.
 
 ### GitHub fetch stage
 
@@ -230,6 +230,9 @@ marker-based:
   cursors — are also `400 validation_failed`, so a paging loop fails loudly
   rather than spinning) — and skips items whose marker already exists,
   reported as `skipped N (already imported)`, the server engine's wording.
+- Dedup is scoped per `(owner, repo)`: markers pointing at other repos never
+  suppress an import. Labels referenced only by skipped stories are not
+  re-created.
 
 ### Fidelity limitations (direct engine)
 

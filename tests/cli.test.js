@@ -354,17 +354,43 @@ test("--engine direct with a non-issue type is a usage error", async () => {
   assert.ok(err.buf.includes("not supported by the direct engine yet"));
 });
 
-test("--engine direct runs the scaffold and reports it is not implemented yet", async () => {
+test("--engine direct with --dry-run reports the pending local dry-run stage", async () => {
   await inTempDir(() =>
     withEnv({ EAT_AGENT_KEY: "key" }, async () => {
       const err = capture();
-      const code = await main(["--project", "91", "--repo", "o/r", "--engine", "direct", "-y"], {
+      const code = await main(
+        ["--project", "91", "--repo", "o/r", "--engine", "direct", "--dry-run"],
+        {
+          stdout: capture(),
+          stderr: err,
+          preflight: async () => preflightResult(),
+        },
+      );
+      assert.equal(code, 1);
+      assert.ok(err.buf.includes("dry-run"));
+      assert.ok(err.buf.includes("not built yet"));
+    }),
+  );
+});
+
+test("the direct engine prompts for confirmation like the server engine", async () => {
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      const err = capture();
+      const direct = [];
+      const code = await main(["--project", "91", "--repo", "o/r", "--engine", "direct"], {
         stdout: capture(),
         stderr: err,
         preflight: async () => preflightResult(),
+        runDirect: async () => {
+          direct.push(1);
+          return outcome();
+        },
+        confirm: async () => false,
       });
       assert.equal(code, 1);
-      assert.ok(err.buf.includes("not implemented yet"));
+      assert.equal(direct.length, 0);
+      assert.ok(err.buf.includes("Aborted"));
     }),
   );
 });
