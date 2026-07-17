@@ -1,6 +1,6 @@
 /**
- * The "direct" import engine: fetch → map → prescan → write, run client-side
- * instead of on the EAT server. The local dry-run stage is still pending — `--dry-run` rejects.
+ * The "direct" import engine: fetch → map → prescan → write, all client-side. `--dry-run`
+ * runs the same pipeline but stops before the write — no server dry-run support needed.
  */
 
 import { applyDedup, prescanImported } from "./dedup.js";
@@ -8,9 +8,6 @@ import { GitHubClient } from "./github.js";
 import { mapRepo } from "./mapping.js";
 import { runWithProgress } from "./progress.js";
 import { writePlan } from "./writer.js";
-
-/** Raised by the direct engine (kept distinct from the EAT HTTP errors). */
-export class DirectEngineError extends Error {}
 
 /**
  * The client surface the pipeline needs — the writer's methods plus the
@@ -37,12 +34,6 @@ export class DirectEngineError extends Error {}
  */
 export async function runDirect(client, projectId, owner, repo, options) {
   const { token, dryRun, stream, runId, github } = options;
-  if (dryRun) {
-    throw new DirectEngineError(
-      "the direct engine's local dry-run is not built yet — drop --dry-run or use --engine server",
-    );
-  }
-
   const source = github ?? new GitHubClient(owner, repo, { token });
   const fetched = await runWithProgress(
     () => source.fetchAll(),
@@ -73,6 +64,17 @@ export async function runDirect(client, projectId, owner, repo, options) {
           "it stays skipped — delete that story in EAT and re-run to repair.\n",
       );
     }
+  }
+
+  if (dryRun) {
+    return {
+      importedStories: plan.stories.length,
+      importedLabels: plan.labels.length,
+      skipped,
+      errors: [],
+      unmatched: {},
+      dryRun: true,
+    };
   }
 
   const written = await writePlan(client, projectId, plan, { stream, runId });

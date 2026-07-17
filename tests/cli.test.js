@@ -355,21 +355,38 @@ test("--engine direct with a non-issue type is a usage error", async () => {
   assert.ok(err.buf.includes("not supported by the direct engine yet"));
 });
 
-test("--engine direct with --dry-run reports the pending local dry-run stage", async () => {
+test("--engine direct with --dry-run renders the same plan block as the server path", async () => {
   await inTempDir(() =>
     withEnv({ EAT_AGENT_KEY: "key" }, async () => {
-      const err = capture();
+      const out = capture();
+      /** @type {boolean[]} */
+      const dryRuns = [];
+      const asked = [];
       const code = await main(
         ["--project", "91", "--repo", "o/r", "--engine", "direct", "--dry-run"],
         {
-          stdout: capture(),
-          stderr: err,
+          stdout: out,
+          stderr: capture(),
           preflight: async () => preflightResult(),
+          runDirect: async (_client, _project, _owner, _repo, opts) => {
+            dryRuns.push(opts.dryRun ?? false);
+            return outcome({ importedStories: 2, importedLabels: 1, skipped: 1, dryRun: true });
+          },
+          confirm: async () => {
+            asked.push(1);
+            return false;
+          },
         },
       );
-      assert.equal(code, 1);
-      assert.ok(err.buf.includes("dry-run"));
-      assert.ok(err.buf.includes("not built yet"));
+      assert.equal(code, 0);
+      assert.deepEqual(dryRuns, [true]);
+      assert.equal(asked.length, 0);
+      assert.ok(out.buf.includes("Dry run plan for o/r into project 91 (Demo):"));
+      assert.ok(
+        out.buf.includes("would import 2 stories (1 labels), would skip 1 (already imported)"),
+      );
+      assert.ok(out.buf.includes("No changes made."));
+      assert.ok(!out.buf.includes("Importing"));
     }),
   );
 });

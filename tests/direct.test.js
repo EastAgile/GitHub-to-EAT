@@ -3,24 +3,9 @@ import { test } from "node:test";
 
 import { AuthError, EATClient } from "../src/client.js";
 import { markerFor } from "../src/dedup.js";
-import { DirectEngineError, runDirect } from "../src/direct.js";
+import { runDirect } from "../src/direct.js";
 import { startMockServer } from "../src/mockserver.js";
 import { capture } from "./helpers.js";
-
-const stubClient = /** @type {import("../src/client.js").EATClient} */ (
-  /** @type {unknown} */ ({})
-);
-
-test("dry-run still rejects — the local dry-run lands in the next story", async () => {
-  await assert.rejects(
-    () => runDirect(stubClient, 91, "o", "r", { included: ["issues"], dryRun: true }),
-    (err) => {
-      assert.ok(err instanceof DirectEngineError);
-      assert.match(err.message, /dry-run/);
-      return true;
-    },
-  );
-});
 
 /** A fetched-repo stub shaped like GitHubClient#fetchAll's result. */
 function fetchedRepo() {
@@ -92,6 +77,38 @@ test("runDirect imports once, then a re-run skips everything via the markers", a
     const recased = await runDirect(client, 91, "O", "R", options);
     assert.equal(recased.importedStories, 0);
     assert.equal(recased.skipped, 2);
+    assert.equal(mock.state.stories[91].length, 2);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("dry-run computes the plan locally and writes nothing", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const options = {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    };
+
+    const plan = await runDirect(client, 91, "o", "r", { ...options, dryRun: true });
+    assert.equal(plan.importedStories, 2);
+    assert.equal(plan.importedLabels, 1);
+    assert.equal(plan.skipped, 0);
+    assert.equal(plan.dryRun, true);
+    assert.deepEqual(plan.errors, []);
+    assert.equal((mock.state.stories[91] ?? []).length, 0);
+    assert.equal((mock.state.labels[91] ?? []).length, 0);
+
+    // After a real import, a dry-run re-run reports everything as would-skip.
+    await runDirect(client, 91, "o", "r", options);
+    const rerun = await runDirect(client, 91, "o", "r", { ...options, dryRun: true });
+    assert.equal(rerun.importedStories, 0);
+    assert.equal(rerun.importedLabels, 0);
+    assert.equal(rerun.skipped, 2);
+    assert.equal(rerun.dryRun, true);
     assert.equal(mock.state.stories[91].length, 2);
   } finally {
     await mock.close();
