@@ -181,8 +181,10 @@ The writer stage targets this EAT API surface, all under
 real server 2026-07-16 and mirrored by `src/mockserver.js`):
 
 - **`POST /labels`** — body `{ "name": "...", "background_color_hex": "#rrggbb",
-  "text_color_hex": "#rrggbb" }` (colors optional; omitted colors get server
-  defaults, observed `#3498db` / `#ffffff`) → 200
+  "text_color_hex": "#rrggbb" }` (`label_name` is an accepted request alias —
+  openapi lists both, and the required-field error names `label_name`; colors
+  optional; omitted colors get server defaults, observed `#3498db` /
+  `#ffffff`) → 200
   `{ label_id, label_name, project_id, background_color_hex, text_color_hex }`.
   A duplicate name — case-insensitive — is a `409 conflict`, so "ensure
   label" means treating 409 as already-exists; a missing name is a

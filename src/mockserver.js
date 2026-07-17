@@ -297,6 +297,11 @@ async function handle(state, req, res) {
       send(res, 400, { error: "invalid json" });
       return;
     }
+    // `null` and primitives parse as valid JSON but would blow up property access.
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      send(res, 400, { code: "validation_failed", error: "body must be a JSON object" });
+      return;
+    }
 
     const key = /** @type {string | undefined} */ (req.headers["idempotency-key"]);
     if (key) {
@@ -315,7 +320,12 @@ async function handle(state, req, res) {
         return;
       }
       const result = routePost(state, path, body, key);
-      state.idempotency[key] = { bodyHash, ...result };
+      // Snapshot, or the "stored" payload would alias live rows and mutate under replays.
+      state.idempotency[key] = {
+        bodyHash,
+        status: result.status,
+        payload: structuredClone(result.payload),
+      };
       send(res, result.status, result.payload);
       return;
     }
@@ -446,6 +456,17 @@ function createStory(state, projectId, body) {
     };
   }
 
+  if (body.labels != null && !Array.isArray(body.labels)) {
+    return {
+      status: 400,
+      payload: {
+        code: "validation_failed",
+        details: { fields: ["labels"] },
+        error: "labels must be an array",
+      },
+    };
+  }
+
   state.labels[projectId] ??= [];
   const projectLabels = state.labels[projectId];
   const labels = [];
@@ -567,7 +588,8 @@ function createComment(state, projectId, storyId, body) {
  */
 export async function startMockServer(state = makeState(), host = "127.0.0.1") {
   const server = http.createServer((req, res) => {
-    handle(state, req, res);
+    // An unhandled rejection would leave the socket open forever (client hangs).
+    handle(state, req, res).catch(() => send(res, 500, { error: "internal" }));
   });
   await new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -602,7 +624,7 @@ export function main(argv = process.argv.slice(2)) {
   const port = Number(values.port);
   const state = makeState();
   const server = http.createServer((req, res) => {
-    handle(state, req, res);
+    handle(state, req, res).catch(() => send(res, 500, { error: "internal" }));
   });
   server.listen(port, host, () => {
     console.log(`mock EAT server on http://${host}:${port} (Ctrl-C to stop)`);
