@@ -1,8 +1,6 @@
 /**
- * The "direct" import engine: run the import pipeline client-side instead of
- * delegating to the EAT server — fetch from GitHub, map issues to EAT shapes,
- * prescan for markers, write the survivors. Local dry-run is the one stage
- * still pending (next story); until it lands `--dry-run` rejects loudly.
+ * The "direct" import engine: fetch → map → prescan → write, run client-side
+ * instead of on the EAT server. The local dry-run stage is still pending — `--dry-run` rejects.
  */
 
 import { applyDedup, prescanImported } from "./dedup.js";

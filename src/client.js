@@ -184,8 +184,7 @@ export class EATClient {
 
   /**
    * Fetch one cursor page of a project's stories (direct-engine prescan).
-   * `limit`/`cursor` put the endpoint in cursor mode (`{ items, next_cursor }`);
-   * `fields` is the server's sparse-fieldset allowlist.
+   * `limit`/`cursor` drive cursor mode; `fields` is the sparse-fieldset allowlist.
    *
    * @param {number} projectId
    * @param {{ limit?: number, cursor?: string, fields?: string }} [options]

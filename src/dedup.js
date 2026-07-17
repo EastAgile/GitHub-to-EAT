@@ -1,10 +1,6 @@
 /**
- * Marker-based re-run safety for the direct engine.
- *
- * The public API exposes no import provenance (import_source /
- * import_external_id), so every story the direct engine writes carries a
- * stable trailing marker line, and a prescan of the target project turns
- * those markers back into a skip set. See CONTRACT.md "Marker dedup".
+ * Re-run safety for the direct engine: the public API exposes no import provenance,
+ * so written stories carry a marker line a prescan reads back. See CONTRACT.md "Marker dedup".
  */
 
 /**
@@ -90,9 +86,8 @@ export async function prescanImported(client, projectId, owner, repo, { pageSize
 }
 
 /**
- * Split a mapped plan against the prescan: drop already-imported stories,
- * stamp the marker onto every surviving description, and prune labels only
- * referenced by dropped stories. Returns a new plan; the input is untouched.
+ * Drop already-imported stories from the plan, stamp the marker on survivors, and
+ * prune labels no surviving story references. Returns a new plan; the input is untouched.
  *
  * @param {import("./writer.js").WritePlan} plan
  * @param {Set<string>} importedIds
