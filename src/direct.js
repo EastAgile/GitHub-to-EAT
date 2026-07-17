@@ -1,7 +1,6 @@
 /**
- * The "direct" import engine: fetch → map → prescan → write, run client-side
- * instead of on the EAT server. `--dry-run` runs the same pipeline but stops
- * before the write — no server dry-run support needed, unlike the server engine.
+ * The "direct" import engine: fetch → map → prescan → write, all client-side. `--dry-run`
+ * runs the same pipeline but stops before the write — no server dry-run support needed.
  */
 
 import { applyDedup, prescanImported } from "./dedup.js";
