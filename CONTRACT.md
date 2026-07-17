@@ -223,7 +223,8 @@ marker-based:
 - Every story it writes ends its description with a stable marker line:
   `Imported from https://github.com/{owner}/{repo}/issues/{n}`.
 - Before writing, it prescans the target project —
-  `GET /stories?limit=…&cursor=…&fields=story_id,description` (cursor mode
+  `GET /stories?limit=…&cursor=…&fields=story_id,description,tasks_count,comment_count`
+  (cursor mode
   whenever `cursor=` or `limit=` is present; `fields=` is a sparse-fieldset
   allowlist, unknown values → `400 validation_failed`, `story_id` always
   included; invalid `limit`/`cursor` values — including out-of-range
@@ -238,9 +239,11 @@ marker-based:
   skipped stories are not re-created.
 - The marker lands at story-create, before that story's tasks and comments.
   A run interrupted in that window leaves an incomplete story that stays
-  skipped on re-runs; the prescan fetches `tasks_count`/`comment_count` and
-  the next run warns (`tasks X/Y, comments X/Y`) with the repair path —
-  delete that story in EAT and re-run.
+  skipped on re-runs; when a marker-matched story has fewer
+  tasks/comments than the current GitHub issue, the next run warns
+  (`tasks X/Y, comments X/Y`) naming both possible causes — an interrupted
+  run, or the issue changing since import — with the repair path: delete
+  that story in EAT and re-run.
 
 ### Fidelity limitations (direct engine)
 

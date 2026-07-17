@@ -67,8 +67,9 @@ export async function runDirect(client, projectId, owner, repo, options) {
     const commentCount = Number(row.comment_count ?? 0);
     if (tasksCount < op.tasks.length || commentCount < op.comments.length) {
       stream?.write(
-        `warning: issue #${op.external_id} was only partially imported by an earlier run ` +
-          `(tasks ${tasksCount}/${op.tasks.length}, comments ${commentCount}/${op.comments.length}); ` +
+        `warning: issue #${op.external_id} has fewer tasks/comments in EAT than on GitHub ` +
+          `(tasks ${tasksCount}/${op.tasks.length}, comments ${commentCount}/${op.comments.length}) — ` +
+          "an earlier run may have been interrupted, or the issue changed since import; " +
           "it stays skipped — delete that story in EAT and re-run to repair.\n",
       );
     }

@@ -51,24 +51,6 @@ export function markerExternalId(description, owner, repo) {
 }
 
 /**
- * Extract the external ids of this repo's markers from prescanned story rows.
- * Markers for other repos are ignored — dedup is scoped per (owner, repo).
- *
- * @param {Array<{ description?: string | null }>} rows
- * @param {string} owner
- * @param {string} repo
- * @returns {Set<string>}
- */
-export function markedExternalIds(rows, owner, repo) {
-  const ids = new Set();
-  for (const row of rows) {
-    const id = markerExternalId(row.description, owner, repo);
-    if (id !== null) ids.add(id);
-  }
-  return ids;
-}
-
-/**
  * The subset of {@link import("./client.js").EATClient} the prescan needs.
  *
  * @typedef {object} PrescanClient

@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import {
   applyDedup,
-  markedExternalIds,
+  markerExternalId,
   markerFor,
   prescanImported,
   withMarker,
@@ -23,36 +23,34 @@ test("withMarker appends to a body and stands alone on a null one", () => {
   assert.equal(withMarker("", marker), marker);
 });
 
-test("markedExternalIds collects only this repo's markers", () => {
-  const rows = [
-    { story_id: 1, description: `fixed\n\n${markerFor("o", "r", "3")}` },
-    { story_id: 2, description: `other repo\n\n${markerFor("someone", "else", "9")}` },
-    { story_id: 3, description: "no marker here" },
-    { story_id: 4, description: null },
-    { story_id: 5 },
-  ];
-  assert.deepEqual([...markedExternalIds(rows, "o", "r")], ["3"]);
+test("markerExternalId reads only this repo's marker", () => {
+  assert.equal(markerExternalId(`fixed\n\n${markerFor("o", "r", "3")}`, "o", "r"), "3");
+  assert.equal(
+    markerExternalId(`other repo\n\n${markerFor("someone", "else", "9")}`, "o", "r"),
+    null,
+  );
+  assert.equal(markerExternalId("no marker here", "o", "r"), null);
+  assert.equal(markerExternalId(null, "o", "r"), null);
+  assert.equal(markerExternalId(undefined, "o", "r"), null);
 });
 
-test("markedExternalIds escapes regex metacharacters in repo names", () => {
-  const rows = [
-    { story_id: 1, description: markerFor("o", "r.j", "5") },
-    { story_id: 2, description: markerFor("o", "rxj", "6") },
-  ];
-  assert.deepEqual([...markedExternalIds(rows, "o", "r.j")], ["5"]);
+test("markerExternalId escapes regex metacharacters in repo names", () => {
+  assert.equal(markerExternalId(markerFor("o", "r.j", "5"), "o", "r.j"), "5");
+  assert.equal(markerExternalId(markerFor("o", "rxj", "6"), "o", "r.j"), null);
 });
 
 test("marker matching ignores repo-slug casing, like GitHub does", () => {
-  const rows = [{ story_id: 1, description: markerFor("Octocat", "Hello-World", "3") }];
-  assert.deepEqual([...markedExternalIds(rows, "octocat", "hello-world")], ["3"]);
+  assert.equal(
+    markerExternalId(markerFor("Octocat", "Hello-World", "3"), "octocat", "hello-world"),
+    "3",
+  );
 });
 
 test("a marker-shaped line mid-body is not a marker — only the last line counts", () => {
   const quoted = `see also:\n${markerFor("o", "r", "7")}\nmore discussion below`;
-  assert.deepEqual([...markedExternalIds([{ description: quoted }], "o", "r")], []);
+  assert.equal(markerExternalId(quoted, "o", "r"), null);
   // The writer appends the real marker after any quoting body — that still matches.
-  const written = `${quoted}\n\n${markerFor("o", "r", "9")}`;
-  assert.deepEqual([...markedExternalIds([{ description: written }], "o", "r")], ["9"]);
+  assert.equal(markerExternalId(`${quoted}\n\n${markerFor("o", "r", "9")}`, "o", "r"), "9");
 });
 
 test("prescanImported walks every cursor page and keeps the matched rows", () => {
