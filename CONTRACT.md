@@ -120,11 +120,16 @@ v3 adds a second import engine selectable with `--engine server|direct`
 - **Issues only.** `--engine direct` composes with `--include`, but v3 supports
   `issues` only; `prs`, `milestones`, and `releases` exit with a usage error
   ("not supported by the direct engine yet") — those land in v4.
-- **Staged build.** This epic ships across several stories. The fetch → map →
-  prescan → write pipeline is wired end-to-end: `--engine direct` performs real
-  imports (issues only), prompting for confirmation exactly like the server
-  engine. The one stage still pending is the local dry-run — `--dry-run` with
-  `--engine direct` exits with an error naming it until that story lands.
+- **Staged build.** This epic ships across several stories; the pipeline is
+  now wired end-to-end. `--engine direct` performs real imports (issues only),
+  prompting for confirmation exactly like the server engine. `--dry-run` runs
+  the same fetch → map → prescan stages and stops before the write, rendering
+  the same would-import / would-skip plan block as the server dry-run path.
+  Unlike the server engine there is no `openapi.json` feature-detection gate —
+  the plan is computed client-side, so no server dry-run support is required.
+  The would-import label count is the plan's label set; labels the project
+  already has are only discovered at write time (`409` → existing), so a real
+  run may create fewer.
 
 ### GitHub fetch stage
 
