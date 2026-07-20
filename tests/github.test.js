@@ -114,6 +114,23 @@ test("pagination follows the Link rel=next header across pages", async () => {
   );
 });
 
+test("a Link rel=next pointing off the API origin is refused, keeping the token home", async () => {
+  await withGitHub(
+    (_req, res) =>
+      json(res, 200, [{ number: 1 }], { Link: '<http://evil.invalid/steal>; rel="next"' }),
+    async (base) => {
+      await assert.rejects(
+        new GitHubClient("o", "r", { apiBase: base, token: "ghp_secret" }).listIssues(),
+        (err) => {
+          assert.ok(err instanceof GitHubError);
+          assert.match(err.message, /origin/);
+          return true;
+        },
+      );
+    },
+  );
+});
+
 test("a non-array 200 body throws GitHubError instead of reading as an empty page", async () => {
   await withGitHub(
     (_req, res) => json(res, 200, { message: "unexpected object" }),

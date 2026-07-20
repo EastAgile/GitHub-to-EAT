@@ -136,7 +136,15 @@ export class GitHubClient {
         throw new GitHubError(`GitHub returned an unexpected payload (expected a JSON array)`);
       }
       out.push(...page);
-      url = nextLink(response.headers.get("link")) ?? "";
+      const next = nextLink(response.headers.get("link"));
+      // The Authorization header rides along on every request — never follow
+      // a rel=next off the API origin.
+      if (next && new URL(next).origin !== new URL(this.apiBase).origin) {
+        throw new GitHubError(
+          `GitHub pagination pointed off the API origin (${new URL(next).origin}); refusing to follow it`,
+        );
+      }
+      url = next ?? "";
     }
     return out;
   }
