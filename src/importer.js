@@ -16,6 +16,8 @@
  * @property {number} skipped
  * @property {unknown[]} errors
  * @property {Record<string, unknown[]>} unmatched
+ * @property {string[]} externalMembersCreated logins of external_member rows
+ *   newly created by the import; empty when the server predates the field
  * @property {boolean} dryRun true when the server confirmed this was a
  *   dry-run plan (its response echoes the flag), not a real import
  */
@@ -57,12 +59,16 @@ export async function runImport(
   } else {
     stories = Number(imported ?? 0) || 0;
   }
+  const created = raw.external_members_created;
   return {
     importedStories: stories,
     importedLabels: labels,
     skipped: Number(raw.skipped ?? 0) || 0,
     errors: [...(raw.errors || [])],
     unmatched: { ...(raw.unmatched || {}) },
+    externalMembersCreated: Array.isArray(created)
+      ? created.filter((login) => typeof login === "string" && login)
+      : [],
     dryRun: raw.dry_run === true,
   };
 }

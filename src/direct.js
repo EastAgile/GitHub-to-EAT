@@ -80,6 +80,7 @@ export async function runDirect(client, projectId, owner, repo, options) {
       skipped,
       errors: [],
       unmatched: {},
+      externalMembersCreated: [],
       dryRun: true,
     };
   }
@@ -91,6 +92,7 @@ export async function runDirect(client, projectId, owner, repo, options) {
     skipped,
     errors: [],
     unmatched: {},
+    externalMembersCreated: [],
     dryRun: false,
   };
 }

@@ -45,9 +45,13 @@ import { parseArgs } from "node:util";
  * @property {any} meta
  * @property {any} importResult
  * @property {{ issues: number, prs: number, milestones: number, releases: number,
- *   labels: number }} fixture
+ *   labels: number, assignees?: string[] }} fixture `assignees` are the GitHub
+ *   logins assigned across the fixture rows — they become
+ *   `external_members_created` on first import (computed mode)
  * @property {Record<number, string[]>} importedIds external ids already
  *   imported per project — drives skip-if-exists on re-import (computed mode)
+ * @property {Record<number, string[]>} externalMembers logins whose
+ *   external-member rows already exist per project — a re-import creates none
  * @property {boolean} serverDryRun when true (default), GET /openapi.json
  *   advertises the import dry_run field and dry_run requests are honoured;
  *   false simulates an older server (openapi 404s)
@@ -74,8 +78,9 @@ export function makeState(overrides = {}) {
     labels: {},
     meta: { story_types: ["feature", "bug", "chore", "release"] },
     importResult: null,
-    fixture: { issues: 3, prs: 2, milestones: 1, releases: 1, labels: 0 },
+    fixture: { issues: 3, prs: 2, milestones: 1, releases: 1, labels: 0, assignees: [] },
     importedIds: {},
+    externalMembers: {},
     serverDryRun: true,
     maxLengths: {},
     imports: [],
@@ -215,14 +220,20 @@ function computeImportResult(state, projectId, body) {
   const dryRun = state.serverDryRun && body.dry_run === true;
   const existing = new Set(state.importedIds[projectId] ?? []);
   const fresh = ids.filter((id) => !existing.has(id));
+  const knownMembers = new Set(state.externalMembers[projectId] ?? []);
+  const createdMembers = (state.fixture.assignees ?? []).filter(
+    (login) => !knownMembers.has(login),
+  );
   if (!dryRun) {
     state.importedIds[projectId] = [...existing, ...fresh];
+    state.externalMembers[projectId] = [...knownMembers, ...createdMembers];
   }
   return {
     dry_run: dryRun,
     imported: { stories: fresh.length, labels: fresh.length ? state.fixture.labels : 0 },
     skipped: ids.length - fresh.length,
     errors: [],
+    external_members_created: createdMembers,
     unmatched: {
       owners: [],
       followers: [],

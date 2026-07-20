@@ -86,6 +86,18 @@ The API base is `.../api/v1`. Shapes the CLI parses:
   only (epics created from milestones are not counted). `skipped` means
   "already imported" (see re-import dedup above). `errors` is a list of
   strings. `dry_run` echoes the request's `dry_run` field.
+
+  **Optional** `"external_members_created": ["<github login>", ...]` — the
+  GitHub logins whose external-member rows (display-only owner attributions
+  outside the project roster; auto-linked to a real member when a matching
+  GitHub account signs in) were newly created by this import. **Not yet
+  emitted by the hosted tracker** — this is the agreed forward-compat shape
+  (assignees-become-owners shipped server-side 2026-07-09 without reporting
+  the rows it creates). The CLI renders a placeholder-owners note when the
+  field is present and non-empty; an absent field, empty array, or non-array
+  value renders nothing and never errors. The mock server emits the field in
+  computed mode (`fixture.assignees`), creating each login at most once per
+  project.
 - **Project** (`GET .../projects/{id}`): the name field is `project_title` (not
   `title`/`name`); also `project_id`, `project_desc`, etc.
 - **Stories** (`GET .../projects/{id}/stories`): with `?limit=` (or `?cursor=`) it

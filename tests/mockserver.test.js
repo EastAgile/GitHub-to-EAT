@@ -75,6 +75,40 @@ test("import records the body and idempotency key", async () => {
   }
 });
 
+test("computed import emits external_members_created once per project", async () => {
+  const mock = await startMockServer(
+    makeState({
+      fixture: { issues: 2, prs: 0, milestones: 0, releases: 0, labels: 0, assignees: ["alice"] },
+    }),
+  );
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const first = await client.importGithub(91, "o", "r", { idempotencyKey: "k1" });
+    assert.deepEqual(first.external_members_created, ["alice"]);
+    const second = await client.importGithub(91, "o", "r", { idempotencyKey: "k2" });
+    assert.deepEqual(second.external_members_created, []);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a dry-run import does not persist external members", async () => {
+  const mock = await startMockServer(
+    makeState({
+      fixture: { issues: 2, prs: 0, milestones: 0, releases: 0, labels: 0, assignees: ["alice"] },
+    }),
+  );
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const plan = await client.importGithub(91, "o", "r", { idempotencyKey: "k1", dryRun: true });
+    assert.deepEqual(plan.external_members_created, ["alice"]);
+    const real = await client.importGithub(91, "o", "r", { idempotencyKey: "k2" });
+    assert.deepEqual(real.external_members_created, ["alice"]);
+  } finally {
+    await mock.close();
+  }
+});
+
 test("import to a missing project returns 404", async () => {
   const mock = await startMockServer();
   try {

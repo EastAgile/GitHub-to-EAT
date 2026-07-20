@@ -94,6 +94,16 @@ function reportImport(outcome, { stdout, stderr, project, appBase }) {
   if (unmatchedTotal) {
     stdout.write(`note: ${unmatchedTotal} GitHub user(s) could not be matched to members.\n`);
   }
+  const created = Array.isArray(outcome.externalMembersCreated)
+    ? outcome.externalMembersCreated
+    : [];
+  if (created.length) {
+    stdout.write(
+      `note: ${created.length} placeholder owner(s) created: ` +
+        `${created.map((login) => `@${login}`).join(", ")} — external members outside ` +
+        "the project roster; auto-linked when the matching GitHub account signs in.\n",
+    );
+  }
   stdout.write(`Board: ${appBase}/projects/${project}\n`);
   for (const err of outcome.errors) {
     stderr.write(`  - ${err}\n`);
