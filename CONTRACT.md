@@ -145,6 +145,25 @@ v3 adds a second import engine selectable with `--engine server|direct`
   already has are only discovered at write time (`409` → existing), so a real
   run may create fewer.
 
+### Per-run customization (`--customize`)
+
+`--customize` opts a run into per-run import customization. It is direct-only
+by construction — the server engine maps everything server-side, so there is
+nothing to customize there. The flag implies `--engine direct` (the legend
+header names the engine); an explicit `--engine server --customize` exits 2
+naming the conflict. It also needs an interactive terminal — the wizard that
+will fill in the questions prompts on the TTY — so non-TTY stdin or stdout
+exits 2.
+
+Today the flag is plumbing only: a `Customization` object whose defaults
+reproduce the default mapping byte-identically —
+`{ states: "all", milestones: null, storyType: "infer", comments: true,
+tasks: true }`, defined next to the mapping profile in `src/mapping.js` —
+threads through the direct pipeline, so `--customize` runs end-to-end with
+output identical to plain `--engine direct`. The interactive wizard,
+customization-aware mapping (filters + overrides), and customized
+legend + confirm land in follow-up stories.
+
 ### GitHub fetch stage
 
 The direct engine reads GitHub itself (the server engine never exposed this —
