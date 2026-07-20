@@ -312,7 +312,7 @@ test("fetchAll returns issues, comments, and labels together", async () => {
       if (path.endsWith("/issues")) {
         json(res, 200, [{ number: 1 }, { number: 2, pull_request: {} }]);
       } else if (path.endsWith("/issues/comments")) {
-        json(res, 200, [{ id: 5 }]);
+        json(res, 200, [{ id: 5, issue_url: "https://api.github.com/repos/o/r/issues/1" }]);
       } else if (path.endsWith("/labels")) {
         json(res, 200, [{ name: "bug" }, { name: "wontfix" }]);
       } else {
@@ -324,6 +324,33 @@ test("fetchAll returns issues, comments, and labels together", async () => {
       assert.equal(repo.issues.length, 1); // PR filtered out
       assert.equal(repo.comments.length, 1);
       assert.equal(repo.labels.length, 2);
+    },
+  );
+});
+
+test("fetchAll drops comments whose issue_url points at a PR or unknown issue", async () => {
+  await withGitHub(
+    (req, res) => {
+      const path = new URL(req.url ?? "", "http://x").pathname;
+      if (path.endsWith("/issues")) {
+        json(res, 200, [{ number: 1 }, { number: 2, pull_request: {} }]);
+      } else if (path.endsWith("/issues/comments")) {
+        json(res, 200, [
+          { id: 10, issue_url: "https://api.github.com/repos/o/r/issues/1" },
+          { id: 11, issue_url: "https://api.github.com/repos/o/r/issues/2" }, // PR conversation
+          { id: 12, issue_url: "https://api.github.com/repos/o/r/issues/99" }, // unknown
+          { id: 13 }, // no issue_url at all
+        ]);
+      } else {
+        json(res, 200, []);
+      }
+    },
+    async (base) => {
+      const repo = await new GitHubClient("o", "r", { apiBase: base }).fetchAll();
+      assert.deepEqual(
+        repo.comments.map((c) => c.id),
+        [10],
+      );
     },
   );
 });

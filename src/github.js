@@ -181,6 +181,10 @@ export class GitHubClient {
   /**
    * Fetch issues, comments, and labels in one call.
    *
+   * The repo-wide comments endpoint also returns PR conversation comments
+   * (issue comments in GitHub's model); only comments belonging to a kept
+   * issue survive, so downstream mapping never sees PR chatter.
+   *
    * @returns {Promise<{ issues: any[], comments: any[], labels: any[] }>}
    */
   async fetchAll() {
@@ -189,6 +193,14 @@ export class GitHubClient {
       this.listComments(),
       this.listLabels(),
     ]);
-    return { issues, comments, labels };
+    const kept = new Set(issues.map((issue) => String(issue.number)));
+    return {
+      issues,
+      comments: comments.filter((comment) => {
+        const match = (comment.issue_url ?? "").match(/\/issues\/(\d+)$/);
+        return match !== null && kept.has(match[1]);
+      }),
+      labels,
+    };
   }
 }
