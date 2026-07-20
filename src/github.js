@@ -128,7 +128,7 @@ export class GitHubClient {
   async #paginate(path) {
     /** @type {any[]} */
     const out = [];
-    let url = `${this.apiBase}/repos/${this.owner}/${this.repo}${path}`;
+    let url = `${this.apiBase}/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}${path}`;
     while (url) {
       const response = await this.#get(url);
       const page = await response.json();

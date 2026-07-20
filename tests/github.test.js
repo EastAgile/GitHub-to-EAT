@@ -57,6 +57,23 @@ test("listIssues requests state=all with per_page=100", async () => {
   assert.equal(url?.searchParams.get("per_page"), "100");
 });
 
+test("owner and repo are URL-encoded, so metacharacters cannot mangle the request", async () => {
+  /** @type {URL | undefined} */
+  let url;
+  await withGitHub(
+    (req, res) => {
+      url = new URL(req.url ?? "", "http://x");
+      json(res, 200, []);
+    },
+    async (base) => {
+      await new GitHubClient("o", "name?x=1", { apiBase: base }).listIssues();
+    },
+  );
+  assert.equal(url?.pathname, "/repos/o/name%3Fx%3D1/issues");
+  assert.equal(url?.searchParams.get("x"), null);
+  assert.equal(url?.searchParams.get("state"), "all");
+});
+
 test("listIssues drops pull requests from the issues list", async () => {
   await withGitHub(
     (_req, res) =>
