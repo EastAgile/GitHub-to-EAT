@@ -75,6 +75,20 @@ export function parseRepo(value) {
 }
 
 /**
+ * Tail of the placeholder-owners message, shared by the import note and the
+ * dry-run preview so the two renderings never drift.
+ *
+ * @param {string[]} created
+ * @returns {string}
+ */
+function placeholderOwnersTail(created) {
+  return (
+    `${created.map((login) => `@${login}`).join(", ")} — external members outside ` +
+    "the project roster; auto-linked when the matching GitHub account signs in.\n"
+  );
+}
+
+/**
  * Write the import result and board link; return the process exit code (1 when
  * the server reported per-item errors, else 0). Shared by both engines so their
  * output convention is identical.
@@ -93,6 +107,14 @@ function reportImport(outcome, { stdout, stderr, project, appBase }) {
   const unmatchedTotal = Object.values(outcome.unmatched).reduce((n, v) => n + v.length, 0);
   if (unmatchedTotal) {
     stdout.write(`note: ${unmatchedTotal} GitHub user(s) could not be matched to members.\n`);
+  }
+  const created = Array.isArray(outcome.externalMembersCreated)
+    ? outcome.externalMembersCreated
+    : [];
+  if (created.length) {
+    stdout.write(
+      `note: ${created.length} placeholder owner(s) created: ${placeholderOwnersTail(created)}`,
+    );
   }
   stdout.write(`Board: ${appBase}/projects/${project}\n`);
   for (const err of outcome.errors) {
@@ -113,10 +135,14 @@ function reportImport(outcome, { stdout, stderr, project, appBase }) {
  */
 function reportDryRunPlan(plan, { stdout, stderr, owner, repo, project, projectTitle }) {
   const skippedNote = plan.skipped ? " (already imported)" : "";
+  const created = plan.externalMembersCreated;
   stdout.write(
     `Dry run plan for ${owner}/${repo} into project ${project} (${projectTitle}):\n` +
       `  would import ${plan.importedStories} stories (${plan.importedLabels} labels), ` +
       `would skip ${plan.skipped}${skippedNote}, ${plan.errors.length} error(s).\n` +
+      (created.length
+        ? `  would create ${created.length} placeholder owner(s): ${placeholderOwnersTail(created)}`
+        : "") +
       "No changes made.\n",
   );
   for (const err of plan.errors) {

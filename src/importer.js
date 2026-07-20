@@ -16,9 +16,15 @@
  * @property {number} skipped
  * @property {unknown[]} errors
  * @property {Record<string, unknown[]>} unmatched
+ * @property {string[]} externalMembersCreated logins of external_member rows
+ *   newly created by the import; empty when the server predates the field
  * @property {boolean} dryRun true when the server confirmed this was a
  *   dry-run plan (its response echoes the flag), not a real import
  */
+
+// Logins are rendered raw to the user's terminal, so only GitHub's login
+// grammar is trusted; anything else (ANSI escapes, newlines) is garbage.
+const GITHUB_LOGIN = /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$/;
 
 /**
  * Perform the GitHub import and return a normalized outcome.
@@ -57,12 +63,20 @@ export async function runImport(
   } else {
     stories = Number(imported ?? 0) || 0;
   }
+  const created = raw.external_members_created;
   return {
     importedStories: stories,
     importedLabels: labels,
     skipped: Number(raw.skipped ?? 0) || 0,
     errors: [...(raw.errors || [])],
     unmatched: { ...(raw.unmatched || {}) },
+    externalMembersCreated: Array.isArray(created)
+      ? [
+          ...new Set(
+            created.filter((login) => typeof login === "string" && GITHUB_LOGIN.test(login)),
+          ),
+        ]
+      : [],
     dryRun: raw.dry_run === true,
   };
 }

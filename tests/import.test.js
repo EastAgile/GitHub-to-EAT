@@ -65,6 +65,7 @@ test("runImport normalizes missing fields", async () => {
     skipped: 0,
     errors: [],
     unmatched: {},
+    externalMembersCreated: [],
     dryRun: false,
   });
 });
@@ -77,6 +78,7 @@ test("runImport reads nested imported", async () => {
     skipped: 1,
     errors: ["x"],
     unmatched: {},
+    externalMembersCreated: [],
     dryRun: false,
   });
 });
@@ -89,8 +91,49 @@ test("runImport tolerates flat imported", async () => {
     skipped: 0,
     errors: [],
     unmatched: {},
+    externalMembersCreated: [],
     dryRun: false,
   });
+});
+
+test("runImport reads external_members_created", async () => {
+  const raw = {
+    imported: { stories: 2, labels: 0 },
+    skipped: 0,
+    errors: [],
+    external_members_created: ["alice", "bob"],
+  };
+  const result = await runImport(fakeClient(raw), 91, "o", "r", { idempotencyKey: "k" });
+  assert.deepEqual(result.externalMembersCreated, ["alice", "bob"]);
+});
+
+for (const garbage of ["nope", 7, { alice: true }, null, [1, "", "ok"]]) {
+  test(`runImport normalizes external_members_created ${JSON.stringify(garbage)}`, async () => {
+    const raw = { imported: 1, skipped: 0, errors: [], external_members_created: garbage };
+    const result = await runImport(fakeClient(raw), 91, "o", "r", { idempotencyKey: "k" });
+    assert.deepEqual(result.externalMembersCreated, Array.isArray(garbage) ? ["ok"] : []);
+  });
+}
+
+test("runImport drops non-login strings and duplicate logins", async () => {
+  const raw = {
+    imported: { stories: 1, labels: 0 },
+    skipped: 0,
+    errors: [],
+    external_members_created: [
+      "alice",
+      "alice",
+      "evil\nBoard: https://evil.example",
+      "\u001b[2Kwiped",
+      "-lead",
+      "trail-",
+      "no--doubles",
+      "a".repeat(40),
+      "ok-name",
+    ],
+  };
+  const result = await runImport(fakeClient(raw), 91, "o", "r", { idempotencyKey: "k" });
+  assert.deepEqual(result.externalMembersCreated, ["alice", "ok-name"]);
 });
 
 test("runImport passes the token through", async () => {
@@ -254,6 +297,101 @@ test("unmatched users are reported", async () => {
     await mock.close();
   }
   assert.ok(out.buf.includes("3 GitHub user"));
+});
+
+const PLACEHOLDER_NOTE =
+  "note: 2 placeholder owner(s) created: @alice, @bob — external members outside " +
+  "the project roster; auto-linked when the matching GitHub account signs in.\n";
+
+test("placeholder owners created by the import are reported", async () => {
+  const result = {
+    imported: { stories: 2, labels: 0 },
+    skipped: 0,
+    errors: [],
+    external_members_created: ["alice", "bob"],
+  };
+  const mock = await startMockServer(makeState({ importResult: result }));
+  const out = capture();
+  try {
+    await inTempDir(() =>
+      withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
+        const code = await main(["--project", "91", "--repo", "o/r"], {
+          stdout: out,
+          stderr: capture(),
+        });
+        assert.equal(code, 0);
+      }),
+    );
+  } finally {
+    await mock.close();
+  }
+  assert.ok(out.buf.includes(PLACEHOLDER_NOTE), out.buf);
+});
+
+for (const [label, result] of [
+  ["omits the field", { imported: { stories: 1, labels: 0 }, skipped: 0, errors: [] }],
+  [
+    "sends an empty array",
+    { imported: { stories: 1, labels: 0 }, skipped: 0, errors: [], external_members_created: [] },
+  ],
+  [
+    "sends a non-array",
+    {
+      imported: { stories: 1, labels: 0 },
+      skipped: 0,
+      errors: [],
+      external_members_created: "garbage",
+    },
+  ],
+]) {
+  test(`no placeholder note when the server ${label}`, async () => {
+    const mock = await startMockServer(makeState({ importResult: result }));
+    const out = capture();
+    try {
+      await inTempDir(() =>
+        withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
+          const code = await main(["--project", "91", "--repo", "o/r"], {
+            stdout: out,
+            stderr: capture(),
+          });
+          assert.equal(code, 0);
+        }),
+      );
+    } finally {
+      await mock.close();
+    }
+    assert.ok(!out.buf.includes("placeholder owner"), out.buf);
+  });
+}
+
+test("mock computed mode reports placeholder owners end-to-end", async () => {
+  const mock = await startMockServer(
+    makeState({
+      fixture: {
+        issues: 3,
+        prs: 2,
+        milestones: 1,
+        releases: 1,
+        labels: 0,
+        assignees: ["alice", "bob"],
+      },
+    }),
+  );
+  const out = capture();
+  try {
+    await inTempDir(() =>
+      withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
+        const code = await main(["--project", "91", "--repo", "o/r"], {
+          stdout: out,
+          stderr: capture(),
+        });
+        assert.equal(code, 0);
+      }),
+    );
+  } finally {
+    await mock.close();
+  }
+  assert.ok(out.buf.includes(PLACEHOLDER_NOTE), out.buf);
 });
 
 test("--include issues,prs sends include_pull_requests and counts PR stories", async () => {
@@ -454,6 +592,46 @@ test("--dry-run renders the server plan and writes nothing", async () => {
     assert.ok(out.buf.includes("No changes made."));
     assert.deepEqual(mock.state.importedIds, {}); // nothing persisted
     assert.equal(mock.state.imports[0].body.dry_run, true);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("--dry-run previews the placeholder owners the import would create", async () => {
+  const mock = await startMockServer(
+    makeState({
+      fixture: {
+        issues: 3,
+        prs: 0,
+        milestones: 0,
+        releases: 0,
+        labels: 0,
+        assignees: ["alice", "bob"],
+      },
+    }),
+  );
+  const out = capture();
+  try {
+    await inTempDir(() =>
+      withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
+        assert.equal(
+          await main(["--project", "91", "--repo", "o/r", "--dry-run"], {
+            stdout: out,
+            stderr: capture(),
+          }),
+          0,
+        );
+      }),
+    );
+    assert.ok(
+      out.buf.includes(
+        "would create 2 placeholder owner(s): @alice, @bob — external members outside " +
+          "the project roster; auto-linked when the matching GitHub account signs in.",
+      ),
+      out.buf,
+    );
+    assert.ok(out.buf.includes("No changes made."));
+    assert.deepEqual(mock.state.externalMembers, {}); // preview persisted nothing
   } finally {
     await mock.close();
   }

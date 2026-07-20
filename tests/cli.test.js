@@ -21,6 +21,7 @@ function outcome(overrides = {}) {
     skipped: 0,
     errors: [],
     unmatched: {},
+    externalMembersCreated: [],
     dryRun: false,
     ...overrides,
   };
