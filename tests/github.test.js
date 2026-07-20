@@ -114,6 +114,64 @@ test("pagination follows the Link rel=next header across pages", async () => {
   );
 });
 
+test("pagination picks rel=next out of a multi-rel Link header", async () => {
+  await withGitHub(
+    (req, res) => {
+      const url = new URL(req.url ?? "", "http://x");
+      const here = `${url.protocol}//${req.headers.host}${url.pathname}`;
+      const page = url.searchParams.get("page") ?? "1";
+      if (page === "1") {
+        json(res, 200, [{ number: 1 }], {
+          Link: `<${here}?page=1>; rel="prev", <${here}?page=2>; rel="next", <${here}?page=2>; rel="last"`,
+        });
+      } else {
+        json(res, 200, [{ number: 2 }], {
+          Link: `<${here}?page=1>; rel="prev", <${here}?page=1>; rel="first"`,
+        });
+      }
+    },
+    async (base) => {
+      const issues = await new GitHubClient("o", "r", { apiBase: base }).listIssues();
+      assert.deepEqual(
+        issues.map((i) => i.number),
+        [1, 2],
+      );
+    },
+  );
+});
+
+test("a request that outlives the timeout maps to GitHubError naming the timeout", async () => {
+  await withGitHub(
+    () => {
+      /* never respond */
+    },
+    async (base) => {
+      await assert.rejects(
+        new GitHubClient("o", "r", { apiBase: base, timeout: 0.05 }).listIssues(),
+        (err) => {
+          assert.ok(err instanceof GitHubError);
+          assert.match(err.message, /timed out/);
+          return true;
+        },
+      );
+    },
+  );
+});
+
+test("an unmapped >=400 status maps to GitHubError carrying status and body", async () => {
+  await withGitHub(
+    (_req, res) => json(res, 500, { message: "boom" }),
+    async (base) => {
+      await assert.rejects(new GitHubClient("o", "r", { apiBase: base }).listIssues(), (err) => {
+        assert.ok(err instanceof GitHubError);
+        assert.match(err.message, /\(500\)/);
+        assert.match(err.message, /boom/);
+        return true;
+      });
+    },
+  );
+});
+
 test("a Link rel=next pointing off the API origin is refused, keeping the token home", async () => {
   await withGitHub(
     (_req, res) =>
