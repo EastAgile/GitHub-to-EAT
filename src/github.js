@@ -181,9 +181,8 @@ export class GitHubClient {
   /**
    * Fetch issues, comments, and labels in one call.
    *
-   * The repo-wide comments endpoint also returns PR conversation comments
-   * (issue comments in GitHub's model); only comments belonging to a kept
-   * issue survive, so downstream mapping never sees PR chatter.
+   * The repo-wide comments endpoint includes PR conversation comments; only
+   * comments on kept issues survive, so mapping never sees PR chatter.
    *
    * @returns {Promise<{ issues: any[], comments: any[], labels: any[] }>}
    */
