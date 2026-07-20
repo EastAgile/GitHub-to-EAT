@@ -115,6 +115,27 @@ for (const garbage of ["nope", 7, { alice: true }, null, [1, "", "ok"]]) {
   });
 }
 
+test("runImport drops non-login strings and duplicate logins", async () => {
+  const raw = {
+    imported: { stories: 1, labels: 0 },
+    skipped: 0,
+    errors: [],
+    external_members_created: [
+      "alice",
+      "alice",
+      "evil\nBoard: https://evil.example",
+      "\u001b[2Kwiped",
+      "-lead",
+      "trail-",
+      "no--doubles",
+      "a".repeat(40),
+      "ok-name",
+    ],
+  };
+  const result = await runImport(fakeClient(raw), 91, "o", "r", { idempotencyKey: "k" });
+  assert.deepEqual(result.externalMembersCreated, ["alice", "ok-name"]);
+});
+
 test("runImport passes the token through", async () => {
   const fake = fakeClient({ imported: { stories: 0, labels: 0 }, skipped: 0, errors: [] });
   await runImport(fake, 91, "o", "r", { idempotencyKey: "k", token: "ghp_z" });
@@ -571,6 +592,46 @@ test("--dry-run renders the server plan and writes nothing", async () => {
     assert.ok(out.buf.includes("No changes made."));
     assert.deepEqual(mock.state.importedIds, {}); // nothing persisted
     assert.equal(mock.state.imports[0].body.dry_run, true);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("--dry-run previews the placeholder owners the import would create", async () => {
+  const mock = await startMockServer(
+    makeState({
+      fixture: {
+        issues: 3,
+        prs: 0,
+        milestones: 0,
+        releases: 0,
+        labels: 0,
+        assignees: ["alice", "bob"],
+      },
+    }),
+  );
+  const out = capture();
+  try {
+    await inTempDir(() =>
+      withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
+        assert.equal(
+          await main(["--project", "91", "--repo", "o/r", "--dry-run"], {
+            stdout: out,
+            stderr: capture(),
+          }),
+          0,
+        );
+      }),
+    );
+    assert.ok(
+      out.buf.includes(
+        "would create 2 placeholder owner(s): @alice, @bob — external members outside " +
+          "the project roster; auto-linked when the matching GitHub account signs in.",
+      ),
+      out.buf,
+    );
+    assert.ok(out.buf.includes("No changes made."));
+    assert.deepEqual(mock.state.externalMembers, {}); // preview persisted nothing
   } finally {
     await mock.close();
   }

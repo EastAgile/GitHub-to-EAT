@@ -22,6 +22,10 @@
  *   dry-run plan (its response echoes the flag), not a real import
  */
 
+// Logins are rendered raw to the user's terminal, so only GitHub's login
+// grammar is trusted; anything else (ANSI escapes, newlines) is garbage.
+const GITHUB_LOGIN = /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$/;
+
 /**
  * Perform the GitHub import and return a normalized outcome.
  *
@@ -67,7 +71,11 @@ export async function runImport(
     errors: [...(raw.errors || [])],
     unmatched: { ...(raw.unmatched || {}) },
     externalMembersCreated: Array.isArray(created)
-      ? created.filter((login) => typeof login === "string" && login)
+      ? [
+          ...new Set(
+            created.filter((login) => typeof login === "string" && GITHUB_LOGIN.test(login)),
+          ),
+        ]
       : [],
     dryRun: raw.dry_run === true,
   };

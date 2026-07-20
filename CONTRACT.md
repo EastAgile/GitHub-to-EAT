@@ -94,10 +94,12 @@ The API base is `.../api/v1`. Shapes the CLI parses:
   emitted by the hosted tracker** — this is the agreed forward-compat shape
   (assignees-become-owners shipped server-side 2026-07-09 without reporting
   the rows it creates). The CLI renders a placeholder-owners note when the
-  field is present and non-empty; an absent field, empty array, or non-array
-  value renders nothing and never errors. The mock server emits the field in
-  computed mode (`fixture.assignees`), creating each login at most once per
-  project.
+  field is present and non-empty (on `--dry-run`, as a `would create` line in
+  the plan); an absent field, empty array, or non-array value renders nothing
+  and never errors. Entries that are not valid GitHub logins (alphanumerics
+  and single inner hyphens, at most 39 chars) are dropped and duplicates
+  collapsed before rendering. The mock server emits the field in computed
+  mode (`fixture.assignees`), creating each login at most once per project.
 - **Project** (`GET .../projects/{id}`): the name field is `project_title` (not
   `title`/`name`); also `project_id`, `project_desc`, etc.
 - **Stories** (`GET .../projects/{id}/stories`): with `?limit=` (or `?cursor=`) it
