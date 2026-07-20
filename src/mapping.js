@@ -14,6 +14,29 @@ export const ISSUES_LEGEND = [
 ];
 
 /**
+ * @typedef {object} Customization per-run mapping overrides (`--customize`)
+ * @property {string} states which GitHub issue states to import
+ * @property {string | null} milestones milestone filter; null imports every issue
+ * @property {string} storyType story-type strategy; "infer" uses {@link inferStoryType}
+ * @property {boolean} comments import issue comments
+ * @property {boolean} tasks import body checklists as tasks
+ */
+
+/**
+ * The no-op customization: every field set so the mapping matches the default
+ * profile byte-for-byte. The wizard story replaces these with the member's answers.
+ *
+ * @type {Customization}
+ */
+export const DEFAULT_CUSTOMIZATION = {
+  states: "all",
+  milestones: null,
+  storyType: "infer",
+  comments: true,
+  tasks: true,
+};
+
+/**
  * GitHub issues carry no native type, so infer one from the conventional labels + the title.
  * Bug is checked first: a row that matches both rules is a bug.
  *
@@ -137,9 +160,11 @@ function commentText(comment) {
  * writer's plan. Joining comments by `issue_url` drops PR chatter — those numbers are unmapped PRs.
  *
  * @param {{ issues: any[], comments: any[], labels: any[] }} repo
+ * @param {Customization} [customization] per-run overrides; the default reproduces
+ *   this profile unchanged (the filter/override stories consume the other fields)
  * @returns {{ labels: LabelOp[], stories: StoryOp[] }}
  */
-export function mapRepo({ issues, comments, labels }) {
+export function mapRepo({ issues, comments, labels }, customization = DEFAULT_CUSTOMIZATION) {
   /** @type {Map<string, string | null>} repo-level color authority, by lowercased name */
   const repoColors = new Map(
     labels.map((l) => [
@@ -189,14 +214,14 @@ export function mapRepo({ issues, comments, labels }) {
       created_at: issue.created_at ?? null,
       completed_at: (closed ? issue.closed_at : null) ?? null,
       labels: names,
-      tasks: parseChecklist(body),
+      tasks: customization.tasks ? parseChecklist(body) : [],
       comments: /** @type {{ text: string }[]} */ ([]),
     };
     byIssue.set(story.external_id, story.comments);
     stories.push(story);
   }
 
-  for (const comment of comments) {
+  for (const comment of customization.comments ? comments : []) {
     if (!(comment.body ?? "").trim()) continue;
     const target = byIssue.get(issueNumberFromUrl(comment.issue_url) ?? "");
     if (target) target.push({ text: commentText(comment) });

@@ -5,7 +5,7 @@
 
 import { applyDedup, markerFor, prescanImported } from "./dedup.js";
 import { GitHubClient } from "./github.js";
-import { clampPlan, FALLBACK_LIMITS, mapRepo } from "./mapping.js";
+import { clampPlan, DEFAULT_CUSTOMIZATION, FALLBACK_LIMITS, mapRepo } from "./mapping.js";
 import { runWithProgress } from "./progress.js";
 import { writePlan } from "./writer.js";
 
@@ -28,13 +28,14 @@ import { writePlan } from "./writer.js";
  * @param {string} repo
  * @param {{ token?: string, included: string[], dryRun?: boolean,
  *   stream?: import("./progress.js").OutStream, runId?: string,
+ *   customization?: import("./mapping.js").Customization,
  *   github?: { fetchAll(): Promise<{ issues: any[], comments: any[],
  *     labels: any[] }> } }} options `github` is a test seam; production
  *   builds a {@link GitHubClient}
  * @returns {Promise<import("./importer.js").ImportOutcome>}
  */
 export async function runDirect(client, projectId, owner, repo, options) {
-  const { token, dryRun, stream, runId, github } = options;
+  const { token, dryRun, stream, runId, github, customization = DEFAULT_CUSTOMIZATION } = options;
   const source = github ?? new GitHubClient(owner, repo, { token });
   const fetched = await runWithProgress(
     () => source.fetchAll(),
@@ -44,7 +45,7 @@ export async function runDirect(client, projectId, owner, repo, options) {
   // Clamp before the marker lands so the description budget can reserve room
   // for it — one giant GitHub comment must not 400 the whole run.
   const limits = { ...FALLBACK_LIMITS, ...(await (client.fieldLimits?.() ?? {})) };
-  const mapped = clampPlan(mapRepo(fetched), limits, {
+  const mapped = clampPlan(mapRepo(fetched, customization), limits, {
     reserveDescription: (op) => markerFor(owner, repo, op.external_id).length + 2,
     warn: (message) => stream?.write(message),
   });
