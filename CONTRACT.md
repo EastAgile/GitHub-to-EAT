@@ -155,14 +155,27 @@ naming the conflict. It also needs an interactive terminal — the wizard that
 will fill in the questions prompts on the TTY — so non-TTY stdin or stdout
 exits 2.
 
-Today the flag is plumbing only: a `Customization` object whose defaults
-reproduce the default mapping byte-identically —
-`{ states: "all", milestones: null, storyType: "infer", comments: true,
-tasks: true }`, defined next to the mapping profile in `src/mapping.js` —
-threads through the direct pipeline, so `--customize` runs end-to-end with
-output identical to plain `--engine direct`. The interactive wizard,
-customization-aware mapping (filters + overrides), and customized
-legend + confirm land in follow-up stories.
+A `Customization` object, defined next to the mapping profile in
+`src/mapping.js`, threads through the direct pipeline and is applied by
+`mapRepo` client-side as pure filters and overrides:
+
+- `states` (`"all" | "open" | "closed"`) — drops non-matching issues before
+  mapping; a dropped issue contributes no story, no labels, no comments.
+- `milestones` (`string[] | null`) — when set, keeps only issues whose
+  `milestone.title` matches an entry exactly (case-sensitive); issues with no
+  milestone drop. `null` disables the filter.
+- `storyType` (`"infer" | "feature" | "bug" | "chore"`) — `"infer"` keeps the
+  label/title inference; a fixed value applies to every mapped story.
+- `comments: false` maps no comments; `tasks: false` converts no body
+  checklists to tasks (the checklist lines stay in the description verbatim
+  either way).
+
+The defaults — `{ states: "all", milestones: null, storyType: "infer",
+comments: true, tasks: true }` — reproduce the default mapping
+byte-identically, so `--customize` today runs end-to-end with output
+identical to plain `--engine direct`. The interactive wizard that fills in
+non-default answers and the customized legend + confirm land in follow-up
+stories.
 
 ### GitHub fetch stage
 
