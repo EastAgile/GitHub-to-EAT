@@ -45,8 +45,7 @@ import { parseArgs } from "node:util";
  * @property {any} meta
  * @property {any} importResult
  * @property {{ issues: number, prs: number, milestones: number, releases: number,
- *   labels: number, assignees?: string[] }} fixture `assignees` are the GitHub
- *   logins assigned across the fixture rows — they become
+ *   labels: number, assignees?: string[] }} fixture `assignees` become
  *   `external_members_created` on first import (computed mode)
  * @property {Record<number, string[]>} importedIds external ids already
  *   imported per project — drives skip-if-exists on re-import (computed mode)
