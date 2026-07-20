@@ -154,14 +154,26 @@ with `Link`-header pagination:
 
 - `GET /repos/{owner}/{repo}/issues?state=all` — issues. The endpoint mixes in
   pull requests (tagged with a `pull_request` key); the fetcher drops them.
-- `GET /repos/{owner}/{repo}/issues/comments` — every issue comment, repo-wide.
+- `GET /repos/{owner}/{repo}/issues/comments` — every issue comment,
+  repo-wide. The endpoint includes PR conversation comments; the fetcher keeps
+  only comments whose `issue_url` points at a kept issue, so PR chatter never
+  reaches the mapping stage.
 - `GET /repos/{owner}/{repo}/labels` — the repo's labels.
 
-Anonymous requests share GitHub's 60 req/h budget; a bats-sized repo stays
-~15–25 requests. `--token` / `GITHUB_TOKEN` is sent as `Authorization: Bearer`
-and raises the ceiling to 5000/h (and reaches private repos). Error mapping:
-404 → repo-not-found; 403 with `x-ratelimit-remaining: 0` → rate-limit
-(message carries the `x-ratelimit-reset` time); 401 → token rejected.
+`owner` and `repo` are URL-encoded into the request path, so metacharacters in
+`--repo` yield a well-formed request (and a clear repo-not-found error), never
+a mangled query string. Pagination refuses a `Link` rel=next URL whose origin
+differs from the API base — the `Authorization` header never leaves the API
+origin — and a 200 body that is not a JSON array is a fetch error, not an
+empty page.
+
+Anonymous requests share GitHub's 60 req/h budget; a mid-sized repo (~1,000
+issues) stays ~15–25 requests. `--token` / `GITHUB_TOKEN` is sent as
+`Authorization: Bearer` and raises the ceiling to 5000/h (and reaches private
+repos). Error mapping: 404 → repo-not-found; rate limits — HTTP 429, a 403
+with `x-ratelimit-remaining: 0`, or a secondary-limit 403 carrying
+`retry-after` — → rate-limit (message carries the reset time from
+`x-ratelimit-reset` or `retry-after`); 401 → token rejected.
 
 ### Default mapping profile (issues → stories)
 
@@ -181,9 +193,9 @@ issue mapping so both engines classify the same repo identically:
   mapped issues are created.
 - **Checklists** — `- [ ]` / `- [x]` items (also `*`/`+` markers, indentation
   allowed) become story tasks; the lines stay in the description verbatim.
-- **Comments** — joined to their issue by `issue_url`, which also drops PR
-  conversation comments (the repo-wide comments endpoint includes them; their
-  issue numbers point at PRs that are never mapped). The public EAT API has
+- **Comments** — joined to their issue by `issue_url`. The fetcher has already
+  dropped PR conversation comments by the same key, and the join keeps any
+  stray unmatched comment inert (its issue is never mapped). The public EAT API has
   no comment-author attribution, so each body is prefixed
   `@<login> on <YYYY-MM-DD>:` (deleted accounts render as `@ghost`).
 - **Identity** — `external_id` is the issue number as a string; rows carrying
