@@ -132,7 +132,10 @@ export class GitHubClient {
     while (url) {
       const response = await this.#get(url);
       const page = await response.json();
-      if (Array.isArray(page)) out.push(...page);
+      if (!Array.isArray(page)) {
+        throw new GitHubError(`GitHub returned an unexpected payload (expected a JSON array)`);
+      }
+      out.push(...page);
       url = nextLink(response.headers.get("link")) ?? "";
     }
     return out;

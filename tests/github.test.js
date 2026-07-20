@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { test } from "node:test";
 
-import { GitHubAuthError, GitHubClient, RateLimitError, RepoNotFoundError } from "../src/github.js";
+import {
+  GitHubAuthError,
+  GitHubClient,
+  GitHubError,
+  RateLimitError,
+  RepoNotFoundError,
+} from "../src/github.js";
 
 /**
  * Run `fn` against a throwaway local HTTP server standing in for api.github.com;
@@ -87,6 +93,19 @@ test("pagination follows the Link rel=next header across pages", async () => {
         issues.map((i) => i.number),
         [1, 2],
       );
+    },
+  );
+});
+
+test("a non-array 200 body throws GitHubError instead of reading as an empty page", async () => {
+  await withGitHub(
+    (_req, res) => json(res, 200, { message: "unexpected object" }),
+    async (base) => {
+      await assert.rejects(new GitHubClient("o", "r", { apiBase: base }).listIssues(), (err) => {
+        assert.ok(err instanceof GitHubError);
+        assert.match(err.message, /expected a JSON array/);
+        return true;
+      });
     },
   );
 });
