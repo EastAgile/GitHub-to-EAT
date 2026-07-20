@@ -15,9 +15,9 @@ export const ISSUES_LEGEND = [
 
 /**
  * @typedef {object} Customization per-run mapping overrides (`--customize`)
- * @property {string} states which GitHub issue states to import
- * @property {string | null} milestones milestone filter; null imports every issue
- * @property {string} storyType story-type strategy; "infer" uses {@link inferStoryType}
+ * @property {"all" | "open" | "closed"} states which GitHub issue states to import
+ * @property {string[] | null} milestones exact `milestone.title` allowlist; null imports every issue
+ * @property {"infer" | "feature" | "bug" | "chore"} storyType "infer" uses {@link inferStoryType}
  * @property {boolean} comments import issue comments
  * @property {boolean} tasks import body checklists as tasks
  */
@@ -182,6 +182,11 @@ export function mapRepo({ issues, comments, labels }, customization = DEFAULT_CU
   const stories = [];
   for (const issue of issues) {
     if (issue.pull_request) continue;
+    const state = String(issue.state ?? "").toLowerCase();
+    if (customization.states !== "all" && state !== customization.states) continue;
+    if (customization.milestones && !customization.milestones.includes(issue.milestone?.title)) {
+      continue;
+    }
 
     /** @type {string[]} */
     const names = [];
@@ -204,12 +209,15 @@ export function mapRepo({ issues, comments, labels }, customization = DEFAULT_CU
 
     const title = String(issue.title ?? "");
     const body = (issue.body ?? "").trim();
-    const closed = String(issue.state ?? "").toLowerCase() === "closed";
+    const closed = state === "closed";
     const story = {
       external_id: String(issue.number),
       name: title,
       description: body || null,
-      story_type: inferStoryType(names, title),
+      story_type:
+        customization.storyType === "infer"
+          ? inferStoryType(names, title)
+          : customization.storyType,
       current_state: /** @type {"unstarted" | "accepted"} */ (closed ? "accepted" : "unstarted"),
       created_at: issue.created_at ?? null,
       completed_at: (closed ? issue.closed_at : null) ?? null,
