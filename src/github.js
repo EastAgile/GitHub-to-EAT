@@ -90,11 +90,23 @@ export class GitHubClient {
         `repo ${this.owner}/${this.repo} not found (private, renamed, or no access with this token)`,
       );
     }
-    if (response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0") {
+    // Rate limits arrive as 429, primary-limit 403 (remaining 0), or
+    // secondary-limit 403 (retry-after with budget left).
+    const retryAfter = response.headers.get("retry-after");
+    if (
+      response.status === 429 ||
+      (response.status === 403 &&
+        (response.headers.get("x-ratelimit-remaining") === "0" || retryAfter !== null))
+    ) {
       const reset = Number(response.headers.get("x-ratelimit-reset"));
-      const when = Number.isFinite(reset) ? new Date(reset * 1000).toISOString() : "later";
+      let resets = "resets later";
+      if (Number.isFinite(reset) && reset > 0) {
+        resets = `resets at ${new Date(reset * 1000).toISOString()}`;
+      } else if (retryAfter !== null && Number.isFinite(Number(retryAfter))) {
+        resets = `resets in ${Number(retryAfter)}s`;
+      }
       throw new RateLimitError(
-        `GitHub rate limit exhausted; resets at ${when}. Pass --token / GITHUB_TOKEN to raise the limit (5000/h).`,
+        `GitHub rate limit exhausted; ${resets}. Pass --token / GITHUB_TOKEN to raise the limit (5000/h).`,
       );
     }
     if (response.status === 401) {

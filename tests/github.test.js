@@ -204,6 +204,42 @@ test("403 with a zeroed rate-limit maps to RateLimitError with the reset time", 
   );
 });
 
+test("429 maps to RateLimitError with the reset time and the --token hint", async () => {
+  const reset = 1893456000; // 2030-01-01T00:00:00Z
+  await withGitHub(
+    (_req, res) =>
+      json(res, 429, { message: "too many requests" }, { "x-ratelimit-reset": String(reset) }),
+    async (base) => {
+      await assert.rejects(new GitHubClient("o", "r", { apiBase: base }).listIssues(), (err) => {
+        assert.ok(err instanceof RateLimitError);
+        assert.match(err.message, /2030/);
+        assert.match(err.message, /--token/);
+        return true;
+      });
+    },
+  );
+});
+
+test("403 with retry-after maps to RateLimitError even with remaining budget", async () => {
+  await withGitHub(
+    (_req, res) =>
+      json(
+        res,
+        403,
+        { message: "You have exceeded a secondary rate limit" },
+        { "retry-after": "60", "x-ratelimit-remaining": "1" },
+      ),
+    async (base) => {
+      await assert.rejects(new GitHubClient("o", "r", { apiBase: base }).listIssues(), (err) => {
+        assert.ok(err instanceof RateLimitError);
+        assert.match(err.message, /60s/);
+        assert.match(err.message, /--token/);
+        return true;
+      });
+    },
+  );
+});
+
 test("401 maps to GitHubAuthError", async () => {
   await withGitHub(
     (_req, res) => json(res, 401, { message: "Bad credentials" }),
