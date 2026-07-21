@@ -16,7 +16,7 @@ export class GitHubError extends Error {}
 /** The repo does not exist, or the token can't see it (HTTP 404). */
 export class RepoNotFoundError extends GitHubError {}
 
-/** The request's rate-limit budget is exhausted (HTTP 403, remaining 0). */
+/** A rate limit was hit (HTTP 429, or 403 from the primary/secondary limit). */
 export class RateLimitError extends GitHubError {}
 
 /** The supplied token was rejected (HTTP 401). */
@@ -90,11 +90,25 @@ export class GitHubClient {
         `repo ${this.owner}/${this.repo} not found (private, renamed, or no access with this token)`,
       );
     }
-    if (response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0") {
+    // Rate limits arrive as 429, primary-limit 403 (remaining 0), or
+    // secondary-limit 403 (retry-after with budget left).
+    const retryAfter = response.headers.get("retry-after");
+    if (
+      response.status === 429 ||
+      (response.status === 403 &&
+        (response.headers.get("x-ratelimit-remaining") === "0" || retryAfter !== null))
+    ) {
       const reset = Number(response.headers.get("x-ratelimit-reset"));
-      const when = Number.isFinite(reset) ? new Date(reset * 1000).toISOString() : "later";
+      let resets = "resets later";
+      // retry-after is the authoritative wait when present (secondary limits);
+      // x-ratelimit-reset only describes the primary hourly window.
+      if (retryAfter !== null && Number.isFinite(Number(retryAfter))) {
+        resets = `resets in ${Number(retryAfter)}s`;
+      } else if (Number.isFinite(reset) && reset > 0) {
+        resets = `resets at ${new Date(reset * 1000).toISOString()}`;
+      }
       throw new RateLimitError(
-        `GitHub rate limit exhausted; resets at ${when}. Pass --token / GITHUB_TOKEN to raise the limit (5000/h).`,
+        `GitHub rate limit exhausted; ${resets}. Pass --token / GITHUB_TOKEN to raise the limit (5000/h).`,
       );
     }
     if (response.status === 401) {
@@ -116,12 +130,28 @@ export class GitHubClient {
   async #paginate(path) {
     /** @type {any[]} */
     const out = [];
-    let url = `${this.apiBase}/repos/${this.owner}/${this.repo}${path}`;
+    let url = `${this.apiBase}/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}${path}`;
     while (url) {
       const response = await this.#get(url);
       const page = await response.json();
-      if (Array.isArray(page)) out.push(...page);
-      url = nextLink(response.headers.get("link")) ?? "";
+      if (!Array.isArray(page)) {
+        throw new GitHubError(`GitHub returned an unexpected payload (expected a JSON array)`);
+      }
+      out.push(...page);
+      const next = nextLink(response.headers.get("link"));
+      if (next && !URL.canParse(next)) {
+        throw new GitHubError(
+          "GitHub pagination sent an unparseable rel=next URL; refusing to follow it",
+        );
+      }
+      // The Authorization header rides along on every request — never follow
+      // a rel=next off the API origin.
+      if (next && new URL(next).origin !== new URL(this.apiBase).origin) {
+        throw new GitHubError(
+          `GitHub pagination pointed off the API origin (${new URL(next).origin}); refusing to follow it`,
+        );
+      }
+      url = next ?? "";
     }
     return out;
   }
@@ -158,6 +188,9 @@ export class GitHubClient {
   /**
    * Fetch issues, comments, and labels in one call.
    *
+   * The repo-wide comments endpoint includes PR conversation comments; only
+   * comments on kept issues survive, so mapping never sees PR chatter.
+   *
    * @returns {Promise<{ issues: any[], comments: any[], labels: any[] }>}
    */
   async fetchAll() {
@@ -166,6 +199,14 @@ export class GitHubClient {
       this.listComments(),
       this.listLabels(),
     ]);
-    return { issues, comments, labels };
+    const kept = new Set(issues.map((issue) => String(issue.number)));
+    return {
+      issues,
+      comments: comments.filter((comment) => {
+        const match = (comment.issue_url ?? "").match(/\/issues\/(\d+)$/);
+        return match !== null && kept.has(match[1]);
+      }),
+      labels,
+    };
   }
 }
