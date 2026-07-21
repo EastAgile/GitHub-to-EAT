@@ -1,15 +1,24 @@
 import assert from "node:assert/strict";
+import { Readable } from "node:stream";
 import { test } from "node:test";
 
 import { main, parseRepo } from "../src/cli.js";
 import { AuthError } from "../src/client.js";
 import { runDirect as realRunDirect } from "../src/direct.js";
 import { GitHubError } from "../src/github.js";
-import { DEFAULT_CUSTOMIZATION } from "../src/mapping.js";
 import { MAPPINGS } from "../src/mappings.js";
 import { startMockServer } from "../src/mockserver.js";
 import { VERSION } from "../src/version.js";
 import { capture, inTempDir, withEnv } from "./helpers.js";
+
+/**
+ * A TTY-flagged readable that answers wizard prompts one line at a time, then EOFs.
+ *
+ * @param {string[]} lines
+ */
+function scriptedStdin(lines) {
+  return Object.assign(Readable.from(lines.map((l) => `${l}\n`)), { isTTY: true });
+}
 
 /** @param {Partial<import("../src/preflight.js").PreflightResult>} [overrides] */
 function preflightResult(overrides = {}) {
@@ -550,23 +559,24 @@ test("--engine direct --customize is accepted, not a conflict", async () => {
   );
 });
 
-test("--customize threads the default customization into the direct pipeline", async () => {
+test("--customize threads a wizard seam (not a fixed customization) into the direct pipeline", async () => {
   await inTempDir(() =>
     withEnv({ EAT_AGENT_KEY: "key" }, async () => {
-      /** @type {unknown[]} */
-      const seen = [];
+      /** @type {any} */
+      let seen = null;
       const code = await main(["--project", "91", "--repo", "o/r", "--customize", "-y"], {
         stdout: ttyCapture(),
         stderr: capture(),
         stdin: { isTTY: true },
         preflight: async () => preflightResult(),
         runDirect: async (_client, _project, _owner, _repo, opts) => {
-          seen.push(opts.customization);
+          seen = opts;
           return outcome();
         },
       });
       assert.equal(code, 0);
-      assert.deepEqual(seen, [DEFAULT_CUSTOMIZATION]);
+      assert.equal(typeof seen.customize, "function");
+      assert.equal(seen.customization, undefined);
     }),
   );
 });
@@ -620,7 +630,8 @@ test("--customize output is byte-identical to --engine direct alone (mockserver)
             const code = await main(argv, {
               stdout: out,
               stderr: capture(),
-              stdin: { isTTY: true },
+              // All-default wizard answers keep --customize byte-identical to plain direct.
+              stdin: scriptedStdin(["", "", "", "", ""]),
               runDirect: (client, project, owner, repo, opts) =>
                 realRunDirect(client, project, owner, repo, {
                   ...opts,
@@ -656,4 +667,38 @@ test("--customize output is byte-identical to --engine direct alone (mockserver)
   assert.equal(plain.rows.length, 2);
   assert.equal(customized.stdout, plain.stdout);
   assert.deepEqual(customized.rows, plain.rows);
+});
+
+test("EOF mid-wizard aborts --customize with exit 1 and nothing written (mockserver)", async () => {
+  const fetched = {
+    issues: [{ number: 7, title: "open issue", body: "", state: "open", labels: [] }],
+    comments: [],
+    labels: [],
+  };
+  const mock = await startMockServer();
+  try {
+    await inTempDir(() =>
+      withEnv(
+        { EAT_AGENT_KEY: "key", EAT_API_BASE: mock.baseUrl, EAT_APP_BASE: "https://eat.example" },
+        async () => {
+          const err = capture();
+          const code = await main(["--project", "91", "--repo", "o/r", "--customize", "-y"], {
+            stdout: ttyCapture(),
+            stderr: err,
+            stdin: scriptedStdin([]), // EOF at the first question
+            runDirect: (client, project, owner, repo, opts) =>
+              realRunDirect(client, project, owner, repo, {
+                ...opts,
+                github: { fetchAll: async () => fetched },
+              }),
+          });
+          assert.equal(code, 1);
+          assert.equal((mock.state.stories[91] ?? []).length, 0);
+          assert.ok(err.buf.includes("Aborted"));
+        },
+      ),
+    );
+  } finally {
+    await mock.close();
+  }
 });

@@ -15,11 +15,11 @@ import { runDirect as defaultRunDirect } from "./direct.js";
 import { assertDirectSupportsIncludes, DEFAULT_ENGINE, ENGINES, parseEngine } from "./engine.js";
 import { GitHubError } from "./github.js";
 import { runImport as defaultRunImport } from "./importer.js";
-import { DEFAULT_CUSTOMIZATION } from "./mapping.js";
 import { MAPPINGS, parseInclude, renderLegend, requestFlags } from "./mappings.js";
 import { preflight as defaultPreflight } from "./preflight.js";
 import { runWithProgress } from "./progress.js";
 import { VERSION } from "./version.js";
+import { runWizard as defaultRunWizard, WizardAborted } from "./wizard.js";
 
 const USAGE =
   "usage: github-to-eat [-h] [-V] --project ID --repo OWNER/NAME " +
@@ -162,11 +162,13 @@ function reportDryRunPlan(plan, { stdout, stderr, owner, repo, project, projectT
  * @property {typeof defaultPreflight} [preflight]
  * @property {typeof defaultRunImport} [runImport]
  * @property {typeof defaultRunDirect} [runDirect]
+ * @property {typeof defaultRunWizard} [wizard] the --customize wizard; defaults
+ *   to the real one, reading from `stdin` and prompting on stderr
  * @property {((question: string) => Promise<boolean>) | null} [confirm] yes/no
  *   prompt; defaults to a terminal prompt when stdin is a TTY, else null
  *   (no prompt — scripts keep running unattended)
- * @property {{ isTTY?: boolean }} [stdin] TTY probe for the --customize gate;
- *   defaults to process.stdin
+ * @property {{ isTTY?: boolean } & Partial<import("node:stream").Readable>} [stdin]
+ *   the --customize gate's TTY probe and the wizard's input; defaults to process.stdin
  */
 
 /**
@@ -186,6 +188,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     preflight = defaultPreflight,
     runImport = defaultRunImport,
     runDirect = defaultRunDirect,
+    wizard = defaultRunWizard,
     confirm = process.stdin.isTTY ? defaultConfirm : null,
     stdin = process.stdin,
   } = deps;
@@ -342,9 +345,21 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
         included,
         dryRun: values["dry-run"],
         stream: stderr,
-        customization: values.customize ? DEFAULT_CUSTOMIZATION : undefined,
+        // The wizard runs at the pipeline's fetch→map seam so its questions
+        // reflect real issue data; prompts go to stderr, keeping stdout clean.
+        customize: values.customize
+          ? (fetched) =>
+              wizard(fetched, {
+                input: /** @type {import("node:stream").Readable} */ (stdin),
+                output: stderr,
+              })
+          : undefined,
       });
     } catch (err) {
+      if (err instanceof WizardAborted) {
+        stderr.write("Aborted — nothing imported.\n");
+        return 1;
+      }
       if (err instanceof EATError || err instanceof GitHubError) {
         stderr.write(`error: ${values["dry-run"] ? "dry run failed: " : ""}${err.message}\n`);
         return 1;

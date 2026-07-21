@@ -29,19 +29,26 @@ import { writePlan } from "./writer.js";
  * @param {{ token?: string, included: string[], dryRun?: boolean,
  *   stream?: import("./progress.js").OutStream, runId?: string,
  *   customization?: import("./mapping.js").Customization,
+ *   customize?: (fetched: { issues: any[], comments: any[], labels: any[] })
+ *     => Promise<import("./mapping.js").Customization>,
  *   github?: { fetchAll(): Promise<{ issues: any[], comments: any[],
- *     labels: any[] }> } }} options `github` is a test seam; production
- *   builds a {@link GitHubClient}
+ *     labels: any[] }> } }} options `customize` (the wizard) runs at the
+ *   fetch→map seam so its questions use real data; `github` is a test seam
  * @returns {Promise<import("./importer.js").ImportOutcome>}
  */
 export async function runDirect(client, projectId, owner, repo, options) {
-  const { token, dryRun, stream, runId, github, customization = DEFAULT_CUSTOMIZATION } = options;
+  const { token, dryRun, stream, runId, github, customize } = options;
   const source = github ?? new GitHubClient(owner, repo, { token });
   const fetched = await runWithProgress(
     () => source.fetchAll(),
     `fetching ${owner}/${repo} from GitHub`,
     { stream },
   );
+  // The wizard sits after the fetch so its questions reflect real issues; EOF
+  // rejects here, before any prescan or write.
+  const customization = customize
+    ? await customize(fetched)
+    : (options.customization ?? DEFAULT_CUSTOMIZATION);
   // Clamp before the marker lands so the description budget can reserve room
   // for it — one giant GitHub comment must not 400 the whole run.
   const limits = { ...FALLBACK_LIMITS, ...(await (client.fieldLimits?.() ?? {})) };

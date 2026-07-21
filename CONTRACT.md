@@ -172,10 +172,26 @@ A `Customization` object, defined next to the mapping profile in
 
 The defaults — `{ states: "all", milestones: null, storyType: "infer",
 comments: true, tasks: true }` — reproduce the default mapping
-byte-identically, so `--customize` today runs end-to-end with output
-identical to plain `--engine direct`. The interactive wizard that fills in
-non-default answers and the customized legend + confirm land in follow-up
-stories.
+byte-identically, so a wizard run answered with plain Enter throughout is
+output-identical to plain `--engine direct`.
+
+The interactive wizard (`src/wizard.js`) fills in those answers. It runs at
+the pipeline's fetch→map seam — after the GitHub fetch, so its questions
+reflect the real issues — and asks, one at a time:
+
+1. **States** — all / open only / closed only, with live counts from the
+   fetch (e.g. `142 open, 730 closed`).
+2. **Milestones** — a numbered multi-select of the milestone titles present on
+   the fetched issues (blank = all). Skipped, with no extra GitHub request,
+   when no fetched issue carries a milestone.
+3. **Story type** — infer (default) / all feature / all bug / all chore.
+4. **Import issue comments?** (`[Y/n]`).
+5. **Convert body checklists to story tasks?** (`[Y/n]`).
+
+Answers apply to this run only — nothing is persisted. Prompts render on
+stderr, keeping stdout clean. EOF (Ctrl-D) mid-wizard aborts the run with
+exit 1 before anything is written. The customized legend + confirm land in a
+follow-up story.
 
 ### GitHub fetch stage
 
