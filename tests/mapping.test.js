@@ -415,6 +415,16 @@ test("mapRepo with the default customization is byte-identical to no customizati
         created_at: "2024-01-01T00:00:00Z",
         labels: [{ name: "bug", color: "ff0000" }],
       },
+      {
+        number: 2,
+        title: "closed milestoned issue",
+        body: "done",
+        state: "closed",
+        closed_at: "2024-02-01T00:00:00Z",
+        created_at: "2024-01-15T00:00:00Z",
+        milestone: { title: "V1" },
+        labels: [],
+      },
     ],
     comments: [
       {
@@ -427,4 +437,135 @@ test("mapRepo with the default customization is byte-identical to no customizati
     labels: [{ name: "bug", color: "ff0000" }],
   };
   assert.deepEqual(mapRepo(repo, DEFAULT_CUSTOMIZATION), mapRepo(repo));
+  assert.equal(mapRepo(repo).stories.length, 2);
+});
+
+// --- Customization-aware mapping (filters + overrides) -----------------------
+
+/** @param {Partial<import("../src/mapping.js").Customization>} overrides */
+function custom(overrides) {
+  return { ...DEFAULT_CUSTOMIZATION, ...overrides };
+}
+
+test('states: "open" keeps only open issues; a dropped issue leaves no labels or comments', () => {
+  const plan = mapRepo(
+    {
+      issues: [
+        ghIssue({ number: 1, state: "open", labels: [{ name: "kept", color: "d73a4a" }] }),
+        ghIssue({
+          number: 2,
+          state: "closed",
+          closed_at: "2026-02-03T04:05:06Z",
+          labels: [{ name: "dropped-with-issue", color: "0075ca" }],
+        }),
+      ],
+      comments: [
+        {
+          issue_url: "https://api.github.com/repos/o/r/issues/2",
+          user: { login: "bob" },
+          created_at: "2026-03-04T05:06:07Z",
+          body: "on the dropped issue",
+        },
+      ],
+      labels: [],
+    },
+    custom({ states: "open" }),
+  );
+  assert.deepEqual(
+    plan.stories.map((s) => s.external_id),
+    ["1"],
+  );
+  assert.deepEqual(
+    plan.labels.map((l) => l.name),
+    ["kept"],
+  );
+  assert.deepEqual(plan.stories[0].comments, []);
+});
+
+test('states: "closed" keeps only closed issues', () => {
+  const plan = mapRepo(
+    {
+      issues: [
+        ghIssue({ number: 1, state: "open" }),
+        ghIssue({ number: 2, state: "closed", closed_at: "2026-02-03T04:05:06Z" }),
+      ],
+      comments: [],
+      labels: [],
+    },
+    custom({ states: "closed" }),
+  );
+  assert.deepEqual(
+    plan.stories.map((s) => s.external_id),
+    ["2"],
+  );
+  assert.equal(plan.stories[0].current_state, "accepted");
+});
+
+test("the milestone filter keeps exact milestone.title matches only; unmilestoned issues drop", () => {
+  const repo = {
+    issues: [
+      ghIssue({ number: 1, milestone: { title: "V1" } }),
+      ghIssue({ number: 2, milestone: { title: "V2" } }),
+      ghIssue({ number: 3 }), // no milestone
+    ],
+    comments: [],
+    labels: [],
+  };
+  const plan = mapRepo(repo, custom({ milestones: ["V1"] }));
+  assert.deepEqual(
+    plan.stories.map((s) => s.external_id),
+    ["1"],
+  );
+  // exact means case-sensitive: "v1" matches nothing
+  assert.deepEqual(mapRepo(repo, custom({ milestones: ["v1"] })).stories, []);
+  // null disables the filter entirely
+  assert.equal(mapRepo(repo, custom({ milestones: null })).stories.length, 3);
+});
+
+test("a fixed storyType overrides inference on every mapped story", () => {
+  const plan = mapRepo(
+    {
+      issues: [
+        ghIssue({ number: 1, title: "fix crash", labels: [{ name: "bug", color: "d73a4a" }] }),
+        ghIssue({ number: 2, title: "Add a thing" }),
+      ],
+      comments: [],
+      labels: [],
+    },
+    custom({ storyType: "chore" }),
+  );
+  assert.deepEqual(
+    plan.stories.map((s) => s.story_type),
+    ["chore", "chore"],
+  );
+  assert.deepEqual(plan.stories[0].labels, ["bug"]); // labels still map, only the type is fixed
+});
+
+test("comments: false produces no comment ops", () => {
+  const plan = mapRepo(
+    {
+      issues: [ghIssue({ number: 7 })],
+      comments: [
+        {
+          issue_url: "https://api.github.com/repos/o/r/issues/7",
+          user: { login: "bob" },
+          created_at: "2026-03-04T05:06:07Z",
+          body: "Looks good",
+        },
+      ],
+      labels: [],
+    },
+    custom({ comments: false }),
+  );
+  assert.deepEqual(plan.stories[0].comments, []);
+});
+
+test("tasks: false produces no task ops; the checklist lines stay in the description", () => {
+  const body = "Prose\n- [ ] one\n- [x] two";
+  const plan = mapRepo(
+    { issues: [ghIssue({ body })], comments: [], labels: [] },
+    custom({ tasks: false }),
+  );
+  assert.deepEqual(plan.stories[0].tasks, []);
+  assert.equal(plan.stories[0].description, body);
 });
