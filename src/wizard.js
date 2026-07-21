@@ -25,6 +25,10 @@ function realIssues(fetched) {
   return (fetched.issues ?? []).filter((issue) => !issue.pull_request);
 }
 
+// Milestone titles are untrusted remote data; strip terminal control chars
+// (ESC/C0/C1/DEL) so a crafted title can't recolour, move the cursor, or forge menu rows.
+const stripControls = (/** @type {string} */ s) => s.replace(/\p{Cc}/gu, "");
+
 /**
  * Prompt for one of a numbered list, blank = the default entry.
  *
@@ -148,7 +152,7 @@ async function askMilestones(ask, write, issues) {
   while (true) {
     write("Filter by milestone (blank = all). Enter numbers, comma-separated:\n");
     titles.forEach((title, i) => {
-      write(`  ${i + 1}) ${title}\n`);
+      write(`  ${i + 1}) ${stripControls(title)}\n`);
     });
     const answer = await ask("> ");
     if (answer === "") return null;

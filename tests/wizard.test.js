@@ -126,3 +126,26 @@ test("EOF mid-wizard rejects with WizardAborted", async () => {
     (err) => err instanceof WizardAborted,
   );
 });
+
+test("milestone titles are stripped of terminal control chars at render but returned verbatim", async () => {
+  // A crafted title: ESC (colour/cursor), CR + LF that could forge a fake "9)" menu row.
+  const evil = "v1\x1b[31m\r\n  9) spoofed";
+  const fetched = {
+    issues: [{ number: 1, state: "open", milestone: { title: evil } }],
+    comments: [],
+    labels: [],
+  };
+  const output = capture();
+  // Q1 all, Q2 pick 1, Q3 infer, Q4/Q5 defaults
+  const customization = await runWizard(fetched, {
+    input: scripted(["", "1", "", "", ""]),
+    output,
+  });
+  // no ESC or CR from the title reaches the terminal, and the injected newline
+  // cannot open a second numbered line — the title renders on one row.
+  assert.ok(!output.buf.includes("\x1b"), "ESC is stripped");
+  assert.ok(!output.buf.includes("\r"), "CR is stripped");
+  assert.doesNotMatch(output.buf, /^ {2}9\) spoofed$/m);
+  // mapRepo matches GitHub's real milestone title, so the pick is returned unmodified.
+  assert.deepEqual(customization.milestones, [evil]);
+});
