@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   clampPlan,
   contrastTextColor,
+  DEFAULT_CUSTOMIZATION,
   FALLBACK_LIMITS,
   ISSUES_LEGEND,
   inferStoryType,
@@ -389,4 +390,41 @@ test("clampPlan leaves under-limit text untouched and silent", () => {
   });
   assert.deepEqual(stories[0], op);
   assert.equal(warnings.length, 0);
+});
+
+// --- Customization (V3 --customize plumbing) ---------------------------------
+
+test("DEFAULT_CUSTOMIZATION reproduces today's mapping settings exactly", () => {
+  assert.deepEqual(DEFAULT_CUSTOMIZATION, {
+    states: "all",
+    milestones: null,
+    storyType: "infer",
+    comments: true,
+    tasks: true,
+  });
+});
+
+test("mapRepo with the default customization is byte-identical to no customization", () => {
+  const repo = {
+    issues: [
+      {
+        number: 1,
+        title: "fix crash",
+        body: "steps\n\n- [ ] repro",
+        state: "open",
+        created_at: "2024-01-01T00:00:00Z",
+        labels: [{ name: "bug", color: "ff0000" }],
+      },
+    ],
+    comments: [
+      {
+        issue_url: "https://api.github.com/repos/o/r/issues/1",
+        user: { login: "alice" },
+        created_at: "2024-01-02T00:00:00Z",
+        body: "same here",
+      },
+    ],
+    labels: [{ name: "bug", color: "ff0000" }],
+  };
+  assert.deepEqual(mapRepo(repo, DEFAULT_CUSTOMIZATION), mapRepo(repo));
 });

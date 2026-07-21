@@ -15,6 +15,7 @@ import { runDirect as defaultRunDirect } from "./direct.js";
 import { assertDirectSupportsIncludes, DEFAULT_ENGINE, ENGINES, parseEngine } from "./engine.js";
 import { GitHubError } from "./github.js";
 import { runImport as defaultRunImport } from "./importer.js";
+import { DEFAULT_CUSTOMIZATION } from "./mapping.js";
 import { MAPPINGS, parseInclude, renderLegend, requestFlags } from "./mappings.js";
 import { preflight as defaultPreflight } from "./preflight.js";
 import { runWithProgress } from "./progress.js";
@@ -22,7 +23,7 @@ import { VERSION } from "./version.js";
 
 const USAGE =
   "usage: github-to-eat [-h] [-V] --project ID --repo OWNER/NAME " +
-  "[--include TYPES] [--engine NAME] [--dry-run] [-y] [--token GITHUB_TOKEN]";
+  "[--include TYPES] [--engine NAME] [--customize] [--dry-run] [-y] [--token GITHUB_TOKEN]";
 
 const HELP = `${USAGE}
 
@@ -35,6 +36,7 @@ options:
   --repo OWNER/NAME     public GitHub repository, e.g. octocat/hello-world
   --include TYPES       comma-separated types to import: ${Object.keys(MAPPINGS).join(",")} (default: issues)
   --engine NAME         import engine: ${ENGINES.join("|")} (default: ${DEFAULT_ENGINE})
+  --customize           customize the import per run (implies --engine direct; needs a terminal)
   --dry-run             run preflight and show the plan without importing anything
   -y, --yes             skip the interactive confirmation prompt
   --token GITHUB_TOKEN  GitHub token for a private repo (or set GITHUB_TOKEN); public repos need none
@@ -163,6 +165,8 @@ function reportDryRunPlan(plan, { stdout, stderr, owner, repo, project, projectT
  * @property {((question: string) => Promise<boolean>) | null} [confirm] yes/no
  *   prompt; defaults to a terminal prompt when stdin is a TTY, else null
  *   (no prompt — scripts keep running unattended)
+ * @property {{ isTTY?: boolean }} [stdin] TTY probe for the --customize gate;
+ *   defaults to process.stdin
  */
 
 /**
@@ -183,6 +187,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     runImport = defaultRunImport,
     runDirect = defaultRunDirect,
     confirm = process.stdin.isTTY ? defaultConfirm : null,
+    stdin = process.stdin,
   } = deps;
 
   /** @param {string} message */
@@ -202,6 +207,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
         repo: { type: "string" },
         include: { type: "string" },
         engine: { type: "string" },
+        customize: { type: "boolean" },
         "dry-run": { type: "boolean" },
         yes: { type: "boolean", short: "y" },
         token: { type: "string" },
@@ -251,9 +257,28 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
   }
   const flags = requestFlags(included);
 
+  /** @type {import("./engine.js").Engine} */
   let engine;
   try {
     engine = parseEngine(values.engine ?? DEFAULT_ENGINE);
+  } catch (err) {
+    return usageError(`argument --engine: ${err instanceof Error ? err.message : err}`);
+  }
+  if (values.customize) {
+    if (values.engine === "server") {
+      return usageError(
+        "--customize conflicts with --engine server: the server engine maps everything " +
+          "server-side, so there is nothing to customize; drop one of the two flags",
+      );
+    }
+    engine = "direct";
+    if (!stdin.isTTY || !stdout.isTTY) {
+      return usageError(
+        "--customize needs an interactive terminal (stdin and stdout must be TTYs)",
+      );
+    }
+  }
+  try {
     if (engine === "direct") assertDirectSupportsIncludes(included);
   } catch (err) {
     return usageError(`argument --engine: ${err instanceof Error ? err.message : err}`);
@@ -317,6 +342,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
         included,
         dryRun: values["dry-run"],
         stream: stderr,
+        customization: values.customize ? DEFAULT_CUSTOMIZATION : undefined,
       });
     } catch (err) {
       if (err instanceof EATError || err instanceof GitHubError) {

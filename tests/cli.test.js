@@ -3,8 +3,11 @@ import { test } from "node:test";
 
 import { main, parseRepo } from "../src/cli.js";
 import { AuthError } from "../src/client.js";
+import { runDirect as realRunDirect } from "../src/direct.js";
 import { GitHubError } from "../src/github.js";
+import { DEFAULT_CUSTOMIZATION } from "../src/mapping.js";
 import { MAPPINGS } from "../src/mappings.js";
+import { startMockServer } from "../src/mockserver.js";
 import { VERSION } from "../src/version.js";
 import { capture, inTempDir, withEnv } from "./helpers.js";
 
@@ -452,4 +455,205 @@ test("a GitHub failure in the direct engine maps to a clean exit 1", async () =>
       assert.ok(err.buf.includes("error: GitHub request failed (404)"));
     }),
   );
+});
+
+// --- --customize (V3 plumbing) -----------------------------------------------
+
+/** A TTY-flagged capture stream, for tests that simulate an interactive run. */
+function ttyCapture() {
+  return Object.assign(capture(), { isTTY: true });
+}
+
+test("--help documents --customize", async () => {
+  const out = capture();
+  const code = await main(["--help"], { stdout: out, stderr: capture() });
+  assert.equal(code, 0);
+  assert.ok(out.buf.includes("--customize"));
+});
+
+test("--engine server --customize is a usage error naming the conflict", async () => {
+  const err = capture();
+  const code = await main(
+    ["--project", "91", "--repo", "o/r", "--engine", "server", "--customize"],
+    { stdout: ttyCapture(), stderr: err, stdin: { isTTY: true } },
+  );
+  assert.equal(code, 2);
+  assert.ok(err.buf.includes("--customize"));
+  assert.ok(err.buf.includes("--engine server"));
+});
+
+test("--customize with non-TTY stdin is a usage error", async () => {
+  const err = capture();
+  const code = await main(["--project", "91", "--repo", "o/r", "--customize"], {
+    stdout: ttyCapture(),
+    stderr: err,
+    stdin: { isTTY: false },
+  });
+  assert.equal(code, 2);
+  assert.ok(err.buf.includes("interactive terminal"));
+});
+
+test("--customize with non-TTY stdout is a usage error", async () => {
+  const err = capture();
+  const code = await main(["--project", "91", "--repo", "o/r", "--customize"], {
+    stdout: capture(),
+    stderr: err,
+    stdin: { isTTY: true },
+  });
+  assert.equal(code, 2);
+  assert.ok(err.buf.includes("interactive terminal"));
+});
+
+test("--customize implies the direct engine and names it in the legend", async () => {
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      const out = ttyCapture();
+      const server = [];
+      const direct = [];
+      const code = await main(["--project", "91", "--repo", "o/r", "--customize", "-y"], {
+        stdout: out,
+        stderr: capture(),
+        stdin: { isTTY: true },
+        preflight: async () => preflightResult(),
+        runImport: async () => {
+          server.push(1);
+          return outcome();
+        },
+        runDirect: async () => {
+          direct.push(1);
+          return outcome({ importedStories: 3 });
+        },
+      });
+      assert.equal(code, 0);
+      assert.equal(direct.length, 1);
+      assert.equal(server.length, 0);
+      assert.ok(out.buf.includes("[engine: direct]"));
+    }),
+  );
+});
+
+test("--engine direct --customize is accepted, not a conflict", async () => {
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      const code = await main(
+        ["--project", "91", "--repo", "o/r", "--engine", "direct", "--customize", "-y"],
+        {
+          stdout: ttyCapture(),
+          stderr: capture(),
+          stdin: { isTTY: true },
+          preflight: async () => preflightResult(),
+          runDirect: async () => outcome(),
+        },
+      );
+      assert.equal(code, 0);
+    }),
+  );
+});
+
+test("--customize threads the default customization into the direct pipeline", async () => {
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      /** @type {unknown[]} */
+      const seen = [];
+      const code = await main(["--project", "91", "--repo", "o/r", "--customize", "-y"], {
+        stdout: ttyCapture(),
+        stderr: capture(),
+        stdin: { isTTY: true },
+        preflight: async () => preflightResult(),
+        runDirect: async (_client, _project, _owner, _repo, opts) => {
+          seen.push(opts.customization);
+          return outcome();
+        },
+      });
+      assert.equal(code, 0);
+      assert.deepEqual(seen, [DEFAULT_CUSTOMIZATION]);
+    }),
+  );
+});
+
+test("--customize output is byte-identical to --engine direct alone (mockserver)", async () => {
+  /** GitHubClient#fetchAll-shaped fixture, stubbed so no GitHub call happens. */
+  const fetched = {
+    issues: [
+      {
+        number: 7,
+        title: "newer open issue",
+        body: "steps\n\n- [ ] repro",
+        state: "open",
+        created_at: "2024-05-01T00:00:00Z",
+        labels: [],
+      },
+      {
+        number: 3,
+        title: "older closed issue",
+        body: "done",
+        state: "closed",
+        created_at: "2020-01-01T00:00:00Z",
+        closed_at: "2020-02-01T00:00:00Z",
+        labels: [{ name: "bug", color: "ff0000" }],
+      },
+    ],
+    comments: [
+      {
+        issue_url: "https://api.github.com/repos/o/r/issues/3",
+        user: { login: "alice" },
+        created_at: "2020-01-05T00:00:00Z",
+        body: "confirmed",
+      },
+    ],
+    labels: [{ name: "bug", color: "ff0000" }],
+  };
+
+  /** @param {string[]} argv */
+  const run = async (argv) => {
+    const mock = await startMockServer();
+    try {
+      return await inTempDir(() =>
+        withEnv(
+          {
+            EAT_AGENT_KEY: "key",
+            EAT_API_BASE: mock.baseUrl,
+            EAT_APP_BASE: "https://eat.example",
+          },
+          async () => {
+            const out = ttyCapture();
+            const code = await main(argv, {
+              stdout: out,
+              stderr: capture(),
+              stdin: { isTTY: true },
+              runDirect: (client, project, owner, repo, opts) =>
+                realRunDirect(client, project, owner, repo, {
+                  ...opts,
+                  github: { fetchAll: async () => fetched },
+                }),
+            });
+            const rows = (mock.state.stories[91] ?? []).map((row) => ({
+              title: row.title,
+              description: row.description,
+              story_type: row.story_type,
+              current_state: row.current_state,
+              labels: row.labels.map((/** @type {any} */ l) => l.label_name),
+              tasks: row.tasks.map((/** @type {any} */ t) => ({
+                task_desc: t.task_desc,
+                complete: t.complete,
+              })),
+              comments: row.comments.map((/** @type {any} */ c) => c.comment_text),
+            }));
+            return { code, stdout: out.buf, rows };
+          },
+        ),
+      );
+    } finally {
+      await mock.close();
+    }
+  };
+
+  const base = ["--project", "91", "--repo", "o/r", "-y"];
+  const plain = await run([...base, "--engine", "direct"]);
+  const customized = await run([...base, "--customize"]);
+  assert.equal(plain.code, 0);
+  assert.equal(customized.code, 0);
+  assert.equal(plain.rows.length, 2);
+  assert.equal(customized.stdout, plain.stdout);
+  assert.deepEqual(customized.rows, plain.rows);
 });
