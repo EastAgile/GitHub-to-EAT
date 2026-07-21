@@ -162,18 +162,18 @@ with `Link`-header pagination:
 
 `owner` and `repo` are URL-encoded into the request path, so metacharacters in
 `--repo` yield a well-formed request (and a clear repo-not-found error), never
-a mangled query string. Pagination refuses a `Link` rel=next URL whose origin
-differs from the API base — the `Authorization` header never leaves the API
-origin — and a 200 body that is not a JSON array is a fetch error, not an
-empty page.
+a mangled query string. Pagination refuses a `Link` rel=next URL that is
+unparseable or whose origin differs from the API base — the `Authorization`
+header never leaves the API origin — and a 200 body that is not a JSON array
+is a fetch error, not an empty page.
 
 Anonymous requests share GitHub's 60 req/h budget; a mid-sized repo (~1,000
 issues) stays ~15–25 requests. `--token` / `GITHUB_TOKEN` is sent as
 `Authorization: Bearer` and raises the ceiling to 5000/h (and reaches private
 repos). Error mapping: 404 → repo-not-found; rate limits — HTTP 429, a 403
 with `x-ratelimit-remaining: 0`, or a secondary-limit 403 carrying
-`retry-after` — → rate-limit (message carries the reset time from
-`x-ratelimit-reset` or `retry-after`); 401 → token rejected.
+`retry-after` — → rate-limit (the message prefers `retry-after` when present,
+falling back to the `x-ratelimit-reset` time); 401 → token rejected.
 
 ### Default mapping profile (issues → stories)
 

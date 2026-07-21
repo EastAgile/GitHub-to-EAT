@@ -16,7 +16,7 @@ export class GitHubError extends Error {}
 /** The repo does not exist, or the token can't see it (HTTP 404). */
 export class RepoNotFoundError extends GitHubError {}
 
-/** The request's rate-limit budget is exhausted (HTTP 403, remaining 0). */
+/** A rate limit was hit (HTTP 429, or 403 from the primary/secondary limit). */
 export class RateLimitError extends GitHubError {}
 
 /** The supplied token was rejected (HTTP 401). */
@@ -100,10 +100,12 @@ export class GitHubClient {
     ) {
       const reset = Number(response.headers.get("x-ratelimit-reset"));
       let resets = "resets later";
-      if (Number.isFinite(reset) && reset > 0) {
-        resets = `resets at ${new Date(reset * 1000).toISOString()}`;
-      } else if (retryAfter !== null && Number.isFinite(Number(retryAfter))) {
+      // retry-after is the authoritative wait when present (secondary limits);
+      // x-ratelimit-reset only describes the primary hourly window.
+      if (retryAfter !== null && Number.isFinite(Number(retryAfter))) {
         resets = `resets in ${Number(retryAfter)}s`;
+      } else if (Number.isFinite(reset) && reset > 0) {
+        resets = `resets at ${new Date(reset * 1000).toISOString()}`;
       }
       throw new RateLimitError(
         `GitHub rate limit exhausted; ${resets}. Pass --token / GITHUB_TOKEN to raise the limit (5000/h).`,
@@ -137,6 +139,11 @@ export class GitHubClient {
       }
       out.push(...page);
       const next = nextLink(response.headers.get("link"));
+      if (next && !URL.canParse(next)) {
+        throw new GitHubError(
+          "GitHub pagination sent an unparseable rel=next URL; refusing to follow it",
+        );
+      }
       // The Authorization header rides along on every request — never follow
       // a rel=next off the API origin.
       if (next && new URL(next).origin !== new URL(this.apiBase).origin) {

@@ -295,6 +295,43 @@ test("404 maps to RepoNotFoundError naming the repo", async () => {
   );
 });
 
+test("a malformed Link rel=next URL throws GitHubError, not a raw TypeError", async () => {
+  await withGitHub(
+    (_req, res) => json(res, 200, [{ number: 1 }], { Link: '</issues?page=2>; rel="next"' }),
+    async (base) => {
+      await assert.rejects(new GitHubClient("o", "r", { apiBase: base }).listIssues(), (err) => {
+        assert.ok(err instanceof GitHubError);
+        assert.match(err.message, /rel=next/);
+        return true;
+      });
+    },
+  );
+});
+
+test("retry-after wins over x-ratelimit-reset when a secondary limit sends both", async () => {
+  await withGitHub(
+    (_req, res) =>
+      json(
+        res,
+        403,
+        { message: "You have exceeded a secondary rate limit" },
+        {
+          "retry-after": "60",
+          "x-ratelimit-remaining": "1",
+          "x-ratelimit-reset": "1893456000",
+        },
+      ),
+    async (base) => {
+      await assert.rejects(new GitHubClient("o", "r", { apiBase: base }).listIssues(), (err) => {
+        assert.ok(err instanceof RateLimitError);
+        assert.match(err.message, /resets in 60s/);
+        assert.doesNotMatch(err.message, /2030/);
+        return true;
+      });
+    },
+  );
+});
+
 test("403 with a zeroed rate-limit maps to RateLimitError with the reset time", async () => {
   const reset = 1893456000; // 2030-01-01T00:00:00Z — stable, readable in the message
   await withGitHub(
