@@ -363,8 +363,8 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
                 output: stderr,
               })
           : undefined,
-        // After the wizard: render the customized legend, confirm (unless
-        // --yes/--dry-run), then announce the import — all before any write.
+        // Runs after the wizard, before any write, so the legend + confirm
+        // reflect the member's choices instead of the default profile.
         announce: values.customize
           ? async (_fetched, customization) => {
               stdout.write(`${renderLegend(included, engine, customization)}\n`);
