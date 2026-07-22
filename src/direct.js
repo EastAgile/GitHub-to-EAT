@@ -31,13 +31,17 @@ import { writePlan } from "./writer.js";
  *   customization?: import("./mapping.js").Customization,
  *   customize?: (fetched: { issues: any[], comments: any[], labels: any[] })
  *     => Promise<import("./mapping.js").Customization>,
+ *   announce?: (fetched: { issues: any[], comments: any[], labels: any[] },
+ *     customization: import("./mapping.js").Customization) => Promise<void>,
  *   github?: { fetchAll(): Promise<{ issues: any[], comments: any[],
  *     labels: any[] }> } }} options `customize` (the wizard) runs at the
- *   fetch→map seam so its questions use real data; `github` is a test seam
+ *   fetch→map seam so its questions use real data; `announce` (the customized
+ *   legend + confirm) runs right after, and may throw to abort before any
+ *   write; `github` is a test seam
  * @returns {Promise<import("./importer.js").ImportOutcome>}
  */
 export async function runDirect(client, projectId, owner, repo, options) {
-  const { token, dryRun, stream, runId, github, customize } = options;
+  const { token, dryRun, stream, runId, github, customize, announce } = options;
   const source = github ?? new GitHubClient(owner, repo, { token });
   const fetched = await runWithProgress(
     () => source.fetchAll(),
@@ -49,6 +53,9 @@ export async function runDirect(client, projectId, owner, repo, options) {
   const customization = customize
     ? await customize(fetched)
     : (options.customization ?? DEFAULT_CUSTOMIZATION);
+  // The customized legend + confirm reflect those answers, so they land here —
+  // a declined confirm throws, aborting before any prescan or write.
+  if (announce) await announce(fetched, customization);
   // Clamp before the marker lands so the description budget can reserve room
   // for it — one giant GitHub comment must not 400 the whole run.
   const limits = { ...FALLBACK_LIMITS, ...(await (client.fieldLimits?.() ?? {})) };

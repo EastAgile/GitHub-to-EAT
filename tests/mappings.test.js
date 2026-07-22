@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { MAPPINGS, parseInclude, requestFlags } from "../src/mappings.js";
+import { DEFAULT_CUSTOMIZATION } from "../src/mapping.js";
+import { MAPPINGS, parseInclude, renderLegend, requestFlags } from "../src/mappings.js";
 
 test("issues is a known type with no request field", () => {
   assert.equal(MAPPINGS.issues.requestField, null);
@@ -54,4 +55,55 @@ test("requestFlags maps milestones and releases to their server fields", () => {
 
 test("parseInclude still requires issues with the new types", () => {
   assert.throws(() => parseInclude("milestones,releases"), /must contain 'issues'/);
+});
+
+// --- renderLegend + --customize (#31908) -------------------------------------
+
+test("renderLegend names every non-default choice in a Customized block", () => {
+  const legend = renderLegend(["issues"], "direct", {
+    states: "closed",
+    milestones: ["v1.0", "v2.0"],
+    storyType: "bug",
+    comments: false,
+    tasks: false,
+  });
+  assert.match(legend, /^Customized:$/m);
+  assert.match(legend, /- issue states: closed only/);
+  assert.match(legend, /- milestones: v1\.0, v2\.0/);
+  assert.match(legend, /- story type: all bug/);
+  assert.match(legend, /- comments: not imported/);
+  assert.match(legend, /- tasks: not imported/);
+});
+
+test("an all-default customization renders today's legend byte-identical, both engines", () => {
+  for (const engine of /** @type {const} */ (["server", "direct"])) {
+    assert.equal(
+      renderLegend(["issues"], engine, DEFAULT_CUSTOMIZATION),
+      renderLegend(["issues"], engine),
+    );
+    assert.equal(renderLegend(["issues"], engine, null), renderLegend(["issues"], engine));
+  }
+  assert.doesNotMatch(renderLegend(["issues"], "direct", DEFAULT_CUSTOMIZATION), /Customized:/);
+});
+
+test("comments-off drops the comments legend line, keeps the checklist→tasks line", () => {
+  const legend = renderLegend(["issues"], "direct", { ...DEFAULT_CUSTOMIZATION, comments: false });
+  assert.doesNotMatch(legend, /comments → comments/);
+  assert.match(legend, /issue-body checklists → story tasks/);
+});
+
+test("tasks-off drops the checklist→tasks line, keeps the labels and comments lines", () => {
+  const legend = renderLegend(["issues"], "direct", { ...DEFAULT_CUSTOMIZATION, tasks: false });
+  assert.doesNotMatch(legend, /issue-body checklists → story tasks/);
+  assert.match(legend, /labels → labels \(with colors\)/);
+  assert.match(legend, /comments → comments \(body only\)/);
+});
+
+test("renderLegend strips terminal control chars from milestone titles", () => {
+  const legend = renderLegend(["issues"], "direct", {
+    ...DEFAULT_CUSTOMIZATION,
+    milestones: ["v1\u001b[31m.0"],
+  });
+  assert.ok(!legend.includes("\u001b"));
+  assert.match(legend, /- milestones: v1\[31m\.0/);
 });

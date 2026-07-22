@@ -42,6 +42,9 @@ options:
   --token GITHUB_TOKEN  GitHub token for a private repo (or set GITHUB_TOKEN); public repos need none
 `;
 
+/** Thrown by the --customize announce hook when the member declines the post-wizard confirm. */
+class ConfirmAborted extends Error {}
+
 /**
  * Ask a yes/no question on the controlling terminal; default no.
  *
@@ -317,22 +320,28 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     );
   }
 
-  stdout.write(`${renderLegend(included, engine)}\n`);
+  // --customize defers the legend + confirm until after the wizard, so they can
+  // reflect the member's choices; they run in the direct pipeline's announce hook.
+  if (!values.customize) {
+    stdout.write(`${renderLegend(included, engine)}\n`);
 
-  // One prompt for both engines — dry-run paths never prompt (they write nothing).
-  if (!values["dry-run"] && !values.yes && confirm) {
-    const proceed = await confirm(
-      `Import ${owner}/${repo} into project ${project} (${result.projectTitle})? [y/N] `,
-    );
-    if (!proceed) {
-      stderr.write("Aborted — nothing imported.\n");
-      return 1;
+    // One prompt for both engines — dry-run paths never prompt (they write nothing).
+    if (!values["dry-run"] && !values.yes && confirm) {
+      const proceed = await confirm(
+        `Import ${owner}/${repo} into project ${project} (${result.projectTitle})? [y/N] `,
+      );
+      if (!proceed) {
+        stderr.write("Aborted — nothing imported.\n");
+        return 1;
+      }
     }
   }
 
   if (engine === "direct") {
     const token = values.token || process.env.GITHUB_TOKEN || undefined;
-    if (!values["dry-run"]) {
+    // --customize prints "Importing..." from the announce hook instead, once the
+    // member has confirmed — after the wizard, not before it.
+    if (!values["dry-run"] && !values.customize) {
       stdout.write(
         `Importing ${owner}/${repo} into project ${project} (${result.projectTitle})...\n`,
       );
@@ -354,9 +363,27 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
                 output: stderr,
               })
           : undefined,
+        // After the wizard: render the customized legend, confirm (unless
+        // --yes/--dry-run), then announce the import — all before any write.
+        announce: values.customize
+          ? async (_fetched, customization) => {
+              stdout.write(`${renderLegend(included, engine, customization)}\n`);
+              if (!values["dry-run"] && !values.yes && confirm) {
+                const proceed = await confirm(
+                  `Import ${owner}/${repo} into project ${project} (${result.projectTitle})? [y/N] `,
+                );
+                if (!proceed) throw new ConfirmAborted();
+              }
+              if (!values["dry-run"]) {
+                stdout.write(
+                  `Importing ${owner}/${repo} into project ${project} (${result.projectTitle})...\n`,
+                );
+              }
+            }
+          : undefined,
       });
     } catch (err) {
-      if (err instanceof WizardAborted) {
+      if (err instanceof WizardAborted || err instanceof ConfirmAborted) {
         stderr.write("Aborted — nothing imported.\n");
         return 1;
       }
