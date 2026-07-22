@@ -802,6 +802,68 @@ test("--customize confirms after the wizard; declining writes nothing (mockserve
           assert.equal(code, 1);
           assert.equal((mock.state.stories[91] ?? []).length, 0);
           assert.ok(err.buf.includes("Aborted"));
+          // The abort throws before the "Importing..." write, so nothing past the legend prints.
+          assert.ok(!out.buf.includes("Importing "));
+        },
+      ),
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("--customize --dry-run runs the wizard, prints the plan, and writes nothing (mockserver)", async () => {
+  const fetched = {
+    issues: [
+      { number: 7, title: "open one", body: "", state: "open", labels: [] },
+      {
+        number: 3,
+        title: "closed one",
+        body: "",
+        state: "closed",
+        closed_at: "2020-02-01T00:00:00Z",
+        labels: [],
+      },
+    ],
+    comments: [],
+    labels: [],
+  };
+  const mock = await startMockServer();
+  try {
+    await inTempDir(() =>
+      withEnv(
+        { EAT_AGENT_KEY: "key", EAT_API_BASE: mock.baseUrl, EAT_APP_BASE: "https://eat.example" },
+        async () => {
+          const out = ttyCapture();
+          /** @type {string[]} */
+          const asked = [];
+          // states → "open only", then defaults; no milestones, so four questions.
+          const code = await main(
+            ["--project", "91", "--repo", "o/r", "--customize", "--dry-run"],
+            {
+              stdout: out,
+              stderr: capture(),
+              stdin: scriptedStdin(["2", "", "", ""]),
+              confirm: async (q) => {
+                asked.push(q);
+                return false;
+              },
+              runDirect: (client, project, owner, repo, opts) =>
+                realRunDirect(client, project, owner, repo, {
+                  ...opts,
+                  github: { fetchAll: async () => fetched },
+                }),
+            },
+          );
+          assert.equal(code, 0);
+          assert.equal(asked.length, 0); // dry-run skips the [y/N] confirm
+          // The customized legend still renders (after the wizard)...
+          assert.ok(out.buf.includes("Customized:"));
+          assert.ok(out.buf.includes("issue states: open only"));
+          // ...but the write path is never entered.
+          assert.ok(!out.buf.includes("Importing "));
+          assert.ok(out.buf.includes("Dry run plan"));
+          assert.equal((mock.state.stories[91] ?? []).length, 0);
         },
       ),
     );

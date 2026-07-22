@@ -47,7 +47,9 @@ export function describeCustomization({ states, milestones, storyType, comments,
   /** @type {string[]} */
   const lines = [];
   if (states !== "all") lines.push(`issue states: ${states} only`);
-  if (milestones) lines.push(`milestones: ${milestones.map(stripControls).join(", ")}`);
+  // A directly-built Customization could pass [] (the wizard never does); an empty
+  // filter is "all", so render nothing rather than a bare "milestones:" line.
+  if (milestones?.length) lines.push(`milestones: ${milestones.map(stripControls).join(", ")}`);
   if (storyType !== "infer") lines.push(`story type: all ${storyType}`);
   if (!comments) lines.push("comments: not imported");
   if (!tasks) lines.push("tasks: not imported");
