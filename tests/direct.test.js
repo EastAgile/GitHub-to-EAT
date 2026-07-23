@@ -83,6 +83,39 @@ test("runDirect imports once, then a re-run skips everything via the markers", a
   }
 });
 
+test("runDirect runs the customize hook after fetch and maps with its result", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    /** @type {any} */
+    let seenFetched = null;
+    const res = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+      customize: async (fetched) => {
+        seenFetched = fetched;
+        return {
+          states: "open",
+          milestones: null,
+          storyType: "chore",
+          comments: false,
+          tasks: false,
+        };
+      },
+    });
+    // The hook saw the fetched payload; states:"open" drops the closed issue (#3).
+    assert.equal(seenFetched.issues.length, 2);
+    assert.equal(res.importedStories, 1);
+    const rows = mock.state.stories[91];
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].title, "newer open issue");
+    assert.equal(rows[0].story_type, "chore");
+  } finally {
+    await mock.close();
+  }
+});
+
 test("dry-run computes the plan locally and writes nothing", async () => {
   const mock = await startMockServer();
   try {
