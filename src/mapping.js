@@ -239,7 +239,7 @@ export function mapRepo({ issues, comments, labels }, customization = DEFAULT_CU
 }
 
 /**
- * @typedef {object} FieldLimits max chars per write field
+ * @typedef {object} FieldLimits max UTF-8 bytes per write field
  * @property {number} storyName
  * @property {number} storyDescription
  * @property {number} taskDescription
@@ -263,16 +263,42 @@ export const FALLBACK_LIMITS = {
 export const TRUNCATION_NOTICE =
   "[truncated by github-to-eat: the full text exceeds the server's length limit]";
 
+// The server measures every text limit with Rust's str::len() — UTF-8 bytes — while
+// JS String.length counts UTF-16 units, so multi-byte text overflows silently.
+const byteLen = (/** @type {string} */ s) => Buffer.byteLength(s, "utf8");
+
+/**
+ * Longest prefix of `text` fitting `maxBytes`, cut on a code-point boundary so an
+ * astral character is never split into a lone surrogate.
+ *
+ * @param {string} text
+ * @param {number} maxBytes
+ * @returns {string}
+ */
+function sliceBytes(text, maxBytes) {
+  if (maxBytes <= 0) return "";
+  if (byteLen(text) <= maxBytes) return text;
+  let used = 0;
+  let out = "";
+  for (const ch of text) {
+    const size = byteLen(ch);
+    if (used + size > maxBytes) break;
+    used += size;
+    out += ch;
+  }
+  return out;
+}
+
 /**
  * @param {string} text
  * @param {number} limit
  * @returns {string} within `limit`, ending with {@link TRUNCATION_NOTICE} when cut
  */
 function clampBlock(text, limit) {
-  if (text.length <= limit) return text;
-  const room = limit - TRUNCATION_NOTICE.length - 2;
-  if (room <= 0) return text.slice(0, Math.max(0, limit));
-  return `${text.slice(0, room)}\n\n${TRUNCATION_NOTICE}`;
+  if (byteLen(text) <= limit) return text;
+  const room = limit - byteLen(TRUNCATION_NOTICE) - 2;
+  if (room <= 0) return sliceBytes(text, limit);
+  return `${sliceBytes(text, room)}\n\n${TRUNCATION_NOTICE}`;
 }
 
 /**
@@ -292,25 +318,26 @@ export function clampPlan(plan, limits, { reserveDescription = () => 0, warn = (
     /** @param {string} field @param {number} limit */
     const notice = (field, limit) =>
       warn(
-        `warning: issue #${op.external_id}: ${field} truncated to ${limit} chars (server limit)\n`,
+        `warning: issue #${op.external_id}: ${field} truncated to ${limit} bytes (server limit)\n`,
       );
 
-    if (out.name.length > limits.storyName) {
-      out.name = `${out.name.slice(0, limits.storyName - 1)}…`;
+    if (byteLen(out.name) > limits.storyName) {
+      // The appended ellipsis costs 3 bytes, so hold them back from the prefix.
+      out.name = `${sliceBytes(out.name, limits.storyName - byteLen("…"))}…`;
       notice("name", limits.storyName);
     }
     const descriptionLimit = limits.storyDescription - reserveDescription(op);
-    if (out.description !== null && out.description.length > descriptionLimit) {
+    if (out.description !== null && byteLen(out.description) > descriptionLimit) {
       out.description = clampBlock(out.description, descriptionLimit);
       notice("description", descriptionLimit);
     }
     out.tasks = op.tasks.map((task, i) => {
-      if (task.description.length <= limits.taskDescription) return task;
+      if (byteLen(task.description) <= limits.taskDescription) return task;
       notice(`task ${i + 1}`, limits.taskDescription);
       return { ...task, description: clampBlock(task.description, limits.taskDescription) };
     });
     out.comments = op.comments.map((comment, i) => {
-      if (comment.text.length <= limits.commentText) return comment;
+      if (byteLen(comment.text) <= limits.commentText) return comment;
       notice(`comment ${i + 1}`, limits.commentText);
       return { text: clampBlock(comment.text, limits.commentText) };
     });

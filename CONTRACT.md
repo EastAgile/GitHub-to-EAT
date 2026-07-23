@@ -286,19 +286,30 @@ would otherwise abort the whole run (observed 2026-07-17: a 46,411-char
 comment body). The direct engine therefore clamps plan text client-side
 before writing:
 
+- **Unit — UTF-8 bytes.** The server validates with Rust's `str::len()`, which
+  counts bytes, so every limit here is a byte budget. The client measures the
+  same way (`Buffer.byteLength`); measuring in JS `String.length` (UTF-16
+  units) under-counts any non-ASCII text and lets it through to a `too_long`
+  400 — emoji, arrows, curly quotes and CJK all cost 2–4 bytes per character.
+  Truncation cuts on a **code-point boundary**, so a character is never split
+  into a lone surrogate.
 - **Limit source** — the field's `maxLength` in `GET /openapi.json` when
   published (aliased request fields share storage, so the smallest alias
   limit wins). Today's servers publish none, so **fallback defaults**
   apply: story name 255; story description, task description, and comment
-  text 16,000 chars each — chosen between the longest comment a real server
+  text 16,000 bytes each — chosen between the longest comment a real server
   accepted (13,101) and one it rejected (46,411). Tune the fallbacks (or ask
   the EAT team to publish `maxLength`) if a server still rejects.
 - **Clamp shape** — block text is cut and suffixed with a visible notice
   (`[truncated by github-to-eat: …]`), total within the limit; names are cut
-  to the limit with a trailing ellipsis. Story descriptions reserve room for
-  the dedup marker line before clamping, so the marker always survives
-  intact. Each clamp warns on stderr naming the issue and field
-  (`warning: issue #64: comment 1 truncated to 16000 chars (server limit)`).
+  with a trailing ellipsis whose own 3 bytes come out of the budget. Story
+  descriptions reserve room for the dedup marker line before clamping, so the
+  marker always survives intact. Each clamp warns on stderr naming the issue
+  and field
+  (`warning: issue #64: comment 1 truncated to 16000 bytes (server limit)`).
+- **Guarantee** — because the clamp measures the server's own unit, a clamped
+  plan cannot produce a `too_long` 400; one over-long GitHub issue can never
+  abort the run.
 - The mock server mirrors the rejection and, when configured with limits,
   publishes them as `maxLength` in its `/openapi.json`.
 
