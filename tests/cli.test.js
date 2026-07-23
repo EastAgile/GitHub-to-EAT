@@ -528,8 +528,14 @@ test("--customize implies the direct engine and names it in the legend", async (
           server.push(1);
           return outcome();
         },
-        runDirect: async () => {
+        // #31908 moved the customized legend after the wizard, into runDirect's
+        // announce hook, so the stub must drive it to render the legend.
+        runDirect: async (_client, _project, _owner, _repo, opts) => {
           direct.push(1);
+          await opts.announce?.(
+            { issues: [], comments: [], labels: [] },
+            { states: "all", milestones: null, storyType: "infer", comments: true, tasks: true },
+          );
           return outcome({ importedStories: 3 });
         },
       });
@@ -695,6 +701,169 @@ test("EOF mid-wizard aborts --customize with exit 1 and nothing written (mockser
           assert.equal(code, 1);
           assert.equal((mock.state.stories[91] ?? []).length, 0);
           assert.ok(err.buf.includes("Aborted"));
+        },
+      ),
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("--customize --yes runs the wizard and skips the [y/N] confirm (mockserver)", async () => {
+  const fetched = {
+    issues: [
+      { number: 7, title: "open one", body: "", state: "open", labels: [] },
+      {
+        number: 3,
+        title: "closed one",
+        body: "",
+        state: "closed",
+        closed_at: "2020-02-01T00:00:00Z",
+        labels: [],
+      },
+    ],
+    comments: [],
+    labels: [],
+  };
+  const mock = await startMockServer();
+  try {
+    await inTempDir(() =>
+      withEnv(
+        { EAT_AGENT_KEY: "key", EAT_API_BASE: mock.baseUrl, EAT_APP_BASE: "https://eat.example" },
+        async () => {
+          const out = ttyCapture();
+          /** @type {string[]} */
+          const asked = [];
+          // No milestones on these issues, so the wizard asks four questions:
+          // states → "open only", story type default, comments off, tasks default.
+          const code = await main(["--project", "91", "--repo", "o/r", "--customize", "-y"], {
+            stdout: out,
+            stderr: capture(),
+            stdin: scriptedStdin(["2", "", "n", ""]),
+            confirm: async (q) => {
+              asked.push(q);
+              return false;
+            },
+            runDirect: (client, project, owner, repo, opts) =>
+              realRunDirect(client, project, owner, repo, {
+                ...opts,
+                github: { fetchAll: async () => fetched },
+              }),
+          });
+          assert.equal(code, 0);
+          assert.equal(asked.length, 0); // --yes: the [y/N] confirm is skipped
+          // The legend reflects the wizard's non-default answers (rendered after it).
+          assert.ok(out.buf.includes("Customized:"));
+          assert.ok(out.buf.includes("issue states: open only"));
+          assert.ok(out.buf.includes("comments: not imported"));
+          // states = open only drops the closed issue; only the open one is written.
+          const rows = mock.state.stories[91] ?? [];
+          assert.equal(rows.length, 1);
+          assert.equal(rows[0].title, "open one");
+        },
+      ),
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("--customize confirms after the wizard; declining writes nothing (mockserver)", async () => {
+  const fetched = {
+    issues: [{ number: 7, title: "open one", body: "", state: "open", labels: [] }],
+    comments: [],
+    labels: [],
+  };
+  const mock = await startMockServer();
+  try {
+    await inTempDir(() =>
+      withEnv(
+        { EAT_AGENT_KEY: "key", EAT_API_BASE: mock.baseUrl, EAT_APP_BASE: "https://eat.example" },
+        async () => {
+          const out = ttyCapture();
+          const err = capture();
+          const code = await main(["--project", "91", "--repo", "o/r", "--customize"], {
+            stdout: out,
+            stderr: err,
+            stdin: scriptedStdin(["", "", "", ""]), // all-default answers
+            confirm: async () => {
+              // The confirm runs after the wizard: the customized legend is already on stdout.
+              assert.ok(
+                out.buf.includes("Import mapping (GitHub → East Agile Tracker) [engine: direct]:"),
+              );
+              return false;
+            },
+            runDirect: (client, project, owner, repo, opts) =>
+              realRunDirect(client, project, owner, repo, {
+                ...opts,
+                github: { fetchAll: async () => fetched },
+              }),
+          });
+          assert.equal(code, 1);
+          assert.equal((mock.state.stories[91] ?? []).length, 0);
+          assert.ok(err.buf.includes("Aborted"));
+          // The abort throws before the "Importing..." write, so nothing past the legend prints.
+          assert.ok(!out.buf.includes("Importing "));
+        },
+      ),
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("--customize --dry-run runs the wizard, prints the plan, and writes nothing (mockserver)", async () => {
+  const fetched = {
+    issues: [
+      { number: 7, title: "open one", body: "", state: "open", labels: [] },
+      {
+        number: 3,
+        title: "closed one",
+        body: "",
+        state: "closed",
+        closed_at: "2020-02-01T00:00:00Z",
+        labels: [],
+      },
+    ],
+    comments: [],
+    labels: [],
+  };
+  const mock = await startMockServer();
+  try {
+    await inTempDir(() =>
+      withEnv(
+        { EAT_AGENT_KEY: "key", EAT_API_BASE: mock.baseUrl, EAT_APP_BASE: "https://eat.example" },
+        async () => {
+          const out = ttyCapture();
+          /** @type {string[]} */
+          const asked = [];
+          // states → "open only", then defaults; no milestones, so four questions.
+          const code = await main(
+            ["--project", "91", "--repo", "o/r", "--customize", "--dry-run"],
+            {
+              stdout: out,
+              stderr: capture(),
+              stdin: scriptedStdin(["2", "", "", ""]),
+              confirm: async (q) => {
+                asked.push(q);
+                return false;
+              },
+              runDirect: (client, project, owner, repo, opts) =>
+                realRunDirect(client, project, owner, repo, {
+                  ...opts,
+                  github: { fetchAll: async () => fetched },
+                }),
+            },
+          );
+          assert.equal(code, 0);
+          assert.equal(asked.length, 0); // dry-run skips the [y/N] confirm
+          // The customized legend still renders (after the wizard)...
+          assert.ok(out.buf.includes("Customized:"));
+          assert.ok(out.buf.includes("issue states: open only"));
+          // ...but the write path is never entered.
+          assert.ok(!out.buf.includes("Importing "));
+          assert.ok(out.buf.includes("Dry run plan"));
+          assert.equal((mock.state.stories[91] ?? []).length, 0);
         },
       ),
     );

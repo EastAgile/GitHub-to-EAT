@@ -190,8 +190,31 @@ reflect the real issues — and asks, one at a time:
 
 Answers apply to this run only — nothing is persisted. Prompts render on
 stderr, keeping stdout clean. EOF (Ctrl-D) mid-wizard aborts the run with
-exit 1 before anything is written. The customized legend + confirm land in a
-follow-up story.
+exit 1 before anything is written.
+
+#### Order: fetch → wizard → customized legend → confirm → write
+
+A `--customize` run reorders the legend and confirm to _after_ the wizard, so
+the member reviews a legend that reflects their own choices — not the default
+profile. The effective order is **fetch → wizard → customized legend + `[y/N]`
+confirm → map → write**; non-`--customize` runs (server and direct alike) keep
+today's pre-fetch legend + confirm, byte-for-byte.
+
+The customized legend (`renderLegend`) adjusts to the `Customization`:
+
+- The issues block drops the **comments** line when `comments` is off, and the
+  **checklist→tasks** fragment when `tasks` is off (labels stay either way).
+- A trailing **`Customized:`** block names every non-default choice — issue
+  states, milestone filter (titles control-char-stripped, they are untrusted
+  remote data), fixed story type, comments off, tasks off. An all-default set
+  of answers renders no such block and no dropped lines, so the legend is
+  byte-identical to plain `--engine direct`.
+
+`--yes` skips the `[y/N]` confirm but never the wizard: a customized run always
+shows the resulting legend before writing. `--customize --dry-run` runs the
+wizard and prints the plan for the filtered subset without writing (dry-run
+skips the confirm, as elsewhere). Declining the confirm — like EOF mid-wizard —
+writes nothing and exits 1.
 
 ### GitHub fetch stage
 

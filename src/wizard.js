@@ -7,6 +7,8 @@
 
 import readline from "node:readline/promises";
 
+import { stripControls } from "./mapping.js";
+
 /** Thrown when the member closes the input (Ctrl-D) before answering every question. */
 export class WizardAborted extends Error {
   constructor() {
@@ -24,10 +26,6 @@ export class WizardAborted extends Error {
 function realIssues(fetched) {
   return (fetched.issues ?? []).filter((issue) => !issue.pull_request);
 }
-
-// Milestone titles are untrusted remote data; strip terminal control chars
-// (ESC/C0/C1/DEL) so a crafted title can't recolour, move the cursor, or forge menu rows.
-const stripControls = (/** @type {string} */ s) => s.replace(/\p{Cc}/gu, "");
 
 /**
  * Prompt for one of a numbered list, blank = the default entry.

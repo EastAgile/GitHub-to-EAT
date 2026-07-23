@@ -7,7 +7,7 @@
  * else from this table.
  */
 
-import { ISSUES_LEGEND } from "./mapping.js";
+import { customizedIssuesLegend, describeCustomization, ISSUES_LEGEND } from "./mapping.js";
 
 /**
  * @typedef {object} Mapping
@@ -85,18 +85,33 @@ export function parseInclude(value) {
  * header names the active engine only when it isn't the default `server`, so
  * the default output stays byte-identical.
  *
+ * With a `--customize` {@link import("./mapping.js").Customization}, the issues
+ * block reflects the choices (comments/checklist lines drop when off) and a
+ * `Customized:` block names every non-default choice. An all-default (or null)
+ * customization renders exactly the pre-customize legend, byte-for-byte.
+ *
  * @param {string[]} selected types from {@link parseInclude}
  * @param {import("./engine.js").Engine} [engine] active import engine
+ * @param {import("./mapping.js").Customization | null} [customization] per-run choices
  * @returns {string} multi-line legend text (no trailing newline)
  */
-export function renderLegend(selected, engine = "server") {
+export function renderLegend(selected, engine = "server", customization = null) {
   const engineTag = engine === "server" ? "" : ` [engine: ${engine}]`;
   const lines = [`Import mapping (GitHub → East Agile Tracker)${engineTag}:`];
   for (const type of selected) {
     lines.push(`  ${type}:`);
-    for (const row of MAPPINGS[type].legend) {
+    const rows =
+      type === "issues" && customization
+        ? customizedIssuesLegend(customization)
+        : MAPPINGS[type].legend;
+    for (const row of rows) {
       lines.push(`    - ${row}`);
     }
+  }
+  const customized = customization ? describeCustomization(customization) : [];
+  if (customized.length) {
+    lines.push("Customized:");
+    for (const choice of customized) lines.push(`  - ${choice}`);
   }
   lines.push(
     "Imports append to the project; re-runs skip already-imported items; nothing is updated or deleted.",

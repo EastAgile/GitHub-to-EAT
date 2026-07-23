@@ -3,15 +3,58 @@
  * Mirrors the server importer's issue mapping (agile-tracker github.rs + common.rs) so both engines classify identically.
  */
 
+// Composed so `--customize` can drop the tasks fragment / comments line without
+// the default legend drifting: ISSUES_LEGEND stays byte-identical to before.
+const STATE_LINE =
+  "open issue → story (unstarted); closed issue → story (accepted, keeps the closed date)";
+const LABELS_LINE = "labels → labels (with colors)";
+const TASKS_SUFFIX = "; issue-body checklists → story tasks";
+const COMMENTS_LINE = "comments → comments (body only)";
+
 /**
  * The issues legend shown by the CLI. Lives next to the functions that implement each line
  * and is re-exported through the MAPPINGS registry, so legend and mapper can't drift apart.
  */
-export const ISSUES_LEGEND = [
-  "open issue → story (unstarted); closed issue → story (accepted, keeps the closed date)",
-  "labels → labels (with colors); issue-body checklists → story tasks",
-  "comments → comments (body only)",
-];
+export const ISSUES_LEGEND = [STATE_LINE, `${LABELS_LINE}${TASKS_SUFFIX}`, COMMENTS_LINE];
+
+// Milestone titles are untrusted remote data; strip terminal control chars
+// (ESC/C0/C1/DEL) before they reach the terminal, in the wizard and the legend alike.
+export const stripControls = (/** @type {string} */ s) => s.replace(/\p{Cc}/gu, "");
+
+/**
+ * The issues legend adjusted for a run's {@link Customization}: the checklist→tasks
+ * fragment drops when `tasks` is off, the comments line drops when `comments` is off.
+ * All-default answers reproduce {@link ISSUES_LEGEND} verbatim.
+ *
+ * @param {Customization} customization
+ * @returns {string[]}
+ */
+export function customizedIssuesLegend({ comments, tasks }) {
+  const lines = [STATE_LINE, tasks ? `${LABELS_LINE}${TASKS_SUFFIX}` : LABELS_LINE];
+  if (comments) lines.push(COMMENTS_LINE);
+  return lines;
+}
+
+/**
+ * One human-readable line per non-default choice, for the legend's `Customized:`
+ * block. Empty when every field is at its default (an all-default customization
+ * must render nothing, keeping the legend byte-identical).
+ *
+ * @param {Customization} customization
+ * @returns {string[]}
+ */
+export function describeCustomization({ states, milestones, storyType, comments, tasks }) {
+  /** @type {string[]} */
+  const lines = [];
+  if (states !== "all") lines.push(`issue states: ${states} only`);
+  // A directly-built Customization could pass [] (the wizard never does); an empty
+  // filter is "all", so render nothing rather than a bare "milestones:" line.
+  if (milestones?.length) lines.push(`milestones: ${milestones.map(stripControls).join(", ")}`);
+  if (storyType !== "infer") lines.push(`story type: all ${storyType}`);
+  if (!comments) lines.push("comments: not imported");
+  if (!tasks) lines.push("tasks: not imported");
+  return lines;
+}
 
 /**
  * @typedef {object} Customization per-run mapping overrides (`--customize`)
