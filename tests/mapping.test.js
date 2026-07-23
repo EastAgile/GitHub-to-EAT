@@ -374,11 +374,67 @@ test("clampPlan clamps name and task text, warning for each", () => {
     { ...FALLBACK_LIMITS, storyName: 255, taskDescription: 200 },
     { warn: (m) => warnings.push(m) },
   );
-  assert.equal(stories[0].name.length, 255);
+  // Byte-measured now: the 3-byte ellipsis comes out of the 255-byte budget,
+  // so an all-ASCII name keeps 252 chars + "…" (the old assertion of 255 JS
+  // units was 257 bytes — over the server's limit).
+  assert.equal(Buffer.byteLength(stories[0].name, "utf8"), 255);
   assert.ok(stories[0].tasks[0].description.length <= 200);
   assert.equal(warnings.length, 2);
   assert.match(warnings[0], /issue #7: name/);
   assert.match(warnings[1], /issue #7: task 1/);
+});
+
+const bytes = (/** @type {string} */ s) => Buffer.byteLength(s, "utf8");
+
+test("clampPlan clamps to the limit in UTF-8 bytes, not JS units", () => {
+  // The server measures with Rust str::len() (bytes). Curly quotes cost 3 bytes
+  // each, so a value "within" the limit in JS units blows the byte budget.
+  const op = storyOp({ description: "’".repeat(20000) });
+  const { stories } = clampPlan(
+    { labels: [], stories: [op] },
+    { ...FALLBACK_LIMITS, storyDescription: 20000 },
+    { reserveDescription: () => 63 },
+  );
+  const desc = String(stories[0].description);
+  // The 63-byte dedup marker is appended after clamping, so the clamped value
+  // must leave room for it inside the server's 20000-byte budget.
+  assert.ok(bytes(desc) + 63 <= 20000, `clamped to ${bytes(desc)} bytes + 63 reserve`);
+  assert.ok(desc.endsWith(TRUNCATION_NOTICE));
+});
+
+test("clampPlan never splits a character when truncating (astral emoji)", () => {
+  const op = storyOp({ description: "\u{1F600}".repeat(5000) });
+  const { stories } = clampPlan(
+    { labels: [], stories: [op] },
+    { ...FALLBACK_LIMITS, storyDescription: 1000 },
+  );
+  const desc = String(stories[0].description);
+  assert.ok(bytes(desc) <= 1000, `clamped to ${bytes(desc)} bytes`);
+  // A lone surrogate would encode to U+FFFD, so the round-trip would differ.
+  assert.equal(desc, Buffer.from(desc, "utf8").toString("utf8"));
+});
+
+test("clampPlan clamps the name in bytes, counting the ellipsis it appends", () => {
+  const op = storyOp({ name: "n".repeat(300) });
+  const { stories } = clampPlan(
+    { labels: [], stories: [op] },
+    { ...FALLBACK_LIMITS, storyName: 255 },
+  );
+  assert.ok(bytes(stories[0].name) <= 255, `name is ${bytes(stories[0].name)} bytes`);
+  assert.ok(stories[0].name.endsWith("…"));
+});
+
+test("clampPlan clamps multi-byte task and comment text in bytes too", () => {
+  const op = storyOp({
+    tasks: [{ description: "你好".repeat(500), complete: false }],
+    comments: [{ text: "→".repeat(500) }],
+  });
+  const { stories } = clampPlan(
+    { labels: [], stories: [op] },
+    { ...FALLBACK_LIMITS, taskDescription: 300, commentText: 300 },
+  );
+  assert.ok(bytes(stories[0].tasks[0].description) <= 300);
+  assert.ok(bytes(stories[0].comments[0].text) <= 300);
 });
 
 test("clampPlan leaves under-limit text untouched and silent", () => {

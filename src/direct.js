@@ -46,7 +46,8 @@ export async function runDirect(client, projectId, owner, repo, options) {
   // for it — one giant GitHub comment must not 400 the whole run.
   const limits = { ...FALLBACK_LIMITS, ...(await (client.fieldLimits?.() ?? {})) };
   const mapped = clampPlan(mapRepo(fetched, customization), limits, {
-    reserveDescription: (op) => markerFor(owner, repo, op.external_id).length + 2,
+    reserveDescription: (op) =>
+      Buffer.byteLength(markerFor(owner, repo, op.external_id), "utf8") + 2,
     warn: (message) => stream?.write(message),
   });
 
