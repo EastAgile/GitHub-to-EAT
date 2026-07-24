@@ -605,3 +605,58 @@ test("story name and task_desc over their maxLength are rejected too_long", asyn
     await mock.close();
   }
 });
+
+test("POST stories persists the provenance pair and reads it back via the filter", async () => {
+  const mock = await startMockServer();
+  try {
+    await post(mock.baseUrl, "/projects/91/stories", {
+      name: "with provenance",
+      import_source: "github",
+      import_external_id: "42",
+    });
+    await post(mock.baseUrl, "/projects/91/stories", { name: "no provenance" });
+    const headers = { "X-TrackerToken": "ea_token" };
+    const filtered = await (
+      await fetch(
+        `${mock.baseUrl}/projects/91/stories?limit=50&import_source=github&fields=story_id,import_external_id`,
+        { headers },
+      )
+    ).json();
+    assert.equal(filtered.items.length, 1);
+    assert.equal(filtered.items[0].import_external_id, "42");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("half a provenance pair is rejected 400 naming both fields", async () => {
+  const mock = await startMockServer();
+  try {
+    const res = await post(mock.baseUrl, "/projects/91/stories", {
+      name: "lonely source",
+      import_source: "github",
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.code, "validation_failed");
+    assert.deepEqual(body.details.fields.sort(), ["import_external_id", "import_source"]);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("an old server ignores the pair and never advertises the filter", async () => {
+  const mock = await startMockServer(makeState({ provenance: false }));
+  try {
+    // A lone field is accepted (no pair validation) and simply not persisted.
+    const res = await post(mock.baseUrl, "/projects/91/stories", {
+      name: "s",
+      import_source: "github",
+    });
+    assert.equal(res.status, 200);
+    const story = await res.json();
+    assert.equal("import_source" in story, false);
+  } finally {
+    await mock.close();
+  }
+});

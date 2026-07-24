@@ -80,12 +80,20 @@ async function withRetry(fn, attempts, delayMs) {
  * @param {number} projectId
  * @param {WritePlan} plan
  * @param {{ runId?: string, stream?: import("./progress.js").OutStream,
- *   retryAttempts?: number, retryDelayMs?: number }} [options] `runId` scopes
- *   the idempotency keys (fresh per run, stable across in-run retries)
+ *   retryAttempts?: number, retryDelayMs?: number, sendProvenance?: boolean }}
+ *   [options] `runId` scopes the idempotency keys (fresh per run, stable across
+ *   in-run retries); `sendProvenance` adds the re-import pair (EAT #31427) to
+ *   every story create
  * @returns {Promise<WriteResult>}
  */
 export async function writePlan(client, projectId, plan, options = {}) {
-  const { runId = randomUUID(), stream, retryAttempts = 3, retryDelayMs = 250 } = options;
+  const {
+    runId = randomUUID(),
+    stream,
+    retryAttempts = 3,
+    retryDelayMs = 250,
+    sendProvenance = false,
+  } = options;
   /** @template T @param {() => Promise<T>} fn */
   const retrying = (fn) => withRetry(fn, retryAttempts, retryDelayMs);
 
@@ -123,18 +131,20 @@ export async function writePlan(client, projectId, plan, options = {}) {
     await runWithProgress(
       async () => {
         for (const op of ordered) {
+          // Built from one object so no path can emit half the pair (EAT #31427
+          // owner-gates it and 400s a lone field).
+          const body = {
+            name: op.name,
+            description: op.description,
+            story_type: op.story_type,
+            current_state: op.current_state,
+            labels: op.labels,
+            ...(sendProvenance
+              ? { import_source: "github", import_external_id: op.external_id }
+              : {}),
+          };
           const created = await retrying(() =>
-            client.createStory(
-              projectId,
-              {
-                name: op.name,
-                description: op.description,
-                story_type: op.story_type,
-                current_state: op.current_state,
-                labels: op.labels,
-              },
-              `${runId}:story:${op.external_id}`,
-            ),
+            client.createStory(projectId, body, `${runId}:story:${op.external_id}`),
           );
           result.stories += 1;
           for (const [i, task] of op.tasks.entries()) {

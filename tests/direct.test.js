@@ -7,6 +7,25 @@ import { runDirect } from "../src/direct.js";
 import { makeState, startMockServer } from "../src/mockserver.js";
 import { capture } from "./helpers.js";
 
+/**
+ * Wrap a client method, recording each call's arguments.
+ *
+ * @param {any} client
+ * @param {string} method
+ * @returns {any[][]}
+ */
+function spy(client, method) {
+  /** @type {any[][]} */
+  const calls = [];
+  const orig = client[method].bind(client);
+  /** @param {any[]} args */
+  client[method] = (...args) => {
+    calls.push(args);
+    return orig(...args);
+  };
+  return calls;
+}
+
 /** A fetched-repo stub shaped like GitHubClient#fetchAll's result. */
 function fetchedRepo() {
   return {
@@ -181,6 +200,158 @@ test("a story left incomplete by an interrupted run stays skipped but warns", as
     assert.match(out.buf, /warning: issue #3 .*comments 0\/1/);
     assert.doesNotMatch(out.buf, /issue #7/);
     assert.equal(mock.state.stories[91].length, 2);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("against a supporting server every create carries the full pair (AC1)", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const creates = spy(client, "createStory");
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    });
+    assert.equal(creates.length, 2);
+    for (const [, story] of creates) {
+      // Both or neither — a lone field would 400 against the owner-gated pair.
+      assert.equal("import_source" in story, "import_external_id" in story);
+      assert.equal(story.import_source, "github");
+    }
+    assert.deepEqual(creates.map(([, s]) => s.import_external_id).sort(), ["3", "7"]);
+    // The pair was persisted and reads back through the list filter.
+    const rows = mock.state.stories[91];
+    assert.equal(
+      rows.every((r) => r.import_source === "github"),
+      true,
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("prescan uses the provenance filters on a supporting server, not on an old one (AC2)", async () => {
+  const supporting = await startMockServer();
+  try {
+    const client = new EATClient(supporting.baseUrl, "ea_token");
+    const pages = spy(client, "listStoryPage");
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    });
+    assert.ok(pages.some(([, opts]) => opts.importSource === "github"));
+  } finally {
+    await supporting.close();
+  }
+
+  const old = await startMockServer(makeState({ provenance: false }));
+  try {
+    const client = new EATClient(old.baseUrl, "ea_token");
+    const pages = spy(client, "listStoryPage");
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    });
+    assert.ok(pages.every(([, opts]) => opts.importSource === undefined));
+  } finally {
+    await old.close();
+  }
+});
+
+test("a legacy marker-only row is still skipped on a supporting server (AC3)", async () => {
+  // Marker in the description, but no server-side pair — an older marker-only CLI run.
+  const state = makeState({
+    stories: {
+      91: [
+        {
+          story_id: 100,
+          title: "older closed issue",
+          description: `steps\n\n${markerFor("o", "r", "3")}`,
+          tasks_count: 1,
+          comment_count: 1,
+        },
+      ],
+    },
+  });
+  const mock = await startMockServer(state);
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    });
+    // #3 skipped via the marker prescan (the pair filter can't see it); #7 imported.
+    assert.equal(result.skipped, 1);
+    assert.equal(result.importedStories, 1);
+    assert.equal(mock.state.stories[91].length, 2);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a server-style provenance row (pair, no marker) is skipped and counted (AC4)", async () => {
+  // Written by the server engine: the pair, no description marker.
+  const state = makeState({
+    stories: {
+      91: [
+        {
+          story_id: 200,
+          title: "newer open issue",
+          description: null,
+          import_source: "github",
+          import_external_id: "7",
+          tasks_count: 0,
+          comment_count: 0,
+        },
+      ],
+    },
+  });
+  const mock = await startMockServer(state);
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    });
+    // #7 skipped via the provenance filter (no marker to match); #3 imported.
+    assert.equal(result.skipped, 1);
+    assert.equal(result.importedStories, 1);
+    const rows = mock.state.stories[91];
+    assert.equal(rows.length, 2);
+    assert.ok(rows.some((r) => r.title === "older closed issue"));
+  } finally {
+    await mock.close();
+  }
+});
+
+test("old-server fallback is byte-identical v3 marker behaviour (AC5)", async () => {
+  const mock = await startMockServer(makeState({ provenance: false }));
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const creates = spy(client, "createStory");
+    const options = {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    };
+    const first = await runDirect(client, 91, "o", "r", options);
+    assert.equal(first.importedStories, 2);
+    // No pair is ever sent to a server that does not advertise it.
+    for (const [, story] of creates) {
+      assert.equal("import_source" in story, false);
+      assert.equal("import_external_id" in story, false);
+    }
+    // Re-run still dedups purely via the description markers.
+    const rerun = await runDirect(client, 91, "o", "r", options);
+    assert.equal(rerun.skipped, 2);
+    assert.equal(rerun.importedStories, 0);
   } finally {
     await mock.close();
   }

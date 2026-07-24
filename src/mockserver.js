@@ -54,6 +54,10 @@ import { parseArgs } from "node:util";
  * @property {boolean} serverDryRun when true (default), GET /openapi.json
  *   advertises the import dry_run field and dry_run requests are honoured;
  *   false simulates an older server (openapi 404s)
+ * @property {boolean} provenance when true (default), the openapi advertises
+ *   the re-import pair on POST /stories, create validates + persists it, and
+ *   GET /stories honours the `import_source`/`import_external_id` list filters
+ *   (EAT #31427); false simulates an older server that ignores the pair
  * @property {{ name?: number, description?: number, task_desc?: number,
  *   comment_text?: number }} maxLengths per-field write limits — when set,
  *   over-long values are rejected `400 too_long` and the limits are published
@@ -81,6 +85,7 @@ export function makeState(overrides = {}) {
     importedIds: {},
     externalMembers: {},
     serverDryRun: true,
+    provenance: true,
     maxLengths: {},
     imports: [],
     idempotency: {},
@@ -112,6 +117,8 @@ const STORY_FIELDS = new Set([
   "tasks_complete_count",
   "tasks",
   "blockers",
+  "import_source",
+  "import_external_id",
 ]);
 
 /**
@@ -158,6 +165,7 @@ function openapiDoc(state) {
       "/api/v1/projects/{project_id}/stories": post({
         name: ml.name,
         description: ml.description,
+        ...(state.provenance ? { import_source: undefined, import_external_id: undefined } : {}),
       }),
       "/api/v1/projects/{project_id}/stories/{story_id}/tasks": post({
         description: ml.task_desc,
@@ -292,7 +300,15 @@ async function handle(state, req, res) {
 
     m = path.match(/^\/projects\/(\d+)\/stories$/);
     if (m) {
-      const stories = state.stories[Number(m[1])] ?? [];
+      let stories = state.stories[Number(m[1])] ?? [];
+      // EAT #31427 provenance list filters — only on a server that advertises the pair.
+      if (state.provenance) {
+        const src = url.searchParams.get("import_source");
+        if (src !== null) stories = stories.filter((row) => row.import_source === src);
+        const ext = url.searchParams.get("import_external_id");
+        if (ext !== null)
+          stories = stories.filter((row) => String(row.import_external_id ?? "") === ext);
+      }
       /** @type {(rows: any[]) => any[]} */
       let applyFields = (rows) => rows;
       const fieldsParam = url.searchParams.get("fields");
@@ -547,6 +563,22 @@ function createStory(state, projectId, body) {
     };
   }
 
+  // EAT #31427 owner-gates the pair and rejects a lone field (probed 2026-07-24).
+  if (state.provenance) {
+    const hasSource = body.import_source != null;
+    const hasExternal = body.import_external_id != null;
+    if (hasSource !== hasExternal) {
+      return {
+        status: 400,
+        payload: {
+          code: "validation_failed",
+          details: { fields: ["import_source", "import_external_id"] },
+          error: "import_source and import_external_id are required as a pair",
+        },
+      };
+    }
+  }
+
   state.labels[projectId] ??= [];
   const projectLabels = state.labels[projectId];
   const labels = [];
@@ -578,6 +610,12 @@ function createStory(state, projectId, body) {
     story_type: body.story_type ?? "feature",
     current_state: body.current_state ?? "unstarted",
     icebox: body.icebox ?? false,
+    ...(state.provenance
+      ? {
+          import_source: body.import_source ?? null,
+          import_external_id: body.import_external_id ?? null,
+        }
+      : {}),
     labels,
     tasks: [],
     tasks_count: 0,

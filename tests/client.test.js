@@ -244,3 +244,47 @@ test("fieldLimits is empty for servers without an openapi spec", async () => {
     await mock.close();
   }
 });
+
+test("supportsProvenanceDedup true when the openapi advertises the pair", async () => {
+  const mock = await startMockServer();
+  try {
+    assert.equal(await new EATClient(mock.baseUrl, "tok").supportsProvenanceDedup(), true);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("supportsProvenanceDedup false when the pair is absent or the spec 404s", async () => {
+  const noPair = await startMockServer(makeState({ provenance: false }));
+  try {
+    assert.equal(await new EATClient(noPair.baseUrl, "tok").supportsProvenanceDedup(), false);
+  } finally {
+    await noPair.close();
+  }
+  const noSpec = await startMockServer(makeState({ serverDryRun: false }));
+  try {
+    assert.equal(await new EATClient(noSpec.baseUrl, "tok").supportsProvenanceDedup(), false);
+  } finally {
+    await noSpec.close();
+  }
+});
+
+test("listStoryPage sends the provenance filters as query params", async () => {
+  /** @type {URL | undefined} */
+  let seen;
+  await withServer(
+    (req, res) => {
+      seen = new URL(req.url ?? "/", "http://mock");
+      json(res, 200, { items: [], next_cursor: null });
+    },
+    async (base) => {
+      await new EATClient(base, "tok").listStoryPage(91, {
+        importSource: "github",
+        importExternalId: "42",
+        fields: "story_id",
+      });
+    },
+  );
+  assert.equal(seen?.searchParams.get("import_source"), "github");
+  assert.equal(seen?.searchParams.get("import_external_id"), "42");
+});

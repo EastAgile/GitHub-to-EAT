@@ -354,34 +354,62 @@ before writing:
 
 ### Marker dedup (direct engine)
 
-Server-side provenance (`import_source` / `import_external_id`) is not
-exposed by the public API, so the direct engine's re-run safety is
-marker-based:
+The direct engine's **primary** re-run key is the re-import provenance pair
+(`import_source` / `import_external_id`, EAT #31427); the description **marker**
+is the fallback for older servers and legacy marker-only rows. Both are written
+and both are prescanned, in union.
 
-- Every story it writes ends its description with a stable marker line:
-  `Imported from https://github.com/{owner}/{repo}/issues/{n}`.
-- Before writing, it prescans the target project —
-  `GET /stories?limit=…&cursor=…&fields=story_id,description,tasks_count,comment_count`
-  (cursor mode
-  whenever `cursor=` or `limit=` is present; `fields=` is a sparse-fieldset
-  allowlist, unknown values → `400 validation_failed`, `story_id` always
-  included; invalid `limit`/`cursor` values — including out-of-range
-  cursors — are also `400 validation_failed`, so a paging loop fails loudly
-  rather than spinning) — and skips items whose marker already exists,
-  reported as `skipped N (already imported)`, the server engine's wording.
-- Dedup is scoped per `(owner, repo)`: markers pointing at other repos never
-  suppress an import. Matching is case-insensitive (GitHub slugs are, and
-  GitHub forbids same-name-other-case repos) and honors only the last
-  non-blank line of a description — an issue body merely quoting the marker
-  sentence mid-text cannot poison the dedup. Labels referenced only by
-  skipped stories are not re-created.
-- The marker lands at story-create, before that story's tasks and comments.
-  A run interrupted in that window leaves an incomplete story that stays
-  skipped on re-runs; when a marker-matched story has fewer
-  tasks/comments than the current GitHub issue, the next run warns
-  (`tasks X/Y, comments X/Y`) naming both possible causes — an interrupted
-  run, or the issue changing since import — with the repair path: delete
-  that story in EAT and re-run.
+- **Provenance pair (primary)** — every story create carries
+  `import_source: "github"` and `import_external_id: "{n}"` (the GitHub issue
+  number as a string — the same key the server-side GitHub importer writes).
+  EAT owner-gates the pair and rejects a lone field, so the two are built from
+  one object and always sent together. Feature-detected from
+  `GET /openapi.json` (the `import_source` property on the project-scoped
+  `POST …/stories` schema); on a server that advertises it the prescan reads
+  provenance back via the `GET /stories?import_source=github` list filter
+  (`fields=story_id,import_external_id,tasks_count,comment_count`). Because the
+  server-side importer writes the same pair, cross-engine dedup is now
+  **symmetric**: a direct-written story is skipped by a later server import and
+  vice versa.
+  - **Repo-blind, deliberately.** The key is `(project, source="github",
+    external_id)` — the issue number alone, with **no** `(owner, repo)` scope.
+    This is exactly the server importer's key, and matching it is what buys the
+    cross-engine symmetry above; encoding the repo into `import_source` would
+    break interop. The consequence: within one project, two GitHub repos whose
+    issue numbers collide (repo-A #7 and repo-B #7) dedup against each other —
+    the second is false-skipped. See the one-repo-per-project constraint below.
+- **Marker (fallback)** — every story it writes also ends its description with a
+  stable marker line: `Imported from https://github.com/{owner}/{repo}/issues/{n}`.
+  The marker prescan always runs **alongside** the provenance prescan (their
+  results are unioned), so rows written by an older marker-only CLI run (no pair
+  on the server row) are still skipped. When the server does not advertise the
+  pair, the direct engine sends no provenance and dedups on the marker alone,
+  byte-identical to earlier behaviour.
+- The prescan cursor-walks the project —
+  `GET /stories?limit=…&cursor=…&fields=…` (cursor mode whenever `cursor=` or
+  `limit=` is present; `fields=` is a sparse-fieldset allowlist, unknown values
+  → `400 validation_failed`, `story_id` always included; invalid `limit`/`cursor`
+  values — including out-of-range cursors — are also `400 validation_failed`, so
+  a paging loop fails loudly rather than spinning) — and skips items whose pair
+  or marker already exists, reported as `skipped N (already imported)`.
+- Only the **marker fallback** is scoped per `(owner, repo)`: markers pointing
+  at other repos never suppress an import. Matching is case-insensitive (GitHub
+  slugs are, and GitHub forbids same-name-other-case repos) and honors only the
+  last non-blank line of a description — an issue body merely quoting the marker
+  sentence mid-text cannot poison the dedup. The primary provenance pass has no
+  such scope (see "Repo-blind" above), so the *combined* dedup is repo-blind
+  wherever the provenance pass is active. Labels referenced only by skipped
+  stories are not re-created.
+- The pair and marker both land at story-create, before that story's tasks and
+  comments. A run interrupted in that window leaves an incomplete story that
+  stays skipped on re-runs; when a skipped story has fewer tasks/comments than
+  the current GitHub issue, the next run warns (`tasks X/Y, comments X/Y`)
+  naming both possible causes — an interrupted run, or the issue changing since
+  import — with the repair path: delete that story in EAT and re-run.
+- The mock server mirrors all of this behind a `provenance` flag (default on):
+  it advertises the pair in `/openapi.json`, validates + persists it on create,
+  and honours the `import_source`/`import_external_id` list filters; turning it
+  off simulates an older server.
 
 ### Fidelity limitations (direct engine)
 
@@ -392,8 +420,14 @@ marker-based:
 - **Comment authorship** — the API has no comment-author attribution;
   comments are authored by the importing key, with the GitHub author and
   date riding in the body prefix (`@login on YYYY-MM-DD:`).
-- **No provenance interop** — marker dedup cannot see rows imported by the
-  server engine (which stores provenance internally), and the server engine
-  cannot see markers. Mixing engines against one project can duplicate
-  stories; keep a project on one engine until the EAT-team ask to expose
-  provenance lands.
+- **Cross-engine dedup** — against a server that exposes the re-import pair
+  (EAT #31427), the direct and server engines share the
+  `(project, import_source, import_external_id)` key, so mixing engines against
+  one project no longer duplicates stories (see "Marker dedup" above). The
+  caveat survives only for **older** servers that do not advertise the pair:
+  there the direct engine falls back to its private description marker, which
+  the server engine cannot see, so keep such a project on one engine.
+- **One repo per project** — the shared key is repo-blind (`external_id` is the
+  bare issue number, matching the server importer), so a project holding issues
+  from two GitHub repos can false-skip where their issue numbers collide. Keep
+  one GitHub repo per EAT project.

@@ -3,7 +3,13 @@
  * runs the same pipeline but stops before the write — no server dry-run support needed.
  */
 
-import { applyDedup, markerFor, prescanImported } from "./dedup.js";
+import {
+  applyDedup,
+  markerFor,
+  prescanImported,
+  prescanProvenance,
+  unionImported,
+} from "./dedup.js";
 import { GitHubClient } from "./github.js";
 import { clampPlan, DEFAULT_CUSTOMIZATION, FALLBACK_LIMITS, mapRepo } from "./mapping.js";
 import { runWithProgress } from "./progress.js";
@@ -15,7 +21,8 @@ import { writePlan } from "./writer.js";
  *
  * @typedef {import("./writer.js").WriterClient
  *   & import("./dedup.js").PrescanClient
- *   & { fieldLimits?: () => Promise<Partial<import("./mapping.js").FieldLimits>> }} DirectClient
+ *   & { fieldLimits?: () => Promise<Partial<import("./mapping.js").FieldLimits>>,
+ *       supportsProvenanceDedup?: () => Promise<boolean> }} DirectClient
  */
 
 /**
@@ -65,8 +72,21 @@ export async function runDirect(client, projectId, owner, repo, options) {
     warn: (message) => stream?.write(message),
   });
 
+  // One probe gates writing the pair and reading it back via the list filters.
+  const sendProvenance = await (client.supportsProvenanceDedup?.() ?? false);
+
   const imported = await runWithProgress(
-    () => prescanImported(client, projectId, owner, repo),
+    async () => {
+      if (!sendProvenance) return prescanImported(client, projectId, owner, repo);
+      // Union, not replace: legacy marker-only rows carry no pair, pair-only
+      // rows (server-written, or newer direct runs) carry no marker. The two
+      // reads are independent, so run them concurrently.
+      const [marker, provenance] = await Promise.all([
+        prescanImported(client, projectId, owner, repo),
+        prescanProvenance(client, projectId),
+      ]);
+      return unionImported(marker, provenance);
+    },
     `scanning project ${projectId} for already-imported stories`,
     { stream },
   );
@@ -101,7 +121,7 @@ export async function runDirect(client, projectId, owner, repo, options) {
     };
   }
 
-  const written = await writePlan(client, projectId, plan, { stream, runId });
+  const written = await writePlan(client, projectId, plan, { stream, runId, sendProvenance });
   return {
     importedStories: written.stories,
     importedLabels: written.labelsCreated,

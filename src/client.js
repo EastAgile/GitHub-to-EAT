@@ -216,6 +216,25 @@ export class EATClient {
   }
 
   /**
+   * True when the project-scoped story-create endpoint accepts the re-import
+   * dedup pair (`import_source` + `import_external_id`, EAT #31427). The pair
+   * ships together, so one probe of `import_source` gates both writing it and
+   * using the matching `GET /stories` list filters. Any error (404, auth,
+   * parse) counts as "not supported" — the direct engine falls back to the
+   * description marker. See CONTRACT.md "Marker dedup".
+   *
+   * @returns {Promise<boolean>}
+   */
+  async supportsProvenanceDedup() {
+    const spec = await this.#openapi();
+    for (const [path, ops] of Object.entries(spec?.paths ?? {})) {
+      if (!path.includes("/projects/") || !path.endsWith("/stories")) continue;
+      if ("import_source" in EATClient.#postProperties(spec, ops)) return true;
+    }
+    return false;
+  }
+
+  /**
    * The write fields' `maxLength` limits from the published spec, when any.
    *
    * Aliased request fields (`text`/`comment_text`, `description`/`task_desc`)
@@ -259,15 +278,22 @@ export class EATClient {
   /**
    * Fetch one cursor page of a project's stories (direct-engine prescan).
    * `limit`/`cursor` drive cursor mode; `fields` is the sparse-fieldset allowlist.
+   * `importSource`/`importExternalId` are the provenance list filters (EAT #31427).
    *
    * @param {number} projectId
-   * @param {{ limit?: number, cursor?: string, fields?: string }} [options]
+   * @param {{ limit?: number, cursor?: string, fields?: string,
+   *   importSource?: string, importExternalId?: string }} [options]
    * @returns {Promise<{ items: any[], next_cursor: string | null }>}
    */
-  async listStoryPage(projectId, { limit = 200, cursor, fields } = {}) {
+  async listStoryPage(
+    projectId,
+    { limit = 200, cursor, fields, importSource, importExternalId } = {},
+  ) {
     const params = new URLSearchParams({ limit: String(limit) });
     if (cursor) params.set("cursor", cursor);
     if (fields) params.set("fields", fields);
+    if (importSource !== undefined) params.set("import_source", importSource);
+    if (importExternalId !== undefined) params.set("import_external_id", importExternalId);
     const response = await this.#request("GET", `/projects/${projectId}/stories?${params}`);
     return response.json();
   }
