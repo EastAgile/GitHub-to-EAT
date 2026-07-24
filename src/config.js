@@ -21,8 +21,9 @@ export class ConfigError extends Error {}
  * Load `KEY=VALUE` pairs from a .env file into `process.env`.
  *
  * Existing environment variables are never overridden. Blank lines and lines
- * starting with `#` are ignored; surrounding single/double quotes on values
- * are stripped. A missing file is a no-op.
+ * starting with `#` are ignored; a single matching pair of surrounding single
+ * or double quotes is stripped from a value (quote characters inside the value
+ * are left intact). A missing file is a no-op.
  *
  * @param {string} [path]
  */
@@ -39,7 +40,12 @@ export function loadDotenv(path = ".env") {
     const sep = line.indexOf("=");
     const key = line.slice(0, sep).trim();
     let value = line.slice(sep + 1).trim();
-    value = value.replace(/^"+|"+$/g, "").replace(/^'+|'+$/g, "");
+    // Strip one matching pair of surrounding quotes only. The previous two
+    // independent, greedy passes (^"+|"+$ then ^'+|'+$) also ate a quote
+    // character that was part of the value — e.g. `5'6"` or `say "hi"` lost
+    // their trailing `"` — which is not "surrounding" quote stripping.
+    const quoted = value.match(/^"([\s\S]*)"$/) ?? value.match(/^'([\s\S]*)'$/);
+    if (quoted) value = quoted[1];
     if (key && !(key in process.env)) process.env[key] = value;
   }
 }
