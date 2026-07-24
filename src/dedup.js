@@ -1,6 +1,9 @@
 /**
- * Re-run safety for the direct engine: the public API exposes no import provenance,
- * so written stories carry a marker line a prescan reads back. See CONTRACT.md "Marker dedup".
+ * Re-run safety for the direct engine. Primary key: the re-import provenance
+ * pair (`import_source` + `import_external_id`, EAT #31427) written on every
+ * story and read back via the `GET /stories` list filters. Fallback: a marker
+ * line in the description, for older servers and legacy marker-only rows.
+ * See CONTRACT.md "Marker dedup".
  */
 
 /**
@@ -55,7 +58,8 @@ export function markerExternalId(description, owner, repo) {
  *
  * @typedef {object} PrescanClient
  * @property {(projectId: number, opts: { limit?: number, cursor?: string,
- *   fields?: string }) => Promise<{ items: any[], next_cursor: string | null }>} listStoryPage
+ *   fields?: string, importSource?: string, importExternalId?: string })
+ *   => Promise<{ items: any[], next_cursor: string | null }>} listStoryPage
  */
 
 /**
@@ -87,6 +91,62 @@ export async function prescanImported(client, projectId, owner, repo, { pageSize
     cursor = page.next_cursor ?? undefined;
   } while (cursor);
   return imported;
+}
+
+/**
+ * Cursor-walk the project filtered by `import_source` and map each row's
+ * `import_external_id` to its story row — the primary re-import key on a
+ * server that persists provenance (EAT #31427). Rows carry
+ * `tasks_count`/`comment_count` for the interrupted-run warning, like
+ * {@link prescanImported}. Rows without an `import_external_id` are skipped.
+ *
+ * @param {PrescanClient} client
+ * @param {number} projectId
+ * @param {string} [source]
+ * @param {{ pageSize?: number }} [options]
+ * @returns {Promise<Map<string, any>>}
+ */
+export async function prescanProvenance(
+  client,
+  projectId,
+  source = "github",
+  { pageSize = 200 } = {},
+) {
+  const imported = new Map();
+  /** @type {string | undefined} */
+  let cursor;
+  do {
+    const page = await client.listStoryPage(projectId, {
+      importSource: source,
+      limit: pageSize,
+      ...(cursor ? { cursor } : {}),
+      fields: "story_id,import_external_id,tasks_count,comment_count",
+    });
+    for (const row of page.items ?? []) {
+      const id = row.import_external_id;
+      if (id === null || id === undefined) continue;
+      const key = String(id);
+      if (!imported.has(key)) imported.set(key, row);
+    }
+    cursor = page.next_cursor ?? undefined;
+  } while (cursor);
+  return imported;
+}
+
+/**
+ * Merge already-imported maps (both keyed by external-id string); the first
+ * occurrence of a key wins. Lets the marker and provenance prescans run in
+ * union so legacy marker-only rows and pair-only rows are both skipped.
+ *
+ * @param {...Map<string, any>} maps
+ * @returns {Map<string, any>}
+ */
+export function unionImported(...maps) {
+  const merged = new Map();
+  for (const map of maps) {
+    for (const [id, row] of map) if (!merged.has(id)) merged.set(id, row);
+  }
+  return merged;
 }
 
 /**

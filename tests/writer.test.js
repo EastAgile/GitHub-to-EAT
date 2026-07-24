@@ -96,6 +96,56 @@ test("writePlan writes labels, then stories oldest-first with their subresources
   }
 });
 
+test("sendProvenance stamps the full pair on every create, never half of it", async () => {
+  /** @type {any[]} */
+  const bodies = [];
+  const client = {
+    createLabel: async () => ({}),
+    /** @param {number} _p @param {any} story */
+    createStory: async (_p, story) => {
+      bodies.push(story);
+      return { story_id: bodies.length };
+    },
+    createTask: async () => ({}),
+    createComment: async () => ({}),
+  };
+  await writePlan(client, 91, samplePlan(), { stream: capture(), sendProvenance: true });
+  assert.equal(bodies.length, 2);
+  for (const body of bodies) {
+    const hasSource = "import_source" in body;
+    const hasExternal = "import_external_id" in body;
+    // Both or neither — a lone field would 400 against the owner-gated pair.
+    assert.equal(hasSource, hasExternal);
+    assert.equal(hasSource, true);
+    assert.equal(body.import_source, "github");
+  }
+  // Created oldest-first: #3 then #7.
+  assert.deepEqual(
+    bodies.map((b) => b.import_external_id),
+    ["3", "7"],
+  );
+});
+
+test("without sendProvenance the create body carries no pair", async () => {
+  /** @type {any[]} */
+  const bodies = [];
+  const client = {
+    createLabel: async () => ({}),
+    /** @param {number} _p @param {any} story */
+    createStory: async (_p, story) => {
+      bodies.push(story);
+      return { story_id: bodies.length };
+    },
+    createTask: async () => ({}),
+    createComment: async () => ({}),
+  };
+  await writePlan(client, 91, samplePlan(), { stream: capture() });
+  for (const body of bodies) {
+    assert.equal("import_source" in body, false);
+    assert.equal("import_external_id" in body, false);
+  }
+});
+
 test("emoji and CJK label names survive the idempotency-key path", async () => {
   const mock = await startMockServer();
   try {
