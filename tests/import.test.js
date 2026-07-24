@@ -771,6 +771,50 @@ test("pollImport falls back to error_code when error is absent", async () => {
   );
 });
 
+test("pollImport scrubs control chars out of the failed error message", async () => {
+  const client = asyncClient([
+    { status: "failed", error: "boom\r\x1b[2Kwiped\nboard: https://evil.example" },
+  ]);
+  await assert.rejects(pollImport(client, 91, "imp-1", { poll: NO_SLEEP }), (err) => {
+    assert.ok(err instanceof EATError);
+    assert.equal(err.message, "import failed: boom[2Kwipedboard: https://evil.example");
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting they are gone
+    assert.doesNotMatch(err.message, /[\r\n\x1b]/);
+    return true;
+  });
+});
+
+test("runImport routes the initial POST through onWait", async () => {
+  const fake = fakeClient({ imported: { stories: 1, labels: 0 }, skipped: 0, errors: [] });
+  const waited = [];
+  const outcome = await runImport(fake, 91, "o", "r", {
+    idempotencyKey: "k",
+    onWait: async (thunk) => {
+      waited.push(1);
+      return thunk();
+    },
+  });
+  assert.equal(waited.length, 1);
+  assert.equal(outcome.importedStories, 1);
+});
+
+test("onWait wraps only the POST, not each poll", async () => {
+  const client = asyncClient([
+    { status: "fetching", progress_current: 1, progress_total: 2 },
+    { status: "done", result: DONE_RESULT },
+  ]);
+  const waited = [];
+  await runImport(client, 91, "o", "r", {
+    idempotencyKey: "k",
+    poll: NO_SLEEP,
+    onWait: async (thunk) => {
+      waited.push(1);
+      return thunk();
+    },
+  });
+  assert.equal(waited.length, 1); // one POST wait, not one-per-poll
+});
+
 test("pollImport throws when done carries no result", async () => {
   const client = asyncClient([{ status: "done", result: null }]);
   await assert.rejects(
@@ -930,4 +974,49 @@ test("async job lands on failed when asyncFail is set", async () => {
   } finally {
     await mock.close();
   }
+});
+
+test("the synchronous 200 fallback still emits the waiting line on stderr", async () => {
+  // Default mock is synchronous (no async job) — the reporter has no poll events,
+  // so the in-flight feedback must come from onWait around the blocking POST.
+  const mock = await startMockServer();
+  const err = capture();
+  try {
+    await inTempDir(() =>
+      withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
+        const code = await main(["--project", "91", "--repo", "o/r"], {
+          stdout: capture(),
+          stderr: err,
+        });
+        assert.equal(code, 0);
+      }),
+    );
+  } finally {
+    await mock.close();
+  }
+  assert.ok(err.buf.includes("waiting for the server to import GitHub issues"), err.buf);
+});
+
+test("dry-run reports the timeout guidance when the async job hangs", async () => {
+  const mock = await startMockServer(); // serverDryRun advertised, so the server dry-run path runs
+  const err = capture();
+  try {
+    await inTempDir(() =>
+      withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
+        const code = await main(["--project", "91", "--repo", "o/r", "--dry-run"], {
+          stdout: capture(),
+          stderr: err,
+          runImport: async () => {
+            throw new EATTimeout("import imp-1 did not finish within 900s");
+          },
+        });
+        assert.equal(code, 1);
+      }),
+    );
+  } finally {
+    await mock.close();
+  }
+  assert.ok(err.buf.includes("did not finish within 900s"), err.buf);
+  assert.ok(err.buf.includes("may still be finishing"), err.buf);
+  assert.ok(!err.buf.includes("dry run failed"), err.buf); // not mislabeled
 });

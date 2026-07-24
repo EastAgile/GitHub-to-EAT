@@ -50,19 +50,42 @@ export async function runWithProgress(func, message, { stream, intervalMs = 500 
   }
 }
 
+// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control chars is the point
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/g;
+
+/**
+ * Strip terminal control characters (C0/C1, incl. CR/LF/ESC) and cap length.
+ * Server-supplied text is rendered raw to the terminal, and the `\r`-drawn
+ * progress line would otherwise let a hostile status/error rewrite the line.
+ *
+ * @param {unknown} value
+ * @param {number} [max]
+ * @returns {string}
+ */
+export function scrubControl(value, max = 200) {
+  return String(value ?? "")
+    .replace(CONTROL, "")
+    .slice(0, max);
+}
+
 /**
  * A short human line for one async-import status doc, per lifecycle phase.
+ *
+ * All numbers are coerced (NaN hides the X/Y) and the unknown-status fallback
+ * is scrubbed — the values are server-supplied and drawn straight to a TTY.
  *
  * @param {{ status?: string, progress_current?: number | null,
  *   progress_total?: number | null }} status
  * @returns {string}
  */
 export function formatImportStatus(status) {
-  const total = status.progress_total;
-  // A null current only reads as 0 once we know the total (an "X/Y" is coming).
-  const current = status.progress_current ?? 0;
+  // Absent total means "no X/Y"; a present-but-non-numeric total also hides it.
+  const total = status.progress_total == null ? null : Number(status.progress_total);
+  const hasTotal = total != null && Number.isFinite(total);
+  const currentNum = Number(status.progress_current);
+  const current = Number.isFinite(currentNum) ? currentNum : 0;
   /** @param {string} label */
-  const xy = (label) => (total != null ? `${label} ${current}/${total}` : label);
+  const xy = (label) => (hasTotal ? `${label} ${current}/${total}` : label);
   switch (status.status) {
     case "pending":
       return "queued";
@@ -75,7 +98,7 @@ export function formatImportStatus(status) {
     case "failed":
       return "failed";
     default:
-      return String(status.status);
+      return scrubControl(status.status, 40);
   }
 }
 
@@ -95,6 +118,7 @@ export function makeImportReporter({ stream } = {}) {
   let last = "";
   let width = 0;
   let drew = false;
+  let closed = false;
   /** @param {any} status */
   const report = (status) => {
     const text = formatImportStatus(status);
@@ -109,7 +133,11 @@ export function makeImportReporter({ stream } = {}) {
     }
     last = text;
   };
+  // Idempotent so a catch can close the line before writing an error, and the
+  // finally can call it again without a spurious second newline.
   report.close = () => {
+    if (closed) return;
+    closed = true;
     if (out.isTTY && drew) out.write("\n");
   };
   return report;

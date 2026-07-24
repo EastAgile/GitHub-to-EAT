@@ -17,7 +17,7 @@ import { GitHubError } from "./github.js";
 import { runImport as defaultRunImport } from "./importer.js";
 import { MAPPINGS, parseInclude, renderLegend, requestFlags } from "./mappings.js";
 import { preflight as defaultPreflight } from "./preflight.js";
-import { makeImportReporter } from "./progress.js";
+import { makeImportReporter, runWithProgress } from "./progress.js";
 import { VERSION } from "./version.js";
 import { runWizard as defaultRunWizard, WizardAborted } from "./wizard.js";
 
@@ -420,8 +420,21 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
           flags,
           dryRun: true,
           onProgress: reporter,
+          onWait: (thunk) =>
+            runWithProgress(thunk, "waiting for the server to compute the import plan", {
+              stream: stderr,
+            }),
         });
       } catch (err) {
+        reporter.close(); // close the live line before any error text
+        if (err instanceof EATTimeout) {
+          stderr.write(`error: ${err.message}\n`);
+          stderr.write(
+            "The server may still be finishing the import — check the board in a " +
+              "moment, or re-run.\n",
+          );
+          return 1;
+        }
         if (err instanceof EATError) {
           stderr.write(`error: dry run failed: ${err.message}\n`);
           return 1;
@@ -461,8 +474,13 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
       token,
       flags,
       onProgress: reporter,
+      onWait: (thunk) =>
+        runWithProgress(thunk, "waiting for the server to import GitHub issues", {
+          stream: stderr,
+        }),
     });
   } catch (err) {
+    reporter.close(); // close the live line before any error text
     if (err instanceof EATTimeout) {
       stderr.write(`error: ${err.message}\n`);
       stderr.write(

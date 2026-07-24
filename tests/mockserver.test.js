@@ -648,3 +648,21 @@ test("getImport 404s an unknown import id", async () => {
     await mock.close();
   }
 });
+
+test("async openapi folds 202 into the import path, no invented ':202' key", async () => {
+  const mock = await startMockServer(makeState({ asyncImport: true }));
+  try {
+    const spec = await (
+      await fetch(`${mock.baseUrl}/openapi.json`, { headers: { "X-TrackerToken": "t" } })
+    ).json();
+    const paths = Object.keys(spec.paths);
+    assert.ok(!paths.some((p) => p.includes(":202"))); // not a valid path key
+    const importPath = spec.paths["/api/v1/projects/{project_id}/import/json"];
+    assert.equal(importPath.post.responses["202"].description, "import accepted; poll for status");
+    assert.ok("/api/v1/projects/{project_id}/imports/{import_id}" in spec.paths);
+    // Feature-detection still reads the dry_run field off the same POST.
+    assert.equal(await new EATClient(mock.baseUrl, "t").supportsServerDryRun(), true);
+  } finally {
+    await mock.close();
+  }
+});

@@ -153,12 +153,10 @@ function openapiDoc(state) {
       },
     },
   });
-  // When async, advertise the 202 accept and the pollable status path.
+  // When async, advertise the 202 accept (as a response on the import path) and
+  // the pollable status path — not an invented `import/json:202` path key.
   const asyncPaths = state.asyncImport
     ? {
-        "/api/v1/projects/{project_id}/import/json:202": {
-          responses: { 202: { description: "import accepted; poll for status" } },
-        },
         "/api/v1/projects/{project_id}/imports/{import_id}": {
           get: { responses: { 200: { description: "import status" } } },
         },
@@ -175,6 +173,9 @@ function openapiDoc(state) {
               },
             },
           },
+          ...(state.asyncImport
+            ? { responses: { 202: { description: "import accepted; poll for status" } } }
+            : {}),
         },
       },
       ...asyncPaths,

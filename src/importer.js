@@ -1,6 +1,7 @@
 /** The import flow: call the server import and normalize its result. */
 
 import { EATError, EATTimeout } from "./client.js";
+import { scrubControl } from "./progress.js";
 
 /**
  * The subset of the client the importer needs (kept structural for tests).
@@ -55,7 +56,9 @@ export async function pollImport(client, projectId, importId, { onProgress, poll
       return status.result;
     }
     if (status.status === "failed") {
-      throw new EATError(`import failed: ${status.error || status.error_code || "unknown error"}`);
+      // error/error_code are server-supplied and land in a terminal-rendered message.
+      const detail = scrubControl(status.error || status.error_code || "unknown error");
+      throw new EATError(`import failed: ${detail}`);
     }
     if (elapsed + delay > maxWaitMs) {
       throw new EATTimeout(
@@ -96,13 +99,18 @@ const GITHUB_LOGIN = /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$/;
  * instead of the synchronous 200 body), poll the job to a terminal state and
  * use its `result` — downstream normalization is then identical for both.
  *
+ * `onWait` wraps only the initial (blocking) POST — the sync-200 fallback path
+ * has no poll events, so this is where its progress indicator lives; the async
+ * path then hands off to `onProgress` for the poll loop (sequential, one writer).
+ *
  * @param {ImportClient} client
  * @param {number} projectId
  * @param {string} owner
  * @param {string} repo
  * @param {{ idempotencyKey: string, token?: string,
  *   flags?: Record<string, boolean>, dryRun?: boolean,
- *   onProgress?: (status: any) => void, poll?: PollOptions }} options
+ *   onProgress?: (status: any) => void, poll?: PollOptions,
+ *   onWait?: <T>(thunk: () => Promise<T>) => Promise<T> }} options
  * @returns {Promise<ImportOutcome>}
  */
 export async function runImport(
@@ -110,14 +118,11 @@ export async function runImport(
   projectId,
   owner,
   repo,
-  { idempotencyKey, token, flags, dryRun, onProgress, poll },
+  { idempotencyKey, token, flags, dryRun, onProgress, poll, onWait },
 ) {
-  let raw = await client.importGithub(projectId, owner, repo, {
-    idempotencyKey,
-    token,
-    flags,
-    dryRun,
-  });
+  const post = () =>
+    client.importGithub(projectId, owner, repo, { idempotencyKey, token, flags, dryRun });
+  let raw = await (onWait ? onWait(post) : post());
   if (raw && raw.import_id != null && raw.imported === undefined) {
     raw = await pollImport(client, projectId, raw.import_id, { onProgress, poll });
   }
