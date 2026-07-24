@@ -54,6 +54,10 @@ import { parseArgs } from "node:util";
  * @property {boolean} serverDryRun when true (default), GET /openapi.json
  *   advertises the import dry_run field and dry_run requests are honoured;
  *   false simulates an older server (openapi 404s)
+ * @property {boolean} backdating when true (default, mirroring prod), the
+ *   openapi advertises `created_at`/`completed_at` on story creates and
+ *   `created_at` on comment creates, and the handlers persist them; false
+ *   simulates a server that predates backdating (fields absent + ignored)
  * @property {{ name?: number, description?: number, task_desc?: number,
  *   comment_text?: number }} maxLengths per-field write limits — when set,
  *   over-long values are rejected `400 too_long` and the limits are published
@@ -81,6 +85,7 @@ export function makeState(overrides = {}) {
     importedIds: {},
     externalMembers: {},
     serverDryRun: true,
+    backdating: true,
     maxLengths: {},
     imports: [],
     idempotency: {},
@@ -123,19 +128,24 @@ const STORY_FIELDS = new Set([
  */
 function openapiDoc(state) {
   const ml = state.maxLengths ?? {};
-  /** @param {Record<string, number | undefined>} fields */
-  const post = (fields) => ({
+  // Backdated instants — advertised only when the server supports backdating.
+  const dateTime = { type: ["string", "null"], format: "date-time" };
+  /** @param {Record<string, number | undefined>} fields @param {Record<string, any>} [extra] */
+  const post = (fields, extra = {}) => ({
     post: {
       requestBody: {
         content: {
           "application/json": {
             schema: {
-              properties: Object.fromEntries(
-                Object.entries(fields).map(([name, max]) => [
-                  name,
-                  max ? { type: "string", maxLength: max } : { type: "string" },
-                ]),
-              ),
+              properties: {
+                ...Object.fromEntries(
+                  Object.entries(fields).map(([name, max]) => [
+                    name,
+                    max ? { type: "string", maxLength: max } : { type: "string" },
+                  ]),
+                ),
+                ...extra,
+              },
             },
           },
         },
@@ -155,18 +165,18 @@ function openapiDoc(state) {
           },
         },
       },
-      "/api/v1/projects/{project_id}/stories": post({
-        name: ml.name,
-        description: ml.description,
-      }),
+      "/api/v1/projects/{project_id}/stories": post(
+        { name: ml.name, description: ml.description },
+        state.backdating ? { created_at: dateTime, completed_at: dateTime } : {},
+      ),
       "/api/v1/projects/{project_id}/stories/{story_id}/tasks": post({
         description: ml.task_desc,
         task_desc: ml.task_desc,
       }),
-      "/api/v1/projects/{project_id}/stories/{story_id}/comments": post({
-        text: ml.comment_text,
-        comment_text: ml.comment_text,
-      }),
+      "/api/v1/projects/{project_id}/stories/{story_id}/comments": post(
+        { text: ml.comment_text, comment_text: ml.comment_text },
+        state.backdating ? { created_at: dateTime } : {},
+      ),
     },
   };
 }
@@ -570,6 +580,7 @@ function createStory(state, projectId, body) {
   }
 
   const now = new Date().toISOString();
+  /** @type {Record<string, any>} */
   const story = {
     story_id: state.nextId++,
     project_id: projectId,
@@ -586,6 +597,16 @@ function createStory(state, projectId, body) {
     created: now,
     updated_at: now,
   };
+  if (state.backdating && body.created_at != null) {
+    story.created_at = body.created_at;
+    story.created = body.created_at;
+    // completed_at is valid only on a done-state create and clamps forward to
+    // created_at (a completion before creation stores as the creation instant).
+    if (body.completed_at != null && story.current_state === "accepted") {
+      story.completed_at =
+        body.completed_at < body.created_at ? body.created_at : body.completed_at;
+    }
+  }
   state.stories[projectId] ??= [];
   state.stories[projectId].push(story);
   return { status: 200, payload: toStoryPayload(story) };
@@ -653,6 +674,7 @@ function createComment(state, projectId, storyId, body) {
   if (overLong) return overLong;
   // The real server returns the same value for both ids (probed 2026-07-16).
   const id = state.nextId++;
+  /** @type {Record<string, any>} */
   const comment = {
     comment_id: id,
     story_comment_id: id,
@@ -660,6 +682,10 @@ function createComment(state, projectId, storyId, body) {
     comment_text: text,
     created: new Date().toISOString(),
   };
+  if (state.backdating && body.created_at != null) {
+    comment.created_at = body.created_at;
+    comment.created = body.created_at;
+  }
   story.comments.push(comment);
   story.comment_count = story.comments.length;
   return { status: 200, payload: comment };

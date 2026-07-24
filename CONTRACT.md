@@ -385,13 +385,27 @@ marker-based:
 
 ### Fidelity limitations (direct engine)
 
-- **Timestamps** — `POST /stories` accepts no `created_at` / `completed_at`,
-  so GitHub's creation and close dates cannot be preserved; `created` is the
-  import time. The mapping profile still carries both in its plan for when
-  the API grows the fields.
-- **Comment authorship** — the API has no comment-author attribution;
-  comments are authored by the importing key, with the GitHub author and
-  date riding in the body prefix (`@login on YYYY-MM-DD:`).
+- **Timestamps** — feature-detected from `GET /openapi.json`: when the story
+  create advertises `created_at` (the probe gates all three backdated fields,
+  which shipped together), the direct writer sends `created_at` on **every**
+  story create, `completed_at` (GitHub's `closed_at`) on accepted (closed-issue)
+  creates only — open issues omit it entirely — and `created_at` on every
+  comment create. All are owner-gated server-side; the CLI's agent key
+  qualifies. Against a server that does **not** advertise the field (older
+  server, or `/openapi.json` missing/unparseable) every payload stays
+  byte-identical to v3 — no `created_at` / `completed_at` keys — and `created`
+  is the import time. Server behaviour (owner-gated): `completed_at` is valid
+  only on a done-state create and clamps forward to `created_at`; an accepted
+  create lands in the iteration window containing its completion. A completion
+  that predates the iteration grid falls back to the **current** iteration until
+  the grid-extension server ask (#32434) lands; the create response carries no
+  iteration info, so the write report cannot yet surface which iteration a
+  backdated story landed in.
+- **Comment authorship** — the API has no comment-author attribution; comments
+  are authored by the importing key, with the GitHub author riding in the body
+  prefix. When the comment's `created_at` is sent (backdating-capable server)
+  the prefix is `@login:`; against an older server the date rides there too
+  (`@login on YYYY-MM-DD:`).
 - **No provenance interop** — marker dedup cannot see rows imported by the
   server engine (which stores provenance internally), and the server engine
   cannot see markers. Mixing engines against one project can duplicate

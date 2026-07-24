@@ -164,16 +164,19 @@ function issueNumberFromUrl(issueUrl) {
 }
 
 /**
- * The public EAT API has no comment-author attribution (EAT-team ask pending), so author + date
- * ride in the text as `@login on <date>:`; a deleted GitHub account renders as `@ghost`.
+ * The public EAT API has no comment-author attribution (EAT-team ask pending), so the author
+ * rides in the text prefix; a deleted GitHub account renders as `@ghost`. When `sendDates` is
+ * false the date rides there too (`@login on <date>:`), matching an older server; when true the
+ * comment's real `created_at` is sent on the write instead, so the prefix collapses to `@login:`.
  *
  * @param {{ user?: { login?: string } | null, created_at?: string | null, body?: string | null }} comment
+ * @param {boolean} sendDates
  * @returns {string}
  */
-function commentText(comment) {
+function commentText(comment, sendDates) {
   const login = comment.user?.login || "ghost";
   const date = (comment.created_at ?? "").slice(0, 10);
-  const prefix = date ? `@${login} on ${date}:` : `@${login}:`;
+  const prefix = date && !sendDates ? `@${login} on ${date}:` : `@${login}:`;
   return `${prefix}\n\n${(comment.body ?? "").trim()}`;
 }
 
@@ -195,7 +198,7 @@ function commentText(comment) {
  * @property {string | null} completed_at the GitHub closed date, kept
  * @property {string[]} labels label names on this story
  * @property {{ description: string, complete: boolean }[]} tasks
- * @property {{ text: string }[]} comments
+ * @property {{ text: string, created_at: string | null }[]} comments
  */
 
 /**
@@ -205,9 +208,16 @@ function commentText(comment) {
  * @param {{ issues: any[], comments: any[], labels: any[] }} repo
  * @param {Customization} [customization] per-run overrides; the default reproduces
  *   this profile unchanged (the filter/override stories consume the other fields)
+ * @param {boolean} [sendDates] when true the comment's date is sent on the write, so
+ *   its prefix collapses to `@login:`; when false (default) it stays `@login on <date>:`,
+ *   reproducing the older-server output byte-for-byte
  * @returns {{ labels: LabelOp[], stories: StoryOp[] }}
  */
-export function mapRepo({ issues, comments, labels }, customization = DEFAULT_CUSTOMIZATION) {
+export function mapRepo(
+  { issues, comments, labels },
+  customization = DEFAULT_CUSTOMIZATION,
+  sendDates = false,
+) {
   /** @type {Map<string, string | null>} repo-level color authority, by lowercased name */
   const repoColors = new Map(
     labels.map((l) => [
@@ -218,7 +228,7 @@ export function mapRepo({ issues, comments, labels }, customization = DEFAULT_CU
 
   /** @type {Map<string, LabelOp>} keyed by lowercased name, like the server's label cache */
   const labelOps = new Map();
-  /** @type {Map<string, { text: string }[]>} comments per issue number */
+  /** @type {Map<string, { text: string, created_at: string | null }[]>} comments per issue number */
   const byIssue = new Map();
 
   /** @type {StoryOp[]} */
@@ -266,7 +276,7 @@ export function mapRepo({ issues, comments, labels }, customization = DEFAULT_CU
       completed_at: (closed ? issue.closed_at : null) ?? null,
       labels: names,
       tasks: customization.tasks ? parseChecklist(body) : [],
-      comments: /** @type {{ text: string }[]} */ ([]),
+      comments: /** @type {{ text: string, created_at: string | null }[]} */ ([]),
     };
     byIssue.set(story.external_id, story.comments);
     stories.push(story);
@@ -275,7 +285,12 @@ export function mapRepo({ issues, comments, labels }, customization = DEFAULT_CU
   for (const comment of customization.comments ? comments : []) {
     if (!(comment.body ?? "").trim()) continue;
     const target = byIssue.get(issueNumberFromUrl(comment.issue_url) ?? "");
-    if (target) target.push({ text: commentText(comment) });
+    if (target) {
+      target.push({
+        text: commentText(comment, sendDates),
+        created_at: comment.created_at ?? null,
+      });
+    }
   }
 
   return { labels: [...labelOps.values()], stories };
@@ -382,7 +397,7 @@ export function clampPlan(plan, limits, { reserveDescription = () => 0, warn = (
     out.comments = op.comments.map((comment, i) => {
       if (byteLen(comment.text) <= limits.commentText) return comment;
       notice(`comment ${i + 1}`, limits.commentText);
-      return { text: clampBlock(comment.text, limits.commentText) };
+      return { ...comment, text: clampBlock(comment.text, limits.commentText) };
     });
     return out;
   });
