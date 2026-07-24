@@ -2,10 +2,36 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { main } from "../src/cli.js";
-import { EATClient } from "../src/client.js";
-import { runImport } from "../src/importer.js";
+import { EATClient, EATError, EATTimeout } from "../src/client.js";
+import { pollImport, runImport } from "../src/importer.js";
 import { makeState, startMockServer } from "../src/mockserver.js";
 import { capture, inTempDir, withEnv } from "./helpers.js";
+
+/**
+ * A client stand-in that answers the 202 async accept, then serves a scripted
+ * sequence of status docs (one per getImport call).
+ *
+ * @param {any[]} statuses status docs to serve in order (last one repeats)
+ * @param {{ importId?: string }} [options]
+ */
+function asyncClient(statuses, { importId = "imp-1" } = {}) {
+  return {
+    /** @type {any[]} */
+    progress: [],
+    getCalls: 0,
+    async importGithub() {
+      return { import_id: importId, status: "pending" };
+    },
+    /** @param {number} _projectId @param {string} _importId */
+    async getImport(_projectId, _importId) {
+      const i = Math.min(this.getCalls, statuses.length - 1);
+      this.getCalls += 1;
+      return statuses[i];
+    },
+  };
+}
+
+const NO_SLEEP = { sleep: async () => {} };
 
 /**
  * A recording stand-in for the client, returning a canned raw result.
@@ -693,4 +719,217 @@ test("runImport surfaces the dry_run echo", async () => {
   const outcome = await runImport(fake, 91, "o", "r", { idempotencyKey: "k", dryRun: true });
   assert.equal(outcome.dryRun, true);
   assert.equal(outcome.skipped, 1);
+});
+
+// ---- v2 async import (202 -> poll) -----------------------------------------
+
+const DONE_RESULT = {
+  dry_run: false,
+  imported: { stories: 4, labels: 1 },
+  skipped: 2,
+  errors: [],
+  unmatched: { owners: ["x"] },
+};
+
+test("pollImport returns the done result", async () => {
+  const client = asyncClient([
+    { status: "fetching", progress_current: 1, progress_total: 3 },
+    { status: "writing", progress_current: 3, progress_total: 3 },
+    { status: "done", result: DONE_RESULT },
+  ]);
+  const result = await pollImport(client, 91, "imp-1", { poll: NO_SLEEP });
+  assert.deepEqual(result, DONE_RESULT);
+});
+
+test("pollImport fires onProgress once per poll", async () => {
+  const client = asyncClient([
+    { status: "pending" },
+    { status: "fetching", progress_current: 2, progress_total: 3 },
+    { status: "done", result: DONE_RESULT },
+  ]);
+  /** @type {string[]} */
+  const seen = [];
+  await pollImport(client, 91, "imp-1", { onProgress: (s) => seen.push(s.status), poll: NO_SLEEP });
+  assert.deepEqual(seen, ["pending", "fetching", "done"]);
+});
+
+test("pollImport throws EATError with the server text on failed", async () => {
+  const client = asyncClient([
+    { status: "fetching", progress_current: 1, progress_total: 2 },
+    { status: "failed", error: "GitHub rate limited", error_code: "gh_rate" },
+  ]);
+  await assert.rejects(pollImport(client, 91, "imp-1", { poll: NO_SLEEP }), (err) => {
+    assert.ok(err instanceof EATError);
+    assert.match(err.message, /import failed: GitHub rate limited/);
+    return true;
+  });
+});
+
+test("pollImport falls back to error_code when error is absent", async () => {
+  const client = asyncClient([{ status: "failed", error: null, error_code: "gh_rate" }]);
+  await assert.rejects(
+    pollImport(client, 91, "imp-1", { poll: NO_SLEEP }),
+    /import failed: gh_rate/,
+  );
+});
+
+test("pollImport throws when done carries no result", async () => {
+  const client = asyncClient([{ status: "done", result: null }]);
+  await assert.rejects(
+    pollImport(client, 91, "imp-9", { poll: NO_SLEEP }),
+    /import imp-9 finished with no result/,
+  );
+});
+
+test("pollImport uses the injected sleep with capped exponential backoff", async () => {
+  const client = asyncClient([
+    { status: "pending" },
+    { status: "fetching", progress_current: 1, progress_total: 1 },
+    { status: "writing" },
+    { status: "done", result: DONE_RESULT },
+  ]);
+  /** @type {number[]} */
+  const slept = [];
+  await pollImport(client, 91, "imp-1", {
+    poll: {
+      sleep: async (ms) => {
+        slept.push(ms);
+      },
+      baseMs: 500,
+      maxMs: 5000,
+    },
+  });
+  assert.deepEqual(slept, [500, 1000, 2000]); // one sleep between each non-terminal poll
+});
+
+test("pollImport times out deterministically via virtual elapsed", async () => {
+  // Never terminal: always pending. Injected sleep records nothing real.
+  const client = {
+    async importGithub() {
+      return { import_id: "imp-1", status: "pending" };
+    },
+    async getImport() {
+      return { status: "pending" };
+    },
+  };
+  await assert.rejects(
+    pollImport(client, 91, "imp-1", {
+      poll: { sleep: async () => {}, baseMs: 1000, maxMs: 1000, maxWaitMs: 2500 },
+    }),
+    (err) => {
+      assert.ok(err instanceof EATTimeout);
+      return true;
+    },
+  );
+});
+
+test("runImport transparently handles a 202-then-poll client", async () => {
+  const client = asyncClient([
+    { status: "fetching", progress_current: 1, progress_total: 4 },
+    { status: "done", result: DONE_RESULT },
+  ]);
+  const outcome = await runImport(client, 91, "o", "r", { idempotencyKey: "k", poll: NO_SLEEP });
+  // Same normalization as the equivalent synchronous body.
+  assert.deepEqual(
+    outcome,
+    await runImport(fakeClient(DONE_RESULT), 91, "o", "r", { idempotencyKey: "k" }),
+  );
+});
+
+test("runImport threads onProgress through the async path", async () => {
+  const client = asyncClient([{ status: "pending" }, { status: "done", result: DONE_RESULT }]);
+  /** @type {string[]} */
+  const seen = [];
+  await runImport(client, 91, "o", "r", {
+    idempotencyKey: "k",
+    onProgress: (s) => seen.push(s.status),
+    poll: NO_SLEEP,
+  });
+  assert.deepEqual(seen, ["pending", "done"]);
+});
+
+test("runImport ignores a done-shaped 200 (no import_id) as synchronous", async () => {
+  // A sync body has `imported` and no `import_id` — must not attempt polling.
+  const client = {
+    async importGithub() {
+      return DONE_RESULT;
+    },
+  };
+  const outcome = await runImport(client, 91, "o", "r", { idempotencyKey: "k", poll: NO_SLEEP });
+  assert.equal(outcome.importedStories, 4);
+});
+
+test("async import end-to-end via main reports counts and emits progress", async () => {
+  const mock = await startMockServer(makeState({ asyncImport: true }));
+  const out = capture();
+  const err = capture();
+  try {
+    await inTempDir(() =>
+      withEnv(
+        { EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl, GITHUB_TOKEN: undefined },
+        async () => {
+          const code = await main(["--project", "91", "--repo", "o/r"], {
+            stdout: out,
+            stderr: err,
+            // Zero-delay poll so the mock's phase progression runs fast.
+            runImport: (client, project, owner, repo, opts) =>
+              runImport(client, project, owner, repo, { ...opts, poll: NO_SLEEP }),
+          });
+          assert.equal(code, 0);
+        },
+      ),
+    );
+  } finally {
+    await mock.close();
+  }
+  assert.ok(out.buf.includes("Imported 3"), out.buf);
+  assert.ok(err.buf.includes("fetching"), err.buf); // live progress on stderr
+  assert.ok(err.buf.includes("done"), err.buf);
+  assert.equal(mock.state.imports.length, 1);
+});
+
+test("async re-import dedups across two async imports", async () => {
+  const state = makeState({ asyncImport: true });
+  const mock = await startMockServer(state);
+  try {
+    const client = new EATClient(mock.baseUrl, "tok");
+    const first = await runImport(client, 91, "o", "r", { idempotencyKey: "k1", poll: NO_SLEEP });
+    assert.equal(first.importedStories, 3);
+    assert.equal(first.skipped, 0);
+    const second = await runImport(client, 91, "o", "r", { idempotencyKey: "k2", poll: NO_SLEEP });
+    assert.equal(second.importedStories, 0);
+    assert.equal(second.skipped, 3);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("async job replays the same 202 on an idempotency-key retry", async () => {
+  const mock = await startMockServer(makeState({ asyncImport: true }));
+  try {
+    const client = new EATClient(mock.baseUrl, "tok");
+    const a = await client.importGithub(91, "o", "r", { idempotencyKey: "same" });
+    const b = await client.importGithub(91, "o", "r", { idempotencyKey: "same" });
+    assert.equal(a.import_id, b.import_id);
+    assert.equal(Object.keys(mock.state.jobs).length, 1); // one job, not two
+  } finally {
+    await mock.close();
+  }
+});
+
+test("async job lands on failed when asyncFail is set", async () => {
+  const mock = await startMockServer(makeState({ asyncImport: true, asyncFail: true }));
+  try {
+    const client = new EATClient(mock.baseUrl, "tok");
+    await assert.rejects(
+      runImport(client, 91, "o", "r", { idempotencyKey: "k", poll: NO_SLEEP }),
+      (err) => {
+        assert.ok(err instanceof EATError);
+        assert.match(err.message, /import failed: import failed on the tracker/);
+        return true;
+      },
+    );
+  } finally {
+    await mock.close();
+  }
 });
