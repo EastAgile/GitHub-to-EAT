@@ -60,8 +60,6 @@ test("non-TTY output stays a single start line for both outcomes", async () => {
   assert.equal(bad.buf, "working...\n");
 });
 
-// ---- formatImportStatus -----------------------------------------------------
-
 test("formatImportStatus renders a short line per phase", () => {
   assert.equal(formatImportStatus({ status: "pending" }), "queued");
   assert.equal(
@@ -85,8 +83,6 @@ test("formatImportStatus treats a null current as 0 only with a total", () => {
     "fetching 0/4",
   );
 });
-
-// ---- makeImportReporter -----------------------------------------------------
 
 test("makeImportReporter on a TTY overwrites one line and pads the shorter", () => {
   const out = ttyCapture();

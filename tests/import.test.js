@@ -721,8 +721,6 @@ test("runImport surfaces the dry_run echo", async () => {
   assert.equal(outcome.skipped, 1);
 });
 
-// ---- v2 async import (202 -> poll) -----------------------------------------
-
 const DONE_RESULT = {
   dry_run: false,
   imported: { stories: 4, labels: 1 },
