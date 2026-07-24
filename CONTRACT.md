@@ -70,7 +70,11 @@ The tool assumes the EAT server provides:
 The API base is `.../api/v1`. Shapes the CLI parses:
 
 - **Import success** (`POST .../import/json`, HTTP 200 — synchronous; schema
-  pinned in the server's `GET .../openapi.json`):
+  pinned in the server's `GET .../openapi.json`). This 200 shape is now the
+  **legacy/fallback** path: the primary path is the async `202` accept +
+  poll (see *Async import* below). The CLI still accepts this synchronous body
+  from older servers, and the body below is byte-identical to the terminal
+  job's `result`:
   ```json
   {
     "dry_run": false,
@@ -108,10 +112,54 @@ The API base is `.../api/v1`. Shapes the CLI parses:
 
 These shapes are mirrored by the bundled mock server (`src/mockserver.js`).
 
-## v2 (reserved — not built yet)
+## v2 — async import
 
-- **Always-async import** — `POST` returns `202 { import_id }`; the CLI polls
-  `GET /projects/{id}/imports/{import_id}` for progress.
+The import is a background job. `POST .../import/json` **accepts** the work and
+returns immediately; the CLI polls a status endpoint until the job finishes.
+
+- **Accept** (`POST .../import/json`, HTTP **202**):
+  ```json
+  { "import_id": "imp-abc123", "status": "pending" }
+  ```
+  The Idempotency-Key semantics are unchanged (same key + same body replays the
+  same `202`/`import_id`; different body → `409 idempotency_conflict`). Dry-run
+  imports ride the **same** async job (`202` → poll → `done` with
+  `result.dry_run: true`).
+
+- **Status** (`GET .../projects/{id}/imports/{import_id}`, HTTP 200):
+  ```json
+  {
+    "import_id": "imp-abc123", "project_id": 91, "source": "github",
+    "created": "2026-07-24T00:00:00Z",
+    "status": "fetching",
+    "progress_current": 2, "progress_total": 5,
+    "error": null, "error_code": null,
+    "result": null
+  }
+  ```
+  - `status` lifecycle: `pending → fetching → writing → done | failed`. Only
+    **done** and **failed** are terminal; file sources skip `fetching`.
+  - `progress_current` / `progress_total` (`int|null`) — the X/Y for the current
+    phase, driving the live progress line.
+  - `error` / `error_code` (`string|null`) — set on `failed`.
+  - `result` (`ImportResult | null`) — present **only on `done`**, and
+    byte-identical to the legacy synchronous 200 body above.
+
+- **Client behaviour** — on a `202`, the CLI polls the status endpoint with
+  **capped exponential backoff** (0.5s → 5s, giving up after ~15 min) and
+  renders a **live progress line** on stderr (`queued` → `fetching X/Y` →
+  `writing` → `done`/`failed`); stdout and the final result rendering are
+  unchanged. A `failed` status raises the job's `error`/`error_code`. When the
+  server instead answers a synchronous `200` (older servers), the CLI uses that
+  body directly — no polling. The shape is detected by the response body, not a
+  version flag.
+
+The async accept, status endpoint, and progression are mirrored by the bundled
+mock server under `makeState({ asyncImport: true })` (`--async` when run
+standalone); `asyncFail: true` drives the `failed` branch.
+
+## Reserved — not built yet
+
 - **Private repos** — a GitHub App authorization flow so users can import their
   own private repositories.
 

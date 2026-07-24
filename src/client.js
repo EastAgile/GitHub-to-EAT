@@ -376,4 +376,17 @@ export class EATClient {
     });
     return response.json();
   }
+
+  /**
+   * Fetch the status of an async import job (v2 async accept).
+   *
+   * @param {number} projectId
+   * @param {string} importId
+   * @returns {Promise<any>} the status doc — `{ import_id, status,
+   *   progress_current, progress_total, error, error_code, result }`
+   */
+  async getImport(projectId, importId) {
+    const response = await this.#request("GET", `/projects/${projectId}/imports/${importId}`);
+    return response.json();
+  }
 }
