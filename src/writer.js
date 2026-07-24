@@ -19,7 +19,7 @@ import { runWithProgress } from "./progress.js";
  * @property {(projectId: number, storyId: number, task: { description: string,
  *   complete?: boolean }, idempotencyKey: string) => Promise<any>} createTask
  * @property {(projectId: number, storyId: number, text: string,
- *   idempotencyKey: string) => Promise<any>} createComment
+ *   idempotencyKey: string, options?: { createdAt?: string | null }) => Promise<any>} createComment
  */
 
 /**
@@ -80,12 +80,20 @@ async function withRetry(fn, attempts, delayMs) {
  * @param {number} projectId
  * @param {WritePlan} plan
  * @param {{ runId?: string, stream?: import("./progress.js").OutStream,
- *   retryAttempts?: number, retryDelayMs?: number }} [options] `runId` scopes
- *   the idempotency keys (fresh per run, stable across in-run retries)
+ *   retryAttempts?: number, retryDelayMs?: number, sendDates?: boolean }} [options]
+ *   `runId` scopes the idempotency keys (fresh per run, stable across in-run
+ *   retries); `sendDates` adds backdated `created_at`/`completed_at` to the
+ *   writes (server owner-gated) — off keeps the payloads byte-identical to v3
  * @returns {Promise<WriteResult>}
  */
 export async function writePlan(client, projectId, plan, options = {}) {
-  const { runId = randomUUID(), stream, retryAttempts = 3, retryDelayMs = 250 } = options;
+  const {
+    runId = randomUUID(),
+    stream,
+    retryAttempts = 3,
+    retryDelayMs = 250,
+    sendDates = false,
+  } = options;
   /** @template T @param {() => Promise<T>} fn */
   const retrying = (fn) => withRetry(fn, retryAttempts, retryDelayMs);
 
@@ -123,18 +131,22 @@ export async function writePlan(client, projectId, plan, options = {}) {
     await runWithProgress(
       async () => {
         for (const op of ordered) {
+          /** @type {Record<string, unknown>} */
+          const body = {
+            name: op.name,
+            description: op.description,
+            story_type: op.story_type,
+            current_state: op.current_state,
+            labels: op.labels,
+          };
+          if (sendDates) {
+            body.created_at = op.created_at;
+            // completed_at is valid only on a done-state create; omit it for
+            // open issues rather than sending null.
+            if (op.completed_at != null) body.completed_at = op.completed_at;
+          }
           const created = await retrying(() =>
-            client.createStory(
-              projectId,
-              {
-                name: op.name,
-                description: op.description,
-                story_type: op.story_type,
-                current_state: op.current_state,
-                labels: op.labels,
-              },
-              `${runId}:story:${op.external_id}`,
-            ),
+            client.createStory(projectId, body, `${runId}:story:${op.external_id}`),
           );
           result.stories += 1;
           for (const [i, task] of op.tasks.entries()) {
@@ -155,6 +167,7 @@ export async function writePlan(client, projectId, plan, options = {}) {
                 created.story_id,
                 comment.text,
                 `${runId}:comment:${op.external_id}:${i}`,
+                sendDates ? { createdAt: comment.created_at } : undefined,
               ),
             );
             result.comments += 1;

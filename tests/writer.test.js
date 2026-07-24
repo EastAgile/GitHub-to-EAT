@@ -40,7 +40,9 @@ function samplePlan() {
           { description: "step one", complete: true },
           { description: "step two", complete: false },
         ],
-        comments: [{ text: "@alice on 2020-01-05:\n\nlooks broken" }],
+        comments: [
+          { text: "@alice on 2020-01-05:\n\nlooks broken", created_at: "2020-01-05T00:00:00Z" },
+        ],
       },
     ],
   };
@@ -192,4 +194,99 @@ test("non-retryable errors fail immediately", async () => {
     AuthError,
   );
   assert.equal(calls(), 1);
+});
+
+// --- backdating: created_at / completed_at on the writes (story #32427) --------
+
+/**
+ * A writer client that records every createStory / createComment body.
+ *
+ * @returns {{ client: import("../src/writer.js").WriterClient,
+ *   stories: any[], comments: any[] }}
+ */
+function recordingClient() {
+  /** @type {any[]} */
+  const stories = [];
+  /** @type {any[]} */
+  const comments = [];
+  return {
+    client: {
+      createLabel: async () => ({}),
+      createStory: async (_p, story) => {
+        stories.push(story);
+        return { story_id: stories.length };
+      },
+      createTask: async () => ({}),
+      createComment: async (_p, _s, text, _k, options) => {
+        comments.push({ text, options });
+        return {};
+      },
+    },
+    stories,
+    comments,
+  };
+}
+
+/** @returns {import("../src/writer.js").WritePlan} */
+function datedPlan() {
+  return {
+    labels: [],
+    stories: [
+      {
+        external_id: "3",
+        name: "closed",
+        description: null,
+        story_type: "bug",
+        current_state: "accepted",
+        created_at: "2020-01-01T00:00:00Z",
+        completed_at: "2020-02-01T00:00:00Z",
+        labels: [],
+        tasks: [],
+        comments: [{ text: "@a:\n\nhi", created_at: "2020-01-05T00:00:00Z" }],
+      },
+      {
+        external_id: "7",
+        name: "open",
+        description: null,
+        story_type: "feature",
+        current_state: "unstarted",
+        created_at: "2024-05-01T00:00:00Z",
+        completed_at: null,
+        labels: [],
+        tasks: [],
+        comments: [],
+      },
+    ],
+  };
+}
+
+test("sendDates sends created_at on every story, completed_at only on accepted creates", async () => {
+  const { client, stories, comments } = recordingClient();
+  await writePlan(client, 91, datedPlan(), { stream: capture(), sendDates: true });
+
+  const closed = stories.find((s) => s.name === "closed");
+  const open = stories.find((s) => s.name === "open");
+  assert.equal(closed.created_at, "2020-01-01T00:00:00Z");
+  assert.equal(closed.completed_at, "2020-02-01T00:00:00Z");
+  assert.equal(open.created_at, "2024-05-01T00:00:00Z");
+  // Open issues carry no completion — the key must be absent, not null.
+  assert.ok(!("completed_at" in open));
+
+  assert.deepEqual(comments[0].options, { createdAt: "2020-01-05T00:00:00Z" });
+});
+
+test("without sendDates the story/comment bodies stay byte-identical to v3", async () => {
+  const { client, stories, comments } = recordingClient();
+  await writePlan(client, 91, datedPlan(), { stream: capture() });
+
+  for (const story of stories) {
+    assert.deepEqual(Object.keys(story), [
+      "name",
+      "description",
+      "story_type",
+      "current_state",
+      "labels",
+    ]);
+  }
+  assert.equal(comments[0].options, undefined);
 });
