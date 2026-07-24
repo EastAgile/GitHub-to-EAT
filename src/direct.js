@@ -77,11 +77,15 @@ export async function runDirect(client, projectId, owner, repo, options) {
 
   const imported = await runWithProgress(
     async () => {
-      const marker = await prescanImported(client, projectId, owner, repo);
+      if (!sendProvenance) return prescanImported(client, projectId, owner, repo);
       // Union, not replace: legacy marker-only rows carry no pair, pair-only
-      // rows (server-written, or newer direct runs) carry no marker.
-      if (!sendProvenance) return marker;
-      return unionImported(marker, await prescanProvenance(client, projectId));
+      // rows (server-written, or newer direct runs) carry no marker. The two
+      // reads are independent, so run them concurrently.
+      const [marker, provenance] = await Promise.all([
+        prescanImported(client, projectId, owner, repo),
+        prescanProvenance(client, projectId),
+      ]);
+      return unionImported(marker, provenance);
     },
     `scanning project ${projectId} for already-imported stories`,
     { stream },

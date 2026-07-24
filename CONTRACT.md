@@ -371,6 +371,13 @@ and both are prescanned, in union.
   server-side importer writes the same pair, cross-engine dedup is now
   **symmetric**: a direct-written story is skipped by a later server import and
   vice versa.
+  - **Repo-blind, deliberately.** The key is `(project, source="github",
+    external_id)` — the issue number alone, with **no** `(owner, repo)` scope.
+    This is exactly the server importer's key, and matching it is what buys the
+    cross-engine symmetry above; encoding the repo into `import_source` would
+    break interop. The consequence: within one project, two GitHub repos whose
+    issue numbers collide (repo-A #7 and repo-B #7) dedup against each other —
+    the second is false-skipped. See the one-repo-per-project constraint below.
 - **Marker (fallback)** — every story it writes also ends its description with a
   stable marker line: `Imported from https://github.com/{owner}/{repo}/issues/{n}`.
   The marker prescan always runs **alongside** the provenance prescan (their
@@ -385,12 +392,14 @@ and both are prescanned, in union.
   values — including out-of-range cursors — are also `400 validation_failed`, so
   a paging loop fails loudly rather than spinning) — and skips items whose pair
   or marker already exists, reported as `skipped N (already imported)`.
-- Marker dedup is scoped per `(owner, repo)`: markers pointing at other repos
-  never suppress an import. Matching is case-insensitive (GitHub slugs are, and
-  GitHub forbids same-name-other-case repos) and honors only the last
-  non-blank line of a description — an issue body merely quoting the marker
-  sentence mid-text cannot poison the dedup. Labels referenced only by
-  skipped stories are not re-created.
+- Only the **marker fallback** is scoped per `(owner, repo)`: markers pointing
+  at other repos never suppress an import. Matching is case-insensitive (GitHub
+  slugs are, and GitHub forbids same-name-other-case repos) and honors only the
+  last non-blank line of a description — an issue body merely quoting the marker
+  sentence mid-text cannot poison the dedup. The primary provenance pass has no
+  such scope (see "Repo-blind" above), so the *combined* dedup is repo-blind
+  wherever the provenance pass is active. Labels referenced only by skipped
+  stories are not re-created.
 - The pair and marker both land at story-create, before that story's tasks and
   comments. A run interrupted in that window leaves an incomplete story that
   stays skipped on re-runs; when a skipped story has fewer tasks/comments than
@@ -418,3 +427,7 @@ and both are prescanned, in union.
   caveat survives only for **older** servers that do not advertise the pair:
   there the direct engine falls back to its private description marker, which
   the server engine cannot see, so keep such a project on one engine.
+- **One repo per project** — the shared key is repo-blind (`external_id` is the
+  bare issue number, matching the server importer), so a project holding issues
+  from two GitHub repos can false-skip where their issue numbers collide. Keep
+  one GitHub repo per EAT project.
