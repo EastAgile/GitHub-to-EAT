@@ -222,3 +222,50 @@ test("over-long text is clamped to the published limits and the import completes
     await mock.close();
   }
 });
+
+// --- backdating end-to-end (story #32427) --------------------------------------
+
+test("against a backdating server, rows carry the GitHub dates and the @login: prefix", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    });
+    const rows = mock.state.stories[91];
+    const closed = rows.find((r) => r.title === "older closed issue");
+    const open = rows.find((r) => r.title === "newer open issue");
+    assert.equal(closed.created_at, "2020-01-01T00:00:00Z");
+    assert.equal(closed.completed_at, "2020-02-01T00:00:00Z");
+    assert.equal(open.created_at, "2024-05-01T00:00:00Z");
+    // Open issues send no completion.
+    assert.ok(!("completed_at" in open));
+    // The comment date rides on the write, so the prefix collapses to @login:.
+    assert.equal(closed.comments[0].comment_text, "@alice:\n\nconfirmed");
+    assert.equal(closed.comments[0].created_at, "2020-01-05T00:00:00Z");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("against an older (non-backdating) server, the dated prefix is preserved and no dates leak", async () => {
+  const mock = await startMockServer(makeState({ backdating: false }));
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    });
+    const rows = mock.state.stories[91];
+    const closed = rows.find((r) => r.title === "older closed issue");
+    assert.ok(!("created_at" in closed));
+    assert.ok(!("completed_at" in closed));
+    assert.equal(closed.comments[0].comment_text, "@alice on 2020-01-05:\n\nconfirmed");
+    assert.ok(!("created_at" in closed.comments[0]));
+  } finally {
+    await mock.close();
+  }
+});

@@ -606,6 +606,37 @@ test("story name and task_desc over their maxLength are rejected too_long", asyn
   }
 });
 
+test("backdated story create persists created_at; accepted completed_at clamps forward", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    // completed_at before created_at must clamp forward to created_at.
+    await client.createStory(
+      91,
+      {
+        name: "done",
+        current_state: "accepted",
+        created_at: "2020-06-01T00:00:00Z",
+        completed_at: "2020-01-01T00:00:00Z",
+      },
+      "k-clamp",
+    );
+    // completed_at on a non-done create is ignored.
+    await client.createStory(
+      91,
+      { name: "open", current_state: "unstarted", created_at: "2021-01-01T00:00:00Z" },
+      "k-open",
+    );
+    const [done, open] = mock.state.stories[91];
+    assert.equal(done.created_at, "2020-06-01T00:00:00Z");
+    assert.equal(done.completed_at, "2020-06-01T00:00:00Z");
+    assert.equal(open.created_at, "2021-01-01T00:00:00Z");
+    assert.ok(!("completed_at" in open));
+  } finally {
+    await mock.close();
+  }
+});
+
 test("async import returns 202 then a job that progresses to done with a result", async () => {
   const mock = await startMockServer(makeState({ asyncImport: true }));
   try {
@@ -632,6 +663,17 @@ test("async import returns 202 then a job that progresses to done with a result"
     assert.equal(status.result.skipped, 0);
     assert.equal(status.project_id, 91);
     assert.equal(status.source, "github");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a non-backdating server ignores created_at on story creates", async () => {
+  const mock = await startMockServer(makeState({ backdating: false }));
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await client.createStory(91, { name: "s", created_at: "2020-01-01T00:00:00Z" }, "k");
+    assert.ok(!("created_at" in mock.state.stories[91][0]));
   } finally {
     await mock.close();
   }

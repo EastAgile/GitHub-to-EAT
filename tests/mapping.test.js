@@ -252,7 +252,9 @@ test("comments join to their issue by issue_url with the @user-on-date prefix", 
     ],
     labels: [],
   });
-  assert.deepEqual(plan.stories[0].comments, [{ text: "@bob on 2026-03-04:\n\nLooks good" }]);
+  assert.deepEqual(plan.stories[0].comments, [
+    { text: "@bob on 2026-03-04:\n\nLooks good", created_at: "2026-03-04T05:06:07Z" },
+  ]);
 });
 
 test("PR-conversation comments (issue_url of a dropped PR) do not leak into any story", () => {
@@ -290,7 +292,9 @@ test("empty comment bodies are skipped; deleted users prefix as @ghost", () => {
     ],
     labels: [],
   });
-  assert.deepEqual(plan.stories[0].comments, [{ text: "@ghost on 2026-03-04:\n\nOrphaned" }]);
+  assert.deepEqual(plan.stories[0].comments, [
+    { text: "@ghost on 2026-03-04:\n\nOrphaned", created_at: "2026-03-04T05:06:07Z" },
+  ]);
 });
 
 test("a stray pull_request row in the input is dropped, not mapped", () => {
@@ -336,7 +340,7 @@ function storyOp(overrides = {}) {
 test("clampPlan truncates an over-long comment to fit the limit, notice included", () => {
   /** @type {string[]} */
   const warnings = [];
-  const op = storyOp({ comments: [{ text: "x".repeat(500) }] });
+  const op = storyOp({ comments: [{ text: "x".repeat(500), created_at: null }] });
   const { stories } = clampPlan(
     { labels: [], stories: [op] },
     { ...FALLBACK_LIMITS, commentText: 200 },
@@ -427,7 +431,7 @@ test("clampPlan clamps the name in bytes, counting the ellipsis it appends", () 
 test("clampPlan clamps multi-byte task and comment text in bytes too", () => {
   const op = storyOp({
     tasks: [{ description: "你好".repeat(500), complete: false }],
-    comments: [{ text: "→".repeat(500) }],
+    comments: [{ text: "→".repeat(500), created_at: null }],
   });
   const { stories } = clampPlan(
     { labels: [], stories: [op] },
@@ -438,7 +442,11 @@ test("clampPlan clamps multi-byte task and comment text in bytes too", () => {
 });
 
 test("clampPlan leaves under-limit text untouched and silent", () => {
-  const op = storyOp({ name: "short", description: "fine", comments: [{ text: "ok" }] });
+  const op = storyOp({
+    name: "short",
+    description: "fine",
+    comments: [{ text: "ok", created_at: null }],
+  });
   /** @type {string[]} */
   const warnings = [];
   const { stories } = clampPlan({ labels: [], stories: [op] }, FALLBACK_LIMITS, {
@@ -624,4 +632,62 @@ test("tasks: false produces no task ops; the checklist lines stay in the descrip
   );
   assert.deepEqual(plan.stories[0].tasks, []);
   assert.equal(plan.stories[0].description, body);
+});
+
+// --- backdating: comment prefix + created_at carry (story #32427) --------------
+
+test("sendDates=true carries the comment date and collapses the prefix to @login:", () => {
+  const plan = mapRepo(
+    {
+      issues: [ghIssue({ number: 7 })],
+      comments: [
+        {
+          issue_url: "https://api.github.com/repos/o/r/issues/7",
+          user: { id: 5, login: "bob" },
+          created_at: "2026-03-04T05:06:07Z",
+          body: "Looks good",
+        },
+      ],
+      labels: [],
+    },
+    DEFAULT_CUSTOMIZATION,
+    true,
+  );
+  assert.deepEqual(plan.stories[0].comments, [
+    { text: "@bob:\n\nLooks good", created_at: "2026-03-04T05:06:07Z" },
+  ]);
+});
+
+test("sendDates defaults to the older-server output (dated prefix) byte-for-byte", () => {
+  const repo = {
+    issues: [ghIssue({ number: 7 })],
+    comments: [
+      {
+        issue_url: "https://api.github.com/repos/o/r/issues/7",
+        user: { id: 5, login: "bob" },
+        created_at: "2026-03-04T05:06:07Z",
+        body: "Looks good",
+      },
+    ],
+    labels: [],
+  };
+  const dflt = mapRepo(repo, DEFAULT_CUSTOMIZATION);
+  const explicit = mapRepo(repo, DEFAULT_CUSTOMIZATION, false);
+  assert.deepEqual(dflt.stories[0].comments, [
+    { text: "@bob on 2026-03-04:\n\nLooks good", created_at: "2026-03-04T05:06:07Z" },
+  ]);
+  assert.deepEqual(dflt, explicit);
+});
+
+test("clampPlan preserves created_at on an over-limit comment", () => {
+  const op = storyOp({ comments: [{ text: "x".repeat(500), created_at: "2020-01-05T00:00:00Z" }] });
+  const { stories } = clampPlan(
+    { labels: [], stories: [op] },
+    {
+      ...FALLBACK_LIMITS,
+      commentText: 200,
+    },
+  );
+  assert.equal(stories[0].comments[0].created_at, "2020-01-05T00:00:00Z");
+  assert.ok(stories[0].comments[0].text.endsWith(TRUNCATION_NOTICE));
 });
