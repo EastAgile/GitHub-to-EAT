@@ -6,7 +6,8 @@
  *     GET  /meta
  *     GET  /projects/{id}
  *     GET  /projects/{id}/stories          (cursor mode + fields= projection)
- *     POST /projects/{id}/import/json
+ *     GET  /projects/{id}/imports/{id}     (async import job status; --async)
+ *     POST /projects/{id}/import/json      (202 async accept under --async)
  *     POST /projects/{id}/labels
  *     POST /projects/{id}/stories
  *     POST /projects/{id}/stories/{id}/tasks
@@ -22,7 +23,7 @@
  *
  * Run standalone:
  *
- *     node src/mockserver.js --port 8080
+ *     node src/mockserver.js --port 8080 [--async]
  */
 
 import { createHash } from "node:crypto";
@@ -54,6 +55,13 @@ import { parseArgs } from "node:util";
  * @property {boolean} serverDryRun when true (default), GET /openapi.json
  *   advertises the import dry_run field and dry_run requests are honoured;
  *   false simulates an older server (openapi 404s)
+ * @property {boolean} asyncImport when true, POST /import/json answers the v2
+ *   async accept — 202 `{ import_id, status:"pending" }` plus a pollable job at
+ *   GET /imports/{import_id}; false (default) keeps today's synchronous 200
+ * @property {boolean} asyncFail when true (with asyncImport), the job ends in
+ *   `failed` with an error/error_code instead of `done`
+ * @property {Record<string, { phases: any[], idx: number }>} jobs async import
+ *   jobs by import_id; each GET serves the current phase then advances
  * @property {{ name?: number, description?: number, task_desc?: number,
  *   comment_text?: number }} maxLengths per-field write limits — when set,
  *   over-long values are rejected `400 too_long` and the limits are published
@@ -81,6 +89,9 @@ export function makeState(overrides = {}) {
     importedIds: {},
     externalMembers: {},
     serverDryRun: true,
+    asyncImport: false,
+    asyncFail: false,
+    jobs: {},
     maxLengths: {},
     imports: [],
     idempotency: {},
@@ -142,6 +153,15 @@ function openapiDoc(state) {
       },
     },
   });
+  // When async, advertise the 202 accept (as a response on the import path) and
+  // the pollable status path — not an invented `import/json:202` path key.
+  const asyncPaths = state.asyncImport
+    ? {
+        "/api/v1/projects/{project_id}/imports/{import_id}": {
+          get: { responses: { 200: { description: "import status" } } },
+        },
+      }
+    : {};
   return {
     paths: {
       "/api/v1/projects/{project_id}/import/json": {
@@ -153,8 +173,12 @@ function openapiDoc(state) {
               },
             },
           },
+          ...(state.asyncImport
+            ? { responses: { 202: { description: "import accepted; poll for status" } } }
+            : {}),
         },
       },
+      ...asyncPaths,
       "/api/v1/projects/{project_id}/stories": post({
         name: ml.name,
         description: ml.description,
@@ -241,6 +265,57 @@ function computeImportResult(state, projectId, body) {
       comment_authors: [],
     },
   };
+}
+
+/**
+ * Build a pollable async import job whose phases walk
+ * `pending → fetching X/N → writing → done|failed`. `result` (the already
+ * computed sync ImportResult) is revealed only on the terminal `done` phase,
+ * byte-identical to what the synchronous 200 returns.
+ *
+ * @param {MockState} state
+ * @param {number} projectId
+ * @param {string} importId
+ * @param {any} result
+ * @returns {{ phases: any[], idx: number }}
+ */
+function buildImportJob(state, projectId, importId, result) {
+  const total = (result.imported?.stories ?? 0) + (result.skipped ?? 0) || 1;
+  /** @type {Record<string, any>} */
+  const base = {
+    import_id: importId,
+    project_id: projectId,
+    source: "github",
+    created: new Date().toISOString(),
+    error: null,
+    error_code: null,
+    result: null,
+  };
+  /** @type {any[]} */
+  const phases = [{ ...base, status: "pending", progress_current: null, progress_total: null }];
+  for (let i = 1; i <= total; i += 1) {
+    phases.push({ ...base, status: "fetching", progress_current: i, progress_total: total });
+  }
+  phases.push({ ...base, status: "writing", progress_current: total, progress_total: total });
+  if (state.asyncFail) {
+    phases.push({
+      ...base,
+      status: "failed",
+      progress_current: null,
+      progress_total: null,
+      error: "import failed on the tracker",
+      error_code: "import_error",
+    });
+  } else {
+    phases.push({
+      ...base,
+      status: "done",
+      progress_current: total,
+      progress_total: total,
+      result,
+    });
+  }
+  return { phases, idx: 0 };
 }
 
 /**
@@ -359,6 +434,20 @@ async function handle(state, req, res) {
       return;
     }
 
+    m = path.match(/^\/projects\/(\d+)\/imports\/([^/]+)$/);
+    if (m) {
+      const job = state.jobs[m[2]];
+      if (!job) {
+        send(res, 404, { error: "not found" });
+        return;
+      }
+      const doc = job.phases[job.idx];
+      // Advance toward the terminal phase so a poller sees real progression.
+      if (job.idx < job.phases.length - 1) job.idx += 1;
+      send(res, 200, doc);
+      return;
+    }
+
     send(res, 404, { error: "unknown route" });
     return;
   }
@@ -452,10 +541,15 @@ function routePost(state, path, body, idempotencyKey) {
     const projectId = Number(m[1]);
     if (!(projectId in state.projects)) return NOT_FOUND;
     state.imports.push({ project_id: projectId, body, idempotency_key: idempotencyKey });
-    return {
-      status: 200,
-      payload: state.importResult ?? computeImportResult(state, projectId, body),
-    };
+    // Dedup bookkeeping (computeImportResult) must run exactly once per import;
+    // async mode computes it now and reveals it only on the job's `done` phase.
+    const result = state.importResult ?? computeImportResult(state, projectId, body);
+    if (state.asyncImport) {
+      const importId = `imp-${state.nextId++}`;
+      state.jobs[importId] = buildImportJob(state, projectId, importId, result);
+      return { status: 202, payload: { import_id: importId, status: "pending" } };
+    }
+    return { status: 200, payload: result };
   }
 
   m = path.match(/^\/projects\/(\d+)\/labels$/);
@@ -704,11 +798,12 @@ export function main(argv = process.argv.slice(2)) {
     options: {
       host: { type: "string", default: "127.0.0.1" },
       port: { type: "string", default: "8080" },
+      async: { type: "boolean", default: false },
     },
   });
   const host = /** @type {string} */ (values.host);
   const port = Number(values.port);
-  const state = makeState();
+  const state = makeState({ asyncImport: Boolean(values.async) });
   const server = http.createServer((req, res) => {
     handle(state, req, res).catch(() => send(res, 500, { error: "internal" }));
   });

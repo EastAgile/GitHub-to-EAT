@@ -17,7 +17,7 @@ import { GitHubError } from "./github.js";
 import { runImport as defaultRunImport } from "./importer.js";
 import { MAPPINGS, parseInclude, renderLegend, requestFlags } from "./mappings.js";
 import { preflight as defaultPreflight } from "./preflight.js";
-import { runWithProgress } from "./progress.js";
+import { makeImportReporter, runWithProgress } from "./progress.js";
 import { VERSION } from "./version.js";
 import { runWizard as defaultRunWizard, WizardAborted } from "./wizard.js";
 
@@ -412,24 +412,36 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     if (await client.supportsServerDryRun()) {
       const token = values.token || process.env.GITHUB_TOKEN || undefined;
       let plan;
+      const reporter = makeImportReporter({ stream: stderr });
       try {
-        plan = await runWithProgress(
-          () =>
-            runImport(client, project, owner, repo, {
-              idempotencyKey: randomUUID(),
-              token,
-              flags,
-              dryRun: true,
+        plan = await runImport(client, project, owner, repo, {
+          idempotencyKey: randomUUID(),
+          token,
+          flags,
+          dryRun: true,
+          onProgress: reporter,
+          onWait: (thunk) =>
+            runWithProgress(thunk, "waiting for the server to compute the import plan", {
+              stream: stderr,
             }),
-          "waiting for the server to compute the import plan",
-          { stream: stderr },
-        );
+        });
       } catch (err) {
+        reporter.close(); // close the live line before any error text
+        if (err instanceof EATTimeout) {
+          stderr.write(`error: ${err.message}\n`);
+          stderr.write(
+            "The server may still be finishing the import — check the board in a " +
+              "moment, or re-run.\n",
+          );
+          return 1;
+        }
         if (err instanceof EATError) {
           stderr.write(`error: dry run failed: ${err.message}\n`);
           return 1;
         }
         throw err;
+      } finally {
+        reporter.close();
       }
       if (!plan.dryRun) {
         stderr.write(
@@ -455,18 +467,25 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
   const token = values.token || process.env.GITHUB_TOKEN || undefined;
   stdout.write(`Importing ${owner}/${repo} into project ${project} (${result.projectTitle})...\n`);
   let outcome;
+  const reporter = makeImportReporter({ stream: stderr });
   try {
-    outcome = await runWithProgress(
-      () => runImport(client, project, owner, repo, { idempotencyKey: randomUUID(), token, flags }),
-      "waiting for the server to import GitHub issues",
-      { stream: stderr },
-    );
+    outcome = await runImport(client, project, owner, repo, {
+      idempotencyKey: randomUUID(),
+      token,
+      flags,
+      onProgress: reporter,
+      onWait: (thunk) =>
+        runWithProgress(thunk, "waiting for the server to import GitHub issues", {
+          stream: stderr,
+        }),
+    });
   } catch (err) {
+    reporter.close(); // close the live line before any error text
     if (err instanceof EATTimeout) {
       stderr.write(`error: ${err.message}\n`);
       stderr.write(
         "The server may still be finishing the import — check the board in a " +
-          "moment, or re-run. (v2 will stream progress for long imports.)\n",
+          "moment, or re-run.\n",
       );
       return 1;
     }
@@ -481,6 +500,8 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
       return 1;
     }
     throw err;
+  } finally {
+    reporter.close();
   }
 
   return reportImport(outcome, { stdout, stderr, project, appBase: config.appBase });
