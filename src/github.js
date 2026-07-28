@@ -8,7 +8,11 @@
  * global `fetch` only.
  */
 
+import { scrubControl } from "./progress.js";
+
 export const GITHUB_API_BASE = "https://api.github.com";
+
+const UNEXPECTED_PAYLOAD = "GitHub returned an unexpected payload (expected a JSON array)";
 
 /** Base class for GitHub fetcher errors (kept distinct from the EAT errors). */
 export class GitHubError extends Error {}
@@ -30,7 +34,9 @@ export class GitHubAuthError extends GitHubError {}
  */
 function nextLink(link) {
   if (!link) return null;
-  for (const part of link.split(",")) {
+  // RFC 8288 link targets may carry commas inside <…>; only a comma that
+  // precedes the next `<` actually separates two link-values.
+  for (const part of link.split(/,\s*(?=<)/)) {
     const match = part.match(/<([^>]+)>\s*;\s*rel="next"/);
     if (match) return match[1];
   }
@@ -63,6 +69,25 @@ export class GitHubClient {
   }
 
   /**
+   * Map a transport-level rejection to the right GitHubError.
+   *
+   * Shared by the request and the body-read phases — the abort clock stays armed
+   * while the body streams, so both can fail the same way and must say the same thing.
+   *
+   * @param {unknown} err
+   * @returns {GitHubError}
+   */
+  #transportError(err) {
+    const e = /** @type {{ name?: string, message?: string, cause?: { message?: string } }} */ (
+      err
+    );
+    if (e?.name === "TimeoutError" || e?.name === "AbortError") {
+      return new GitHubError(`GitHub request timed out after ${Math.round(this.timeout)}s`);
+    }
+    return new GitHubError(`could not reach GitHub: ${e?.cause?.message ?? e?.message ?? err}`);
+  }
+
+  /**
    * GET one absolute URL, mapping GitHub's error statuses to the error hierarchy.
    *
    * @param {string} url
@@ -76,13 +101,7 @@ export class GitHubClient {
         signal: AbortSignal.timeout(this.timeout * 1000),
       });
     } catch (err) {
-      const e = /** @type {{ name?: string, message?: string, cause?: { message?: string } }} */ (
-        err
-      );
-      if (e?.name === "TimeoutError" || e?.name === "AbortError") {
-        throw new GitHubError(`GitHub request timed out after ${Math.round(this.timeout)}s`);
-      }
-      throw new GitHubError(`could not reach GitHub: ${e?.cause?.message ?? e?.message ?? err}`);
+      throw this.#transportError(err);
     }
 
     if (response.status === 404) {
@@ -115,8 +134,10 @@ export class GitHubClient {
       throw new GitHubAuthError("GitHub token rejected (401) — check --token / GITHUB_TOKEN");
     }
     if (response.status >= 400) {
-      const text = await response.text();
-      throw new GitHubError(`GitHub request failed (${response.status}): ${text.slice(0, 200)}`);
+      // An unreadable or hostile error body must not upgrade a clean HTTP error
+      // into a crash, nor reach the terminal with control characters intact.
+      const text = await response.text().catch(() => "");
+      throw new GitHubError(`GitHub request failed (${response.status}): ${scrubControl(text)}`);
     }
     return response;
   }
@@ -133,9 +154,18 @@ export class GitHubClient {
     let url = `${this.apiBase}/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}${path}`;
     while (url) {
       const response = await this.#get(url);
-      const page = await response.json();
+      /** @type {unknown} */
+      let page;
+      try {
+        page = await response.json();
+      } catch (err) {
+        // Only a parse failure is a payload problem: a timeout or reset lands here
+        // too, and must keep the transport wording its --token/network hints carry.
+        if (!(err instanceof SyntaxError)) throw this.#transportError(err);
+        throw new GitHubError(UNEXPECTED_PAYLOAD, { cause: err });
+      }
       if (!Array.isArray(page)) {
-        throw new GitHubError(`GitHub returned an unexpected payload (expected a JSON array)`);
+        throw new GitHubError(UNEXPECTED_PAYLOAD);
       }
       out.push(...page);
       const next = nextLink(response.headers.get("link"));

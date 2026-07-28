@@ -40,3 +40,20 @@ for (const extra of ["prs", "milestones", "releases"]) {
     );
   });
 }
+
+// The CLI prefixes this message with whichever flag the member typed, so the
+// body must not name a flag of its own.
+test("assertDirectSupportsIncludes names the engine, not a flag", () => {
+  assert.throws(
+    () => assertDirectSupportsIncludes(["issues", "prs"]),
+    (err) => {
+      assert.ok(err instanceof Error);
+      assert.equal(
+        err.message,
+        "the direct engine imports issues only (V3); prs not supported by the direct engine yet",
+      );
+      assert.ok(!err.message.includes("--"), `message names a flag: ${err.message}`);
+      return true;
+    },
+  );
+});

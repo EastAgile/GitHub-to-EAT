@@ -201,11 +201,21 @@ with the customization flags below. Both produce the same `Customization`
 object and are direct-only by construction — the server engine maps everything
 server-side, so there is nothing to customize there.
 
-`--customize` implies `--engine direct` (the legend header names the engine);
-an explicit `--engine server --customize` exits 2 naming the conflict. It also
+Either front-end implies `--engine direct` (the legend header names the
+engine); an explicit `--engine server` alongside `--customize` or any
+customization flag exits 2 naming the conflict. `--customize` additionally
 needs an interactive terminal — the wizard prompts on the TTY — so non-TTY
-stdin or stdout exits 2. The declarative flags are the non-TTY path: they imply
-the same engine and need no terminal at all.
+stdin or stdout exits 2; that terminal check runs before the `--include` check
+below, so a piped `--customize` reports the terminal error even when
+`--include` is also unsupported. The declarative flags are the non-TTY path:
+they imply the same engine and need no terminal at all.
+
+The implied engine inherits the direct engine's v3 limits, so an `--include`
+type the direct engine cannot do yet also exits 2. The message itself names no
+flag, so the attribution prefix is the only flag a member is pointed at, and it
+names whichever flag selected the engine: `--engine` when `--engine direct` was
+passed explicitly, else `--customize`, else the customization flag that implied
+it, else `--include` when the engine came from the default.
 
 A `Customization` object, defined next to the mapping profile in
 `src/mapping.js`, threads through the direct pipeline and is applied by

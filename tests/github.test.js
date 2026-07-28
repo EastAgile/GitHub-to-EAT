@@ -140,6 +140,89 @@ test("pagination picks rel=next out of a multi-rel Link header", async () => {
   );
 });
 
+test("pagination follows a rel=next URL whose query string contains a comma", async () => {
+  /** @type {(string | null)[]} */
+  const seenFields = [];
+  await withGitHub(
+    (req, res) => {
+      const url = new URL(req.url ?? "", "http://x");
+      seenFields.push(url.searchParams.get("fields"));
+      const here = `${url.protocol}//${req.headers.host}${url.pathname}`;
+      if (url.searchParams.get("page") === null) {
+        // The shape GitHub emits once a comma-bearing param paginates: every
+        // target carries the comma, so a bare-comma split shreds all of them.
+        json(res, 200, [{ number: 1 }], {
+          Link: `<${here}?fields=a,b&page=1>; rel="prev", <${here}?fields=a,b&page=2>; rel="next", <${here}?fields=a,b&page=9>; rel="last"`,
+        });
+      } else {
+        json(res, 200, [{ number: 2 }]);
+      }
+    },
+    async (base) => {
+      const issues = await new GitHubClient("o", "r", { apiBase: base }).listIssues();
+      assert.deepEqual(
+        issues.map((i) => i.number),
+        [1, 2],
+      );
+    },
+  );
+  assert.deepEqual(seenFields, [null, "a,b"]);
+});
+
+test("pagination is unaffected by a comma inside a non-next target", async () => {
+  let requests = 0;
+  await withGitHub(
+    (req, res) => {
+      requests += 1;
+      const url = new URL(req.url ?? "", "http://x");
+      const here = `${url.protocol}//${req.headers.host}${url.pathname}`;
+      if (url.searchParams.get("page") === null) {
+        json(res, 200, [{ number: 1 }], {
+          Link: `<${here}?fields=a,b&page=1>; rel="prev", <${here}?page=2>; rel="next"`,
+        });
+      } else {
+        json(res, 200, [{ number: 2 }]);
+      }
+    },
+    async (base) => {
+      const issues = await new GitHubClient("o", "r", { apiBase: base }).listIssues();
+      assert.deepEqual(
+        issues.map((i) => i.number),
+        [1, 2],
+      );
+    },
+  );
+  assert.equal(requests, 2);
+});
+
+test("a Link header without a rel=next ends pagination", async () => {
+  let requests = 0;
+  await withGitHub(
+    (req, res) => {
+      requests += 1;
+      const url = new URL(req.url ?? "", "http://x");
+      const here = `${url.protocol}//${req.headers.host}${url.pathname}`;
+      // Bounded on purpose: #paginate has no cycle guard, so an unbounded
+      // self-referential header would hang the run instead of failing it.
+      if (requests > 1) {
+        json(res, 200, []);
+        return;
+      }
+      json(res, 200, [{ number: 1 }], {
+        Link: `<${here}?page=1>; rel="prev", <${here}?page=1>; rel="first"`,
+      });
+    },
+    async (base) => {
+      const issues = await new GitHubClient("o", "r", { apiBase: base }).listIssues();
+      assert.deepEqual(
+        issues.map((i) => i.number),
+        [1],
+      );
+    },
+  );
+  assert.equal(requests, 1);
+});
+
 test("a request that outlives the timeout maps to GitHubError naming the timeout", async () => {
   await withGitHub(
     () => {
@@ -196,6 +279,99 @@ test("a non-array 200 body throws GitHubError instead of reading as an empty pag
       await assert.rejects(new GitHubClient("o", "r", { apiBase: base }).listIssues(), (err) => {
         assert.ok(err instanceof GitHubError);
         assert.match(err.message, /expected a JSON array/);
+        return true;
+      });
+    },
+  );
+});
+
+test("a 200 body that is not JSON at all throws GitHubError, not a raw SyntaxError", async () => {
+  await withGitHub(
+    (_req, res) => {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end("<html><body>Corporate proxy: request blocked</body></html>");
+    },
+    async (base) => {
+      await assert.rejects(new GitHubClient("o", "r", { apiBase: base }).listIssues(), (err) => {
+        assert.ok(err instanceof GitHubError);
+        assert.ok(!(err instanceof SyntaxError));
+        assert.match(err.message, /expected a JSON array/);
+        return true;
+      });
+    },
+  );
+});
+
+test("a body that stalls past the timeout reports the timeout, not an unexpected payload", async () => {
+  await withGitHub(
+    (_req, res) => {
+      // Headers land, then the body never arrives: the abort clock fires mid-stream.
+      res.writeHead(200, { "Content-Type": "application/json", "Content-Length": "64" });
+      res.write("[{");
+    },
+    async (base) => {
+      await assert.rejects(
+        new GitHubClient("o", "r", { apiBase: base, timeout: 0.05 }).listIssues(),
+        (err) => {
+          assert.ok(err instanceof GitHubError);
+          assert.match(err.message, /timed out/);
+          assert.doesNotMatch(err.message, /unexpected payload/);
+          return true;
+        },
+      );
+    },
+  );
+});
+
+test("a socket reset mid-body reports a reachability failure, not an unexpected payload", async () => {
+  await withGitHub(
+    (_req, res) => {
+      // Headers first (fetch resolves on them), then kill the socket while the
+      // body is still streaming — otherwise the request phase catches it.
+      res.writeHead(200, { "Content-Type": "application/json", "Content-Length": "64" });
+      res.write("[{");
+      setTimeout(() => res.socket?.destroy(), 50);
+    },
+    async (base) => {
+      await assert.rejects(new GitHubClient("o", "r", { apiBase: base }).listIssues(), (err) => {
+        assert.ok(err instanceof GitHubError);
+        assert.match(err.message, /could not reach GitHub/);
+        assert.doesNotMatch(err.message, /unexpected payload/);
+        return true;
+      });
+    },
+  );
+});
+
+test("a >=400 body cut off mid-read still surfaces the status as GitHubError", async () => {
+  await withGitHub(
+    (_req, res) => {
+      res.writeHead(500, { "Content-Type": "text/plain", "Content-Length": "64" });
+      res.write("boom");
+      setTimeout(() => res.socket?.destroy(), 50);
+    },
+    async (base) => {
+      await assert.rejects(new GitHubClient("o", "r", { apiBase: base }).listIssues(), (err) => {
+        assert.ok(err instanceof GitHubError);
+        assert.match(err.message, /\(500\)/);
+        return true;
+      });
+    },
+  );
+});
+
+test("terminal escapes in a >=400 body are stripped before the message reaches the user", async () => {
+  await withGitHub(
+    (_req, res) => {
+      res.writeHead(502, { "Content-Type": "text/html" });
+      res.end("\x1b[2J\x1b[Hbad gateway\r\n\x1b]0;pwned\x07");
+    },
+    async (base) => {
+      await assert.rejects(new GitHubClient("o", "r", { apiBase: base }).listIssues(), (err) => {
+        assert.ok(err instanceof GitHubError);
+        assert.match(err.message, /\(502\)/);
+        assert.match(err.message, /bad gateway/);
+        assert.doesNotMatch(err.message, /\p{Cc}/u);
         return true;
       });
     },

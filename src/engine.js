@@ -40,7 +40,8 @@ export function parseEngine(value) {
  * Reject an `--include` selection the direct engine can't do yet.
  *
  * The server engine handles every type; the direct engine is issues-only until
- * V4. Throws an `Error` naming the unsupported types.
+ * V4. Throws an `Error` naming the unsupported types. The message names no flag:
+ * its caller prefixes whichever flag the member typed to select the engine.
  *
  * @param {string[]} included types from {@link import("./mappings.js").parseInclude}
  */
@@ -48,7 +49,7 @@ export function assertDirectSupportsIncludes(included) {
   const unsupported = included.filter((type) => !DIRECT_SUPPORTED_INCLUDES.includes(type));
   if (unsupported.length) {
     throw new Error(
-      `--engine direct imports issues only (V3); ` +
+      `the direct engine imports issues only (V3); ` +
         `${unsupported.join(", ")} not supported by the direct engine yet`,
     );
   }
