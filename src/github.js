@@ -133,7 +133,15 @@ export class GitHubClient {
     let url = `${this.apiBase}/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}${path}`;
     while (url) {
       const response = await this.#get(url);
-      const page = await response.json();
+      /** @type {unknown} */
+      let page;
+      try {
+        page = await response.json();
+      } catch {
+        // A 200 that isn't JSON at all (proxy error page, captive portal) —
+        // same contract violation as a non-array body, so same error.
+        throw new GitHubError(`GitHub returned an unexpected payload (expected a JSON array)`);
+      }
       if (!Array.isArray(page)) {
         throw new GitHubError(`GitHub returned an unexpected payload (expected a JSON array)`);
       }

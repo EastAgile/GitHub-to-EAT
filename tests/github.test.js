@@ -202,6 +202,23 @@ test("a non-array 200 body throws GitHubError instead of reading as an empty pag
   );
 });
 
+test("a 200 body that is not JSON at all throws GitHubError, not a raw SyntaxError", async () => {
+  await withGitHub(
+    (_req, res) => {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end("<html><body>Corporate proxy: request blocked</body></html>");
+    },
+    async (base) => {
+      await assert.rejects(new GitHubClient("o", "r", { apiBase: base }).listIssues(), (err) => {
+        assert.ok(err instanceof GitHubError);
+        assert.ok(!(err instanceof SyntaxError));
+        assert.match(err.message, /expected a JSON array/);
+        return true;
+      });
+    },
+  );
+});
+
 test("listComments hits the repo-wide issue comments endpoint", async () => {
   /** @type {string | undefined} */
   let path;
