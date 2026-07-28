@@ -21,6 +21,16 @@ function scriptedStdin(lines) {
   return Object.assign(Readable.from(lines.map((l) => `${l}\n`)), { isTTY: true });
 }
 
+/**
+ * The `github-to-eat: error: …` line of a captured stderr buffer, isolated from
+ * the USAGE synopsis above it (which legitimately names every flag).
+ *
+ * @param {string} buf
+ */
+function errorLine(buf) {
+  return buf.split("\n").find((line) => line.startsWith("github-to-eat: error:")) ?? "";
+}
+
 /** @param {Partial<import("../src/preflight.js").PreflightResult>} [overrides] */
 function preflightResult(overrides = {}) {
   return { projectId: 91, projectTitle: "Demo", nonEmpty: false, ...overrides };
@@ -367,6 +377,8 @@ test("--engine direct with a non-issue type is a usage error", async () => {
   );
   assert.equal(code, 2);
   assert.ok(err.buf.includes("not supported by the direct engine yet"));
+  assert.ok(err.buf.includes("argument --engine:"));
+  assert.ok(!err.buf.includes("argument --customize:"));
 });
 
 test("--engine direct with --dry-run renders the same plan block as the server path", async () => {
@@ -546,6 +558,73 @@ test("--customize with non-TTY stdout is a usage error", async () => {
   });
   assert.equal(code, 2);
   assert.ok(err.buf.includes("interactive terminal"));
+});
+
+test("--customize with an unsupported --include blames --customize, not --engine", async () => {
+  const err = capture();
+  const code = await main(
+    ["--project", "91", "--repo", "o/r", "--customize", "--include", "issues,prs"],
+    { stdout: ttyCapture(), stderr: err, stdin: { isTTY: true } },
+  );
+  assert.equal(code, 2);
+  assert.ok(err.buf.includes("argument --customize:"));
+  assert.ok(err.buf.includes("not supported by the direct engine yet"));
+  assert.ok(!errorLine(err.buf).includes("--engine"), errorLine(err.buf));
+});
+
+test("--engine direct --customize with an unsupported --include blames the explicit --engine", async () => {
+  const err = capture();
+  const code = await main(
+    [
+      "--project",
+      "91",
+      "--repo",
+      "o/r",
+      "--engine",
+      "direct",
+      "--customize",
+      "--include",
+      "issues,prs",
+    ],
+    { stdout: ttyCapture(), stderr: err, stdin: { isTTY: true } },
+  );
+  assert.equal(code, 2);
+  assert.ok(err.buf.includes("argument --engine:"));
+  assert.ok(!err.buf.includes("argument --customize:"));
+  assert.ok(err.buf.includes("not supported by the direct engine yet"));
+});
+
+test("--engine server --customize conflict wins over an unsupported --include", async () => {
+  const err = capture();
+  const code = await main(
+    [
+      "--project",
+      "91",
+      "--repo",
+      "o/r",
+      "--engine",
+      "server",
+      "--customize",
+      "--include",
+      "issues,prs",
+    ],
+    { stdout: ttyCapture(), stderr: err, stdin: { isTTY: true } },
+  );
+  assert.equal(code, 2);
+  assert.ok(err.buf.includes("--customize"));
+  assert.ok(err.buf.includes("--engine server"));
+  assert.ok(!err.buf.includes("not supported by the direct engine yet"));
+});
+
+test("--customize TTY gate runs before the unsupported --include check", async () => {
+  const err = capture();
+  const code = await main(
+    ["--project", "91", "--repo", "o/r", "--customize", "--include", "issues,prs"],
+    { stdout: ttyCapture(), stderr: err, stdin: { isTTY: false } },
+  );
+  assert.equal(code, 2);
+  assert.ok(err.buf.includes("interactive terminal"));
+  assert.ok(!err.buf.includes("not supported by the direct engine yet"));
 });
 
 test("--customize implies the direct engine and names it in the legend", async () => {
