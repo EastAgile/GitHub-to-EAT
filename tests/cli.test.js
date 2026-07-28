@@ -366,6 +366,8 @@ test("--engine direct with a non-issue type is a usage error", async () => {
   );
   assert.equal(code, 2);
   assert.ok(err.buf.includes("not supported by the direct engine yet"));
+  assert.ok(err.buf.includes("argument --engine:"));
+  assert.ok(!err.buf.includes("argument --customize:"));
 });
 
 test("--engine direct with --dry-run renders the same plan block as the server path", async () => {
@@ -511,6 +513,39 @@ test("--customize with non-TTY stdout is a usage error", async () => {
   });
   assert.equal(code, 2);
   assert.ok(err.buf.includes("interactive terminal"));
+});
+
+test("--customize with an unsupported --include blames --customize, not --engine", async () => {
+  const err = capture();
+  const code = await main(
+    ["--project", "91", "--repo", "o/r", "--customize", "--include", "issues,prs"],
+    { stdout: ttyCapture(), stderr: err, stdin: { isTTY: true } },
+  );
+  assert.equal(code, 2);
+  assert.ok(err.buf.includes("argument --customize:"));
+  assert.ok(!err.buf.includes("argument --engine:"));
+  assert.ok(err.buf.includes("not supported by the direct engine yet"));
+});
+
+test("--engine direct --customize with an unsupported --include blames the explicit --engine", async () => {
+  const err = capture();
+  const code = await main(
+    [
+      "--project",
+      "91",
+      "--repo",
+      "o/r",
+      "--engine",
+      "direct",
+      "--customize",
+      "--include",
+      "issues,prs",
+    ],
+    { stdout: ttyCapture(), stderr: err, stdin: { isTTY: true } },
+  );
+  assert.equal(code, 2);
+  assert.ok(err.buf.includes("argument --engine:"));
+  assert.ok(err.buf.includes("not supported by the direct engine yet"));
 });
 
 test("--customize implies the direct engine and names it in the legend", async () => {

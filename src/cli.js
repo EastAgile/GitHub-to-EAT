@@ -287,7 +287,10 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
   try {
     if (engine === "direct") assertDirectSupportsIncludes(included);
   } catch (err) {
-    return usageError(`argument --engine: ${err instanceof Error ? err.message : err}`);
+    // Blame the flag the member actually typed: --customize forces the direct
+    // engine, so without an explicit --engine it is the one to change.
+    const flag = values.engine ? "--engine" : "--customize";
+    return usageError(`argument ${flag}: ${err instanceof Error ? err.message : err}`);
   }
 
   let config;

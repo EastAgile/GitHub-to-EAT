@@ -201,7 +201,10 @@ nothing to customize there. The flag implies `--engine direct` (the legend
 header names the engine); an explicit `--engine server --customize` exits 2
 naming the conflict. It also needs an interactive terminal — the wizard that
 will fill in the questions prompts on the TTY — so non-TTY stdin or stdout
-exits 2.
+exits 2. The implied engine inherits the direct engine's v3 limits, so an
+`--include` type the direct engine cannot do yet also exits 2 — attributed to
+`--customize` when it implied the engine, and to `--engine` when that flag was
+passed explicitly.
 
 A `Customization` object, defined next to the mapping profile in
 `src/mapping.js`, threads through the direct pipeline and is applied by
