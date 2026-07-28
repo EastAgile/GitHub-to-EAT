@@ -6,6 +6,8 @@ import {
   markerExternalId,
   markerFor,
   prescanImported,
+  prescanProvenance,
+  unionImported,
   withMarker,
 } from "../src/dedup.js";
 
@@ -84,6 +86,47 @@ test("prescanImported walks every cursor page and keeps the matched rows", () =>
     assert.equal(calls[0].limit, 1);
     assert.equal(calls[1].cursor, "1");
   });
+});
+
+test("prescanProvenance filters by import_source and keys off import_external_id", () => {
+  /** @type {any[]} */
+  const calls = [];
+  const client = {
+    /** @param {number} projectId @param {any} opts */
+    async listStoryPage(projectId, opts) {
+      calls.push({ projectId, ...opts });
+      if (!opts.cursor) {
+        return {
+          items: [
+            { story_id: 1, import_external_id: "3", tasks_count: 2, comment_count: 0 },
+            { story_id: 2, import_external_id: null, tasks_count: 0, comment_count: 0 },
+          ],
+          next_cursor: "1",
+        };
+      }
+      return { items: [{ story_id: 3, import_external_id: "7" }], next_cursor: null };
+    },
+  };
+  return prescanProvenance(client, 91, "github", { pageSize: 1 }).then((imported) => {
+    // Rows without an external id are skipped.
+    assert.deepEqual([...imported.keys()].sort(), ["3", "7"]);
+    assert.equal(imported.get("3").tasks_count, 2);
+    assert.equal(calls[0].importSource, "github");
+    assert.equal(calls[0].fields, "story_id,import_external_id,tasks_count,comment_count");
+    assert.equal(calls[1].cursor, "1");
+  });
+});
+
+test("unionImported merges maps, first key wins", () => {
+  const a = new Map([["3", { from: "marker" }]]);
+  const b = new Map([
+    ["3", { from: "provenance" }],
+    ["7", { from: "provenance" }],
+  ]);
+  const merged = unionImported(a, b);
+  assert.deepEqual([...merged.keys()].sort(), ["3", "7"]);
+  assert.equal(merged.get("3").from, "marker");
+  assert.equal(merged.get("7").from, "provenance");
 });
 
 test("applyDedup skips imported stories, stamps markers, and prunes their labels", () => {

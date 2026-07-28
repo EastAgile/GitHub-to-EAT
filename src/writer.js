@@ -80,9 +80,11 @@ async function withRetry(fn, attempts, delayMs) {
  * @param {number} projectId
  * @param {WritePlan} plan
  * @param {{ runId?: string, stream?: import("./progress.js").OutStream,
- *   retryAttempts?: number, retryDelayMs?: number, sendDates?: boolean }} [options]
+ *   retryAttempts?: number, retryDelayMs?: number, sendProvenance?: boolean,
+ *   sendDates?: boolean }} [options]
  *   `runId` scopes the idempotency keys (fresh per run, stable across in-run
- *   retries); `sendDates` adds backdated `created_at`/`completed_at` to the
+ *   retries); `sendProvenance` adds the re-import pair (EAT #31427) to every
+ *   story create; `sendDates` adds backdated `created_at`/`completed_at` to the
  *   writes (server owner-gated) — off keeps the payloads byte-identical to v3
  * @returns {Promise<WriteResult>}
  */
@@ -92,6 +94,7 @@ export async function writePlan(client, projectId, plan, options = {}) {
     stream,
     retryAttempts = 3,
     retryDelayMs = 250,
+    sendProvenance = false,
     sendDates = false,
   } = options;
   /** @template T @param {() => Promise<T>} fn */
@@ -131,6 +134,8 @@ export async function writePlan(client, projectId, plan, options = {}) {
     await runWithProgress(
       async () => {
         for (const op of ordered) {
+          // Built from one object so no path can emit half the pair (EAT #31427
+          // owner-gates it and 400s a lone field).
           /** @type {Record<string, unknown>} */
           const body = {
             name: op.name,
@@ -138,6 +143,9 @@ export async function writePlan(client, projectId, plan, options = {}) {
             story_type: op.story_type,
             current_state: op.current_state,
             labels: op.labels,
+            ...(sendProvenance
+              ? { import_source: "github", import_external_id: op.external_id }
+              : {}),
           };
           if (sendDates) {
             body.created_at = op.created_at;
