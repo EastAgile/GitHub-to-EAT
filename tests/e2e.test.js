@@ -32,7 +32,7 @@ test("import against a real EAT", {
   const out = capture();
 
   const started = performance.now();
-  const code = await main(["--project", project, "--repo", repo], {
+  const code = await main(["--project", project, "--repo", repo, "-y"], {
     stdout: out,
     stderr: capture(),
   });

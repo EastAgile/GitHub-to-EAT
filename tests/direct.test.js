@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { AuthError, EATClient } from "../src/client.js";
 import { markerFor } from "../src/dedup.js";
 import { runDirect } from "../src/direct.js";
+import { DEFAULT_CUSTOMIZATION } from "../src/mapping.js";
 import { makeState, startMockServer } from "../src/mockserver.js";
 import { capture } from "./helpers.js";
 
@@ -436,6 +437,96 @@ test("against an older (non-backdating) server, the dated prefix is preserved an
     assert.ok(!("completed_at" in closed));
     assert.equal(closed.comments[0].comment_text, "@alice on 2020-01-05:\n\nconfirmed");
     assert.ok(!("created_at" in closed.comments[0]));
+  } finally {
+    await mock.close();
+  }
+});
+
+// --- milestone allowlist: a title nobody carries must not import silently ----
+
+/** @param {Partial<import("../src/mapping.js").Customization>} overrides */
+function customization(overrides) {
+  return { ...DEFAULT_CUSTOMIZATION, ...overrides };
+}
+
+/** fetchAll-shaped stub whose two issues carry milestones "v1.0" and "v2.0". */
+function milestonedRepo() {
+  return {
+    issues: [
+      {
+        number: 7,
+        title: "one",
+        body: "",
+        state: "open",
+        labels: [],
+        milestone: { title: "v1.0" },
+      },
+      {
+        number: 8,
+        title: "two",
+        body: "",
+        state: "open",
+        labels: [],
+        milestone: { title: "v2.0" },
+      },
+    ],
+    comments: [],
+    labels: [],
+  };
+}
+
+test("a milestone title matching no fetched issue imports nothing and warns", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const stream = capture();
+    const outcome = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream,
+      customization: customization({ milestones: ["v9.9"] }),
+      github: { fetchAll: async () => milestonedRepo() },
+    });
+    assert.equal(outcome.importedStories, 0);
+    assert.equal((mock.state.stories[91] ?? []).length, 0);
+    assert.match(stream.buf, /warning:.*v9\.9/);
+    assert.match(stream.buf, /milestone/);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("the milestone warning names only the unmatched titles, and imports the matched ones", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const stream = capture();
+    const outcome = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream,
+      customization: customization({ milestones: ["v1.0", "typo"] }),
+      github: { fetchAll: async () => milestonedRepo() },
+    });
+    assert.equal(outcome.importedStories, 1);
+    assert.equal(mock.state.stories[91][0].title, "one");
+    assert.match(stream.buf, /warning:.*typo/);
+    assert.ok(!/warning:.*v1\.0/.test(stream.buf));
+  } finally {
+    await mock.close();
+  }
+});
+
+test("every milestone title matching keeps the run silent", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const stream = capture();
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream,
+      customization: customization({ milestones: ["v1.0", "v2.0"] }),
+      github: { fetchAll: async () => milestonedRepo() },
+    });
+    assert.ok(!stream.buf.includes("milestone"));
   } finally {
     await mock.close();
   }

@@ -193,7 +193,7 @@ test("full import against the mock", async () => {
           GITHUB_TOKEN: undefined,
         },
         async () => {
-          const code = await main(["--project", "91", "--repo", "octocat/hello-world"], {
+          const code = await main(["--project", "91", "--repo", "octocat/hello-world", "-y"], {
             stdout: out,
             stderr: capture(),
           });
@@ -223,7 +223,7 @@ test("import errors exit one", async () => {
   try {
     await inTempDir(() =>
       withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
-        const code = await main(["--project", "91", "--repo", "o/r"], {
+        const code = await main(["--project", "91", "--repo", "o/r", "-y"], {
           stdout: capture(),
           stderr: err,
         });
@@ -265,10 +265,13 @@ test("--token flag flows to the import", async () => {
       withEnv(
         { EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl, GITHUB_TOKEN: undefined },
         async () => {
-          const code = await main(["--project", "91", "--repo", "o/r", "--token", "ghp_flag"], {
-            stdout: capture(),
-            stderr: capture(),
-          });
+          const code = await main(
+            ["--project", "91", "--repo", "o/r", "--token", "ghp_flag", "-y"],
+            {
+              stdout: capture(),
+              stderr: capture(),
+            },
+          );
           assert.equal(code, 0);
         },
       ),
@@ -286,7 +289,7 @@ test("GITHUB_TOKEN env flows to the import", async () => {
       withEnv(
         { EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl, GITHUB_TOKEN: "ghp_env" },
         async () => {
-          const code = await main(["--project", "91", "--repo", "o/r"], {
+          const code = await main(["--project", "91", "--repo", "o/r", "-y"], {
             stdout: capture(),
             stderr: capture(),
           });
@@ -312,7 +315,7 @@ test("unmatched users are reported", async () => {
   try {
     await inTempDir(() =>
       withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
-        const code = await main(["--project", "91", "--repo", "o/r"], {
+        const code = await main(["--project", "91", "--repo", "o/r", "-y"], {
           stdout: out,
           stderr: capture(),
         });
@@ -341,7 +344,7 @@ test("placeholder owners created by the import are reported", async () => {
   try {
     await inTempDir(() =>
       withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
-        const code = await main(["--project", "91", "--repo", "o/r"], {
+        const code = await main(["--project", "91", "--repo", "o/r", "-y"], {
           stdout: out,
           stderr: capture(),
         });
@@ -376,7 +379,7 @@ for (const [label, result] of [
     try {
       await inTempDir(() =>
         withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
-          const code = await main(["--project", "91", "--repo", "o/r"], {
+          const code = await main(["--project", "91", "--repo", "o/r", "-y"], {
             stdout: out,
             stderr: capture(),
           });
@@ -407,7 +410,7 @@ test("mock computed mode reports placeholder owners end-to-end", async () => {
   try {
     await inTempDir(() =>
       withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
-        const code = await main(["--project", "91", "--repo", "o/r"], {
+        const code = await main(["--project", "91", "--repo", "o/r", "-y"], {
           stdout: out,
           stderr: capture(),
         });
@@ -426,10 +429,13 @@ test("--include issues,prs sends include_pull_requests and counts PR stories", a
   try {
     await inTempDir(() =>
       withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
-        const code = await main(["--project", "91", "--repo", "o/r", "--include", "issues,prs"], {
-          stdout: out,
-          stderr: capture(),
-        });
+        const code = await main(
+          ["--project", "91", "--repo", "o/r", "--include", "issues,prs", "-y"],
+          {
+            stdout: out,
+            stderr: capture(),
+          },
+        );
         assert.equal(code, 0);
       }),
     );
@@ -446,7 +452,7 @@ test("default import sends no include flags and imports issues only", async () =
   try {
     await inTempDir(() =>
       withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
-        const code = await main(["--project", "91", "--repo", "o/r"], {
+        const code = await main(["--project", "91", "--repo", "o/r", "-y"], {
           stdout: out,
           stderr: capture(),
         });
@@ -487,7 +493,7 @@ test("--include issues,milestones,releases sends both flags; releases add storie
     await inTempDir(() =>
       withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
         const code = await main(
-          ["--project", "91", "--repo", "o/r", "--include", "issues,milestones,releases"],
+          ["--project", "91", "--repo", "o/r", "--include", "issues,milestones,releases", "-y"],
           { stdout: out, stderr: capture() },
         );
         assert.equal(code, 0);
@@ -531,14 +537,17 @@ test("skipped rows are reported as already imported", async () => {
     await inTempDir(() =>
       withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
         assert.equal(
-          await main(["--project", "91", "--repo", "o/r"], {
+          await main(["--project", "91", "--repo", "o/r", "-y"], {
             stdout: capture(),
             stderr: capture(),
           }),
           0,
         );
         assert.equal(
-          await main(["--project", "91", "--repo", "o/r"], { stdout: out, stderr: capture() }),
+          await main(["--project", "91", "--repo", "o/r", "-y"], {
+            stdout: out,
+            stderr: capture(),
+          }),
           0,
         );
       }),
@@ -556,7 +565,10 @@ test("a first import does not carry the already-imported note", async () => {
     await inTempDir(() =>
       withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
         assert.equal(
-          await main(["--project", "91", "--repo", "o/r"], { stdout: out, stderr: capture() }),
+          await main(["--project", "91", "--repo", "o/r", "-y"], {
+            stdout: out,
+            stderr: capture(),
+          }),
           0,
         );
       }),
@@ -670,7 +682,7 @@ test("--dry-run plan is dedup-aware after a real import", async () => {
     await inTempDir(() =>
       withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
         assert.equal(
-          await main(["--project", "91", "--repo", "o/r"], {
+          await main(["--project", "91", "--repo", "o/r", "-y"], {
             stdout: capture(),
             stderr: capture(),
           }),
@@ -910,7 +922,7 @@ test("async import end-to-end via main reports counts and emits progress", async
       withEnv(
         { EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl, GITHUB_TOKEN: undefined },
         async () => {
-          const code = await main(["--project", "91", "--repo", "o/r"], {
+          const code = await main(["--project", "91", "--repo", "o/r", "-y"], {
             stdout: out,
             stderr: err,
             // Zero-delay poll so the mock's phase progression runs fast.
@@ -984,7 +996,7 @@ test("the synchronous 200 fallback still emits the waiting line on stderr", asyn
   try {
     await inTempDir(() =>
       withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
-        const code = await main(["--project", "91", "--repo", "o/r"], {
+        const code = await main(["--project", "91", "--repo", "o/r", "-y"], {
           stdout: capture(),
           stderr: err,
         });

@@ -79,6 +79,91 @@ export const DEFAULT_CUSTOMIZATION = {
   tasks: true,
 };
 
+/** @type {Customization["states"][]} */
+const STATES = ["all", "open", "closed"];
+
+/** @type {Customization["storyType"][]} */
+const STORY_TYPES = ["infer", "feature", "bug", "chore"];
+
+/** The CLI flags {@link parseCustomization} reads, in help/usage order. */
+const CUSTOMIZATION_FLAGS = ["states", "milestones", "story-type", "no-comments", "no-tasks"];
+
+/**
+ * Which customization flags a parsed argv actually carried, `--`-prefixed for
+ * error messages. Drives "implies --engine direct" and the conflict checks.
+ *
+ * @param {Record<string, unknown>} values `parseArgs` values
+ * @returns {string[]}
+ */
+export function customizationFlagsGiven(values) {
+  return CUSTOMIZATION_FLAGS.filter((flag) => values[flag] !== undefined).map(
+    (flag) => `--${flag}`,
+  );
+}
+
+/**
+ * @param {string} flag
+ * @param {string} value
+ * @param {readonly (string | undefined)[]} allowed
+ * @returns {never}
+ */
+function invalidValue(flag, value, allowed) {
+  throw new Error(
+    `argument ${flag}: invalid value '${value}'; valid values: ${allowed.join(", ")}`,
+  );
+}
+
+/**
+ * Build a {@link Customization} from the declarative flags — the non-interactive
+ * counterpart to the wizard, producing the same object. Omitted flags keep their
+ * {@link DEFAULT_CUSTOMIZATION} value, so no flags reproduce the default profile.
+ *
+ * Throws an `Error` naming the flag and its allowed values on a bad value.
+ *
+ * @param {Record<string, unknown>} values `parseArgs` values
+ * @returns {Customization}
+ */
+export function parseCustomization(values) {
+  const states = /** @type {string | undefined} */ (values.states);
+  if (states !== undefined && !STATES.includes(/** @type {any} */ (states))) {
+    invalidValue("--states", states, STATES);
+  }
+  const storyType = /** @type {string | undefined} */ (values["story-type"]);
+  if (storyType !== undefined && !STORY_TYPES.includes(/** @type {any} */ (storyType))) {
+    invalidValue("--story-type", storyType, STORY_TYPES);
+  }
+
+  const raw = /** @type {string | undefined} */ (values.milestones);
+  /** @type {string[] | null} */
+  let milestones = null;
+  if (raw !== undefined) {
+    milestones = [
+      ...new Set(
+        raw
+          .split(",")
+          .map((title) => title.trim())
+          .filter(Boolean),
+      ),
+    ];
+    if (!milestones.length) {
+      throw new Error(
+        "argument --milestones: needs at least one milestone title, " +
+          'e.g. --milestones "v1.0,v2.0"',
+      );
+    }
+  }
+
+  return {
+    states: /** @type {Customization["states"]} */ (states ?? DEFAULT_CUSTOMIZATION.states),
+    milestones,
+    storyType: /** @type {Customization["storyType"]} */ (
+      storyType ?? DEFAULT_CUSTOMIZATION.storyType
+    ),
+    comments: !values["no-comments"],
+    tasks: !values["no-tasks"],
+  };
+}
+
 /**
  * GitHub issues carry no native type, so infer one from the conventional labels + the title.
  * Bug is checked first: a row that matches both rules is a bug.

@@ -193,15 +193,19 @@ v3 adds a second import engine selectable with `--engine server|direct`
   already has are only discovered at write time (`409` → existing), so a real
   run may create fewer.
 
-### Per-run customization (`--customize`)
+### Per-run customization
 
-`--customize` opts a run into per-run import customization. It is direct-only
-by construction — the server engine maps everything server-side, so there is
-nothing to customize there. The flag implies `--engine direct` (the legend
-header names the engine); an explicit `--engine server --customize` exits 2
-naming the conflict. It also needs an interactive terminal — the wizard that
-will fill in the questions prompts on the TTY — so non-TTY stdin or stdout
-exits 2.
+A run can narrow or override the issue mapping for itself (nothing is
+persisted), either **interactively** with `--customize` or **declaratively**
+with the customization flags below. Both produce the same `Customization`
+object and are direct-only by construction — the server engine maps everything
+server-side, so there is nothing to customize there.
+
+`--customize` implies `--engine direct` (the legend header names the engine);
+an explicit `--engine server --customize` exits 2 naming the conflict. It also
+needs an interactive terminal — the wizard prompts on the TTY — so non-TTY
+stdin or stdout exits 2. The declarative flags are the non-TTY path: they imply
+the same engine and need no terminal at all.
 
 A `Customization` object, defined next to the mapping profile in
 `src/mapping.js`, threads through the direct pipeline and is applied by
@@ -263,6 +267,50 @@ shows the resulting legend before writing. `--customize --dry-run` runs the
 wizard and prints the plan for the filtered subset without writing (dry-run
 skips the confirm, as elsewhere). Declining the confirm — like EOF mid-wizard —
 writes nothing and exits 1.
+
+#### Declarative flags (no terminal required)
+
+Each flag sets one `Customization` field, so a flag-driven run reaches exactly
+the object the equivalent wizard answers would produce — the wizard is one
+front-end for it, these flags are the other. Any of them implies
+`--engine direct`; `--engine server` with one exits 2 naming the conflict.
+
+| Flag            | `Customization` field | Values / effect                                    | Default   |
+| --------------- | --------------------- | -------------------------------------------------- | --------- |
+| `--states`      | `states`              | `all` \| `open` \| `closed`                        | `all`     |
+| `--milestones`  | `milestones`          | comma-separated exact `milestone.title` allowlist  | all       |
+| `--story-type`  | `storyType`           | `infer` \| `feature` \| `bug` \| `chore`           | `infer`   |
+| `--no-comments` | `comments`            | sets it `false`                                    | imported  |
+| `--no-tasks`    | `tasks`               | sets it `false`                                    | converted |
+
+- An invalid `--states` / `--story-type` value exits 2 with a usage error naming
+  the flag and its allowed values; `--milestones` with no titles does the same.
+  Titles are trimmed and deduplicated, order preserved.
+- A `--milestones` title that no fetched issue carries would import nothing with
+  no explanation, so the run **warns** naming the unmatched titles (the match is
+  exact and case-sensitive).
+- The customized legend, including the `Customized:` block, renders for a
+  flag-driven run too — before the confirm, and under `--dry-run` — so the plan
+  is always visible. With no customization flag the legend is byte-identical to
+  the pre-customization output, on both engines.
+- Combining any customization flag with `--customize` exits 2 naming the
+  conflict: a caller either declares its answers or asks to be asked, not both.
+
+### Confirmation gate — fail closed off a terminal
+
+Applies to **every** run, both engines, not just customized ones.
+
+A run that would write asks for confirmation (`[y/N]`, default no) and honours
+`--yes`/`-y`. Off a terminal there is nowhere to show that prompt, so such a run
+**exits 2 with a usage error naming `--yes` and writes nothing** — it never
+proceeds on an assumed answer. `--dry-run` is exempt: it writes nothing, so it
+still runs unattended with no `--yes` and prints its plan.
+
+This replaces the earlier rule that non-interactive runs simply never prompted
+(which made `-y` a no-op for pipes and CI, and let an unattended run write with
+no gate at all). It is a **breaking change** for any piped or CI invocation that
+relied on the old silent-proceed behaviour: add `--yes`. EOF (Ctrl-D) at the
+prompt counts as "no" and aborts with exit 1.
 
 ### GitHub fetch stage
 

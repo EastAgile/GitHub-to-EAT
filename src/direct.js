@@ -11,7 +11,13 @@ import {
   unionImported,
 } from "./dedup.js";
 import { GitHubClient } from "./github.js";
-import { clampPlan, DEFAULT_CUSTOMIZATION, FALLBACK_LIMITS, mapRepo } from "./mapping.js";
+import {
+  clampPlan,
+  DEFAULT_CUSTOMIZATION,
+  FALLBACK_LIMITS,
+  mapRepo,
+  stripControls,
+} from "./mapping.js";
 import { runWithProgress } from "./progress.js";
 import { writePlan } from "./writer.js";
 
@@ -25,6 +31,28 @@ import { writePlan } from "./writer.js";
  *       supportsProvenanceDedup?: () => Promise<boolean>,
  *       supportsBackdating?: () => Promise<boolean> }} DirectClient
  */
+
+/**
+ * Warn about milestone titles no fetched issue carries — a typo in
+ * `--milestones` would otherwise import nothing with no explanation.
+ *
+ * @param {{ issues: any[] }} fetched
+ * @param {import("./mapping.js").Customization} customization
+ * @param {import("./progress.js").OutStream} [stream]
+ */
+function warnUnmatchedMilestones({ issues }, { milestones }, stream) {
+  if (!milestones?.length) return;
+  const present = new Set(
+    issues.filter((issue) => !issue.pull_request).map((issue) => issue.milestone?.title),
+  );
+  const unmatched = milestones.filter((title) => !present.has(title));
+  if (!unmatched.length) return;
+  stream?.write(
+    `warning: no fetched issue carries the milestone(s) ${unmatched.map(stripControls).join(", ")} — ` +
+      "the filter matches milestone titles exactly (case-sensitive); " +
+      "those titles contribute no stories.\n",
+  );
+}
 
 /**
  * Run the client-side import pipeline and return the same
@@ -61,6 +89,7 @@ export async function runDirect(client, projectId, owner, repo, options) {
   const customization = customize
     ? await customize(fetched)
     : (options.customization ?? DEFAULT_CUSTOMIZATION);
+  warnUnmatchedMilestones(fetched, customization, stream);
   // The customized legend + confirm reflect those answers, so they land here —
   // a declined confirm throws, aborting before any prescan or write.
   if (announce) await announce(fetched, customization);

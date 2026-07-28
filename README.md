@@ -95,9 +95,13 @@ github-to-eat --help
 ```
 
 Before importing, the CLI prints a **mapping legend** — exactly how each
-selected GitHub type lands in EAT — and, when run in a terminal, asks for
-confirmation (`[y/N]`). Pass `--yes`/`-y` to skip the prompt; non-interactive
-runs (pipes, CI) never prompt. `--dry-run` prints the same legend.
+selected GitHub type lands in EAT — and asks for confirmation (`[y/N]`,
+defaulting to no). Pass `--yes`/`-y` to skip the prompt.
+
+**Off a terminal (pipes, CI, agents) there is nowhere to show that prompt, so a
+run that would write must pass `--yes`.** Without it the CLI exits `2` with a
+usage error and writes nothing — it never guesses your answer. `--dry-run` is
+exempt: it writes nothing, so it needs no `--yes` and prints the same legend.
 
 `--include` chooses what gets imported (default: `issues`). Every selection
 must contain `issues` — the other types only add to an issue import:
@@ -109,6 +113,39 @@ must contain `issues` — the other types only add to an issue import:
 - `milestones` — GitHub milestones become epics.
 - `releases` — GitHub Releases become release-type stories (tag → title,
   notes → description, publish date kept).
+
+### Customizing an import
+
+By default every issue is imported with the standard mapping. To narrow or
+override that for a single run — nothing is persisted — pick one of two ways.
+Both are direct-engine only, and imply `--engine direct`:
+
+- **Interactively:** `--customize` asks the questions one at a time on your
+  terminal (it needs one, and refuses to run off a TTY).
+- **Declaratively:** the flags below need **no** terminal, so agents, scripts,
+  and CI can drive them:
+
+| Flag            | Values                                             | Default                        |
+| --------------- | -------------------------------------------------- | ------------------------------ |
+| `--states`      | `all`, `open`, `closed`                            | `all`                          |
+| `--milestones`  | comma-separated milestone titles, matched exactly  | every milestone                |
+| `--story-type`  | `infer`, `feature`, `bug`, `chore`                 | `infer` (from labels/title)    |
+| `--no-comments` | —                                                  | comments are imported          |
+| `--no-tasks`    | —                                                  | body checklists become tasks   |
+
+```bash
+github-to-eat --project 147 --repo octocat/hello-world \
+  --states open --milestones "v1.0,v1.1" --no-comments --yes
+```
+
+The choices are echoed in a `Customized:` block under the legend, so the plan is
+visible before anything is written — and under `--dry-run`, which writes nothing.
+A milestone title no fetched issue carries is called out with a warning rather
+than silently importing nothing.
+
+The two ways are mutually exclusive: combining a customization flag with
+`--customize` is a usage error, since a run either declares its answers or asks
+to be asked for them.
 
 `--dry-run` validates your key, the project, and connectivity (and warns if the
 project already has stories), then asks the server for a real, dedup-aware
@@ -127,7 +164,7 @@ needs `repo`, or fine-grained *Issues: Read*, on that repo).
 | ---- | ----------------------------------------------------------------- |
 | `0`  | Success                                                           |
 | `1`  | Runtime error (bad key, project not found, timeout) or the import reported per-item errors |
-| `2`  | Usage error (bad or missing arguments)                            |
+| `2`  | Usage error (bad or missing arguments, or a writing run off a terminal without `--yes`) |
 
 ## Troubleshooting
 

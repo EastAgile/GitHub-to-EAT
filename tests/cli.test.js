@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { test } from "node:test";
 
-import { main, parseRepo } from "../src/cli.js";
+import { defaultConfirm, main, parseRepo } from "../src/cli.js";
 import { AuthError } from "../src/client.js";
 import { runDirect as realRunDirect } from "../src/direct.js";
 import { GitHubError } from "../src/github.js";
@@ -76,7 +76,7 @@ test("missing key returns one", async () => {
   await inTempDir(() =>
     withEnv({ EAT_AGENT_KEY: undefined }, async () => {
       const err = capture();
-      const code = await main(["--project", "91", "--repo", "octocat/hello-world"], {
+      const code = await main(["--project", "91", "--repo", "octocat/hello-world", "-y"], {
         stdout: capture(),
         stderr: err,
       });
@@ -90,7 +90,7 @@ test("happy path: preflight then import", async () => {
   await inTempDir(() =>
     withEnv({ EAT_AGENT_KEY: "key" }, async () => {
       const out = capture();
-      const code = await main(["--project", "91", "--repo", "octocat/hello-world"], {
+      const code = await main(["--project", "91", "--repo", "octocat/hello-world", "-y"], {
         stdout: out,
         stderr: capture(),
         preflight: async () => preflightResult({ projectTitle: "Demo Board" }),
@@ -107,7 +107,7 @@ test("non-empty project warns", async () => {
   await inTempDir(() =>
     withEnv({ EAT_AGENT_KEY: "key" }, async () => {
       const err = capture();
-      const code = await main(["--project", "91", "--repo", "octocat/hello-world"], {
+      const code = await main(["--project", "91", "--repo", "octocat/hello-world", "-y"], {
         stdout: capture(),
         stderr: err,
         preflight: async () => preflightResult({ nonEmpty: true }),
@@ -123,7 +123,7 @@ test("preflight error returns one", async () => {
   await inTempDir(() =>
     withEnv({ EAT_AGENT_KEY: "key" }, async () => {
       const err = capture();
-      const code = await main(["--project", "91", "--repo", "octocat/hello-world"], {
+      const code = await main(["--project", "91", "--repo", "octocat/hello-world", "-y"], {
         stdout: capture(),
         stderr: err,
         preflight: async () => {
@@ -871,3 +871,361 @@ test("--customize --dry-run runs the wizard, prints the plan, and writes nothing
     await mock.close();
   }
 });
+
+// --- declarative customization flags (#32499) --------------------------------
+
+/** fetchAll-shaped stub: one open issue with a comment, one closed issue. */
+function flagFetched() {
+  return {
+    issues: [
+      { number: 7, title: "open one", body: "note\n\n- [ ] todo", state: "open", labels: [] },
+      {
+        number: 3,
+        title: "closed one",
+        body: "",
+        state: "closed",
+        closed_at: "2020-02-01T00:00:00Z",
+        labels: [],
+      },
+    ],
+    comments: [
+      {
+        issue_url: "https://api.github.com/repos/o/r/issues/7",
+        user: { login: "alice" },
+        created_at: "2020-01-05T00:00:00Z",
+        body: "confirmed",
+      },
+    ],
+    labels: [],
+  };
+}
+
+/**
+ * The legend block of a run's stdout, header through the append/dedup line.
+ *
+ * @param {string} stdout
+ */
+function legendBlock(stdout) {
+  const start = stdout.indexOf("Import mapping (GitHub");
+  const tail = "nothing is updated or deleted.\n";
+  const end = stdout.indexOf(tail, start);
+  return stdout.slice(start, end + tail.length);
+}
+
+/**
+ * Run `main` against the bundled mock server with the real direct pipeline and
+ * a stubbed GitHub fetch. `deps` overrides the streams and seams.
+ *
+ * @param {string[]} argv
+ * @param {any} [deps]
+ */
+async function runAgainstMock(argv, deps = {}) {
+  const mock = await startMockServer();
+  try {
+    return await inTempDir(() =>
+      withEnv(
+        { EAT_AGENT_KEY: "key", EAT_API_BASE: mock.baseUrl, EAT_APP_BASE: "https://eat.example" },
+        async () => {
+          const out = deps.stdout ?? capture();
+          const err = deps.stderr ?? capture();
+          const fetched = deps.fetched ?? flagFetched();
+          const code = await main(argv, {
+            confirm: null, // no terminal to confirm on — a piped/CI run
+            ...deps,
+            stdout: out,
+            stderr: err,
+            runDirect: (client, project, owner, repo, opts) =>
+              realRunDirect(client, project, owner, repo, {
+                ...opts,
+                github: { fetchAll: async () => fetched },
+              }),
+          });
+          const rows = (mock.state.stories[91] ?? []).map((row) => ({
+            title: row.title,
+            story_type: row.story_type,
+            current_state: row.current_state,
+            tasks: row.tasks.length,
+            comments: row.comments.length,
+          }));
+          return { code, stdout: out.buf, stderr: err.buf, rows };
+        },
+      ),
+    );
+  } finally {
+    await mock.close();
+  }
+}
+
+test("a customization flag implies the direct engine", async () => {
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      const out = capture();
+      const server = [];
+      const direct = [];
+      const code = await main(["--project", "91", "--repo", "o/r", "--states", "open", "-y"], {
+        stdout: out,
+        stderr: capture(),
+        preflight: async () => preflightResult(),
+        runImport: async () => {
+          server.push(1);
+          return outcome();
+        },
+        runDirect: async () => {
+          direct.push(1);
+          return outcome({ importedStories: 1 });
+        },
+      });
+      assert.equal(code, 0);
+      assert.equal(direct.length, 1);
+      assert.equal(server.length, 0);
+      assert.ok(out.buf.includes("[engine: direct]"));
+    }),
+  );
+});
+
+test("customization flags thread a fixed customization, not a wizard, into the pipeline", async () => {
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      /** @type {any} */
+      let seen = null;
+      const code = await main(
+        [
+          ...["--project", "91", "--repo", "o/r", "-y"],
+          ...["--states", "closed", "--milestones", "v1.0,v2.0", "--story-type", "chore"],
+          ...["--no-comments", "--no-tasks"],
+        ],
+        {
+          stdout: capture(),
+          stderr: capture(),
+          preflight: async () => preflightResult(),
+          runDirect: async (_client, _project, _owner, _repo, opts) => {
+            seen = opts;
+            return outcome();
+          },
+        },
+      );
+      assert.equal(code, 0);
+      assert.equal(seen.customize, undefined);
+      assert.deepEqual(seen.customization, {
+        states: "closed",
+        milestones: ["v1.0", "v2.0"],
+        storyType: "chore",
+        comments: false,
+        tasks: false,
+      });
+    }),
+  );
+});
+
+test("--states sideways is a usage error naming the flag and its allowed values", async () => {
+  const err = capture();
+  const code = await main(["--project", "91", "--repo", "o/r", "--states", "sideways"], {
+    stdout: capture(),
+    stderr: err,
+  });
+  assert.equal(code, 2);
+  assert.ok(err.buf.includes("--states"));
+  assert.ok(err.buf.includes("sideways"));
+  assert.ok(err.buf.includes("all, open, closed"));
+});
+
+test("--story-type epic is a usage error naming the flag and its allowed values", async () => {
+  const err = capture();
+  const code = await main(["--project", "91", "--repo", "o/r", "--story-type", "epic"], {
+    stdout: capture(),
+    stderr: err,
+  });
+  assert.equal(code, 2);
+  assert.ok(err.buf.includes("--story-type"));
+  assert.ok(err.buf.includes("epic"));
+  assert.ok(err.buf.includes("infer, feature, bug, chore"));
+});
+
+test("a customization flag with --customize is a usage error naming the conflict", async () => {
+  const err = capture();
+  const code = await main(["--project", "91", "--repo", "o/r", "--states", "open", "--customize"], {
+    stdout: ttyCapture(),
+    stderr: err,
+    stdin: { isTTY: true },
+  });
+  assert.equal(code, 2);
+  assert.ok(err.buf.includes("--states conflicts with --customize"));
+});
+
+test("the flag/--customize conflict is named off a terminal too, not the TTY gate", async () => {
+  const err = capture();
+  const code = await main(["--project", "91", "--repo", "o/r", "--no-tasks", "--customize"], {
+    stdout: capture(),
+    stderr: err,
+    stdin: { isTTY: false },
+  });
+  assert.equal(code, 2);
+  assert.ok(err.buf.includes("--no-tasks conflicts with --customize"));
+});
+
+test("--engine server with a customization flag is a usage error naming the conflict", async () => {
+  const err = capture();
+  const code = await main(
+    ["--project", "91", "--repo", "o/r", "--engine", "server", "--no-tasks"],
+    { stdout: capture(), stderr: err },
+  );
+  assert.equal(code, 2);
+  assert.ok(err.buf.includes("--no-tasks conflicts with --engine server"));
+});
+
+test("a flag-driven run renders the Customized: block, and composes with --dry-run", async () => {
+  const run = await runAgainstMock([
+    ...["--project", "91", "--repo", "o/r", "--dry-run"],
+    ...["--states", "open", "--story-type", "bug", "--no-comments"],
+  ]);
+  assert.equal(run.code, 0);
+  assert.ok(run.stdout.includes("Customized:"));
+  assert.ok(run.stdout.includes("issue states: open only"));
+  assert.ok(run.stdout.includes("story type: all bug"));
+  assert.ok(run.stdout.includes("comments: not imported"));
+  assert.ok(run.stdout.includes("Dry run plan for o/r into project 91"));
+  assert.ok(run.stdout.includes("would import 1 stories"));
+  assert.deepEqual(run.rows, []);
+});
+
+test("the flag-driven legend matches the equivalent wizard answers", async () => {
+  // states → "open only", story type default, comments off, tasks default.
+  const wizard = await runAgainstMock(["--project", "91", "--repo", "o/r", "--customize", "-y"], {
+    stdout: ttyCapture(),
+    stdin: scriptedStdin(["2", "", "n", ""]),
+  });
+  const flags = await runAgainstMock([
+    ...["--project", "91", "--repo", "o/r", "-y"],
+    ...["--states", "open", "--no-comments"],
+  ]);
+  assert.equal(wizard.code, 0);
+  assert.equal(flags.code, 0);
+  assert.equal(legendBlock(flags.stdout), legendBlock(wizard.stdout));
+  assert.ok(legendBlock(flags.stdout).includes("Customized:"));
+  assert.deepEqual(flags.rows, wizard.rows);
+});
+
+test("a piped flag-driven run with --yes imports the customized subset and exits 0", async () => {
+  const run = await runAgainstMock([
+    ...["--project", "91", "--repo", "o/r", "-y"],
+    ...["--states", "open", "--story-type", "chore", "--no-comments", "--no-tasks"],
+  ]);
+  assert.equal(run.code, 0);
+  assert.deepEqual(run.rows, [
+    { title: "open one", story_type: "chore", current_state: "unstarted", tasks: 0, comments: 0 },
+  ]);
+});
+
+test("a non-TTY run that would write and lacks --yes exits 2 naming --yes, writing nothing", async () => {
+  const run = await runAgainstMock(["--project", "91", "--repo", "o/r", "--states", "open"]);
+  assert.equal(run.code, 2);
+  assert.ok(run.stderr.includes("--yes"));
+  assert.deepEqual(run.rows, []);
+});
+
+test("the fail-closed rule applies to a plain run too, not just customized ones", async () => {
+  const run = await runAgainstMock(["--project", "91", "--repo", "o/r", "--engine", "direct"]);
+  assert.equal(run.code, 2);
+  assert.ok(run.stderr.includes("--yes"));
+  assert.deepEqual(run.rows, []);
+});
+
+test("--dry-run on a non-TTY needs no --yes: exit 0 and the plan still prints", async () => {
+  const run = await runAgainstMock(["--project", "91", "--repo", "o/r", "--dry-run"]);
+  assert.equal(run.code, 0);
+  assert.ok(run.stdout.includes("Dry run plan for o/r into project 91"));
+  assert.deepEqual(run.rows, []);
+});
+
+test("a TTY run still shows the [y/N] confirm before writing", async () => {
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      /** @type {string[]} */
+      const asked = [];
+      const direct = [];
+      const code = await main(["--project", "91", "--repo", "o/r", "--states", "open"], {
+        stdout: ttyCapture(),
+        stderr: capture(),
+        stdin: { isTTY: true },
+        preflight: async () => preflightResult(),
+        runDirect: async () => {
+          direct.push(1);
+          return outcome();
+        },
+        confirm: async (q) => {
+          asked.push(q);
+          return false;
+        },
+      });
+      assert.equal(code, 1);
+      assert.equal(asked.length, 1);
+      assert.ok(asked[0].includes("[y/N]"));
+      assert.equal(direct.length, 0);
+    }),
+  );
+});
+
+for (const [answer, expected] of [
+  ["", false],
+  ["\n", false],
+  ["n", false],
+  ["no", false],
+  ["maybe", false],
+  ["y", true],
+  ["YES", true],
+]) {
+  test(`the terminal confirm reads ${JSON.stringify(answer)} as ${expected}`, async () => {
+    const proceed = await defaultConfirm("Import? [y/N] ", {
+      input: Readable.from([`${answer}\n`]),
+      output: capture(),
+    });
+    assert.equal(proceed, expected);
+  });
+}
+
+test("the terminal confirm treats EOF as no", async () => {
+  const proceed = await defaultConfirm("Import? [y/N] ", {
+    input: Readable.from([]),
+    output: capture(),
+  });
+  assert.equal(proceed, false);
+});
+
+// AC6 — the no-flags output is the byte-for-byte text this story inherited.
+const GOLDEN_TAIL =
+  "  issues:\n" +
+  "    - open issue → story (unstarted); closed issue → story (accepted, keeps the closed date)\n" +
+  "    - labels → labels (with colors); issue-body checklists → story tasks\n" +
+  "    - comments → comments (body only)\n" +
+  "Imports append to the project; re-runs skip already-imported items; nothing is updated or deleted.\n" +
+  "Importing o/r into project 91 (Demo)...\n" +
+  "Imported 2 stories (1 labels), skipped 1 (already imported), 0 error(s).\n" +
+  "Board: https://eat.example/projects/91\n";
+
+for (const [label, argv, header] of /** @type {[string, string[], string][]} */ ([
+  ["server", [], "Import mapping (GitHub → East Agile Tracker):\n"],
+  [
+    "direct",
+    ["--engine", "direct"],
+    "Import mapping (GitHub → East Agile Tracker) [engine: direct]:\n",
+  ],
+])) {
+  test(`no customization flags: the ${label} engine's output is byte-identical`, async () => {
+    await inTempDir(() =>
+      withEnv({ EAT_AGENT_KEY: "key", EAT_APP_BASE: "https://eat.example" }, async () => {
+        const out = capture();
+        const err = capture();
+        const code = await main(["--project", "91", "--repo", "o/r", "-y", ...argv], {
+          stdout: out,
+          stderr: err,
+          preflight: async () => preflightResult(),
+          runImport: async () => outcome({ importedStories: 2, importedLabels: 1, skipped: 1 }),
+          runDirect: async () => outcome({ importedStories: 2, importedLabels: 1, skipped: 1 }),
+        });
+        assert.equal(code, 0);
+        assert.equal(out.buf, header + GOLDEN_TAIL);
+        assert.equal(err.buf, "");
+      }),
+    );
+  });
+}
