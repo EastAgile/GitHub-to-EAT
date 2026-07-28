@@ -288,8 +288,13 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     if (engine === "direct") assertDirectSupportsIncludes(included);
   } catch (err) {
     // Blame the flag the member actually typed: --customize forces the direct
-    // engine, so without an explicit --engine it is the one to change.
-    const flag = values.engine ? "--engine" : "--customize";
+    // engine; if neither was typed the engine is a default, so --include is theirs.
+    const flag =
+      values.engine !== undefined
+        ? "--engine"
+        : values.customize === true
+          ? "--customize"
+          : "--include";
     return usageError(`argument ${flag}: ${err instanceof Error ? err.message : err}`);
   }
 
