@@ -140,6 +140,55 @@ test("pagination picks rel=next out of a multi-rel Link header", async () => {
   );
 });
 
+test("pagination follows a rel=next URL whose query string contains a comma", async () => {
+  /** @type {string[]} */
+  const seen = [];
+  await withGitHub(
+    (req, res) => {
+      const url = new URL(req.url ?? "", "http://x");
+      seen.push(url.searchParams.get("fields") ?? "");
+      const here = `${url.protocol}//${req.headers.host}${url.pathname}`;
+      if (url.searchParams.get("page") === null) {
+        json(res, 200, [{ number: 1 }], {
+          Link: `<${here}?fields=a,b&page=2>; rel="next"`,
+        });
+      } else {
+        json(res, 200, [{ number: 2 }]);
+      }
+    },
+    async (base) => {
+      const issues = await new GitHubClient("o", "r", { apiBase: base }).listIssues();
+      assert.deepEqual(
+        issues.map((i) => i.number),
+        [1, 2],
+      );
+    },
+  );
+  assert.deepEqual(seen, ["", "a,b"]);
+});
+
+test("a Link header without a rel=next ends pagination", async () => {
+  let requests = 0;
+  await withGitHub(
+    (req, res) => {
+      requests += 1;
+      const url = new URL(req.url ?? "", "http://x");
+      const here = `${url.protocol}//${req.headers.host}${url.pathname}`;
+      json(res, 200, [{ number: 1 }], {
+        Link: `<${here}?page=1>; rel="prev", <${here}?page=1>; rel="first"`,
+      });
+    },
+    async (base) => {
+      const issues = await new GitHubClient("o", "r", { apiBase: base }).listIssues();
+      assert.deepEqual(
+        issues.map((i) => i.number),
+        [1],
+      );
+    },
+  );
+  assert.equal(requests, 1);
+});
+
 test("a request that outlives the timeout maps to GitHubError naming the timeout", async () => {
   await withGitHub(
     () => {
