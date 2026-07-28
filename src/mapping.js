@@ -114,11 +114,8 @@ function invalidValue(flag, value, allowed) {
 }
 
 /**
- * Build a {@link Customization} from the declarative flags — the non-interactive
- * counterpart to the wizard, producing the same object. Omitted flags keep their
- * {@link DEFAULT_CUSTOMIZATION} value, so no flags reproduce the default profile.
- *
- * Throws an `Error` naming the flag and its allowed values on a bad value.
+ * The declarative counterpart to the wizard: same object, no terminal. Omitted
+ * flags keep their {@link DEFAULT_CUSTOMIZATION} value; a bad value throws.
  *
  * @param {Record<string, unknown>} values `parseArgs` values
  * @returns {Customization}
