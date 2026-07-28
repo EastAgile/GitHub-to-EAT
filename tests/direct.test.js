@@ -515,6 +515,87 @@ test("the milestone warning names only the unmatched titles, and imports the mat
   }
 });
 
+/** fetchAll-shaped stub: "v1.0" sits on an open issue, "v2.0" only on a closed one. */
+function mixedStateRepo() {
+  return {
+    issues: [
+      {
+        number: 7,
+        title: "one",
+        body: "",
+        state: "open",
+        labels: [],
+        milestone: { title: "v1.0" },
+      },
+      {
+        number: 8,
+        title: "two",
+        body: "",
+        state: "closed",
+        closed_at: "2020-02-01T00:00:00Z",
+        labels: [],
+        milestone: { title: "v2.0" },
+      },
+    ],
+    comments: [],
+    labels: [],
+  };
+}
+
+test("a milestone the states filter has already excluded still warns", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const stream = capture();
+    const outcome = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream,
+      customization: customization({ states: "open", milestones: ["v2.0"] }),
+      github: { fetchAll: async () => mixedStateRepo() },
+    });
+    assert.equal(outcome.importedStories, 0);
+    assert.equal((mock.state.stories[91] ?? []).length, 0);
+    assert.match(stream.buf, /warning:.*v2\.0/);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a states filter that matches no issue warns instead of importing nothing silently", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const stream = capture();
+    const outcome = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream,
+      customization: customization({ states: "closed" }),
+      github: { fetchAll: async () => milestonedRepo() },
+    });
+    assert.equal(outcome.importedStories, 0);
+    assert.match(stream.buf, /warning:.*closed only/);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("an unfiltered run that maps no story stays silent", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const stream = capture();
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream,
+      customization: customization({}),
+      github: { fetchAll: async () => ({ issues: [], comments: [], labels: [] }) },
+    });
+    assert.ok(!stream.buf.includes("warning:"));
+  } finally {
+    await mock.close();
+  }
+});
+
 test("every milestone title matching keeps the run silent", async () => {
   const mock = await startMockServer();
   try {

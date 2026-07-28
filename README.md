@@ -128,7 +128,7 @@ Both are direct-engine only, and imply `--engine direct`:
 | Flag            | Values                                             | Default                        |
 | --------------- | -------------------------------------------------- | ------------------------------ |
 | `--states`      | `all`, `open`, `closed`                            | `all`                          |
-| `--milestones`  | comma-separated milestone titles, matched exactly  | every milestone                |
+| `--milestones`  | milestone titles, matched exactly; comma-separated, repeatable | every milestone     |
 | `--story-type`  | `infer`, `feature`, `bug`, `chore`                 | `infer` (from labels/title)    |
 | `--no-comments` | —                                                  | comments are imported          |
 | `--no-tasks`    | —                                                  | body checklists become tasks   |
@@ -138,10 +138,16 @@ github-to-eat --project 147 --repo octocat/hello-world \
   --states open --milestones "v1.0,v1.1" --no-comments --yes
 ```
 
+`--milestones` can also be repeated (`--milestones v1.0 --milestones v1.1`), and
+`\,` inside a title is a literal comma — `--milestones 'v1.0\, beta'` selects the
+single milestone named `v1.0, beta`.
+
 The choices are echoed in a `Customized:` block under the legend, so the plan is
 visible before anything is written — and under `--dry-run`, which writes nothing.
-A milestone title no fetched issue carries is called out with a warning rather
-than silently importing nothing.
+A milestone title no matching issue carries is called out with a warning rather
+than silently importing nothing, and so is a set of filters that together match
+no issue at all (`--states open --milestones v2.0`, where `v2.0` is only on
+closed issues, warns on both counts).
 
 The two ways are mutually exclusive: combining a customization flag with
 `--customize` is a usage error, since a run either declares its answers or asks
@@ -168,6 +174,9 @@ needs `repo`, or fine-grained *Issues: Read*, on that repo).
 
 ## Troubleshooting
 
+- **`no interactive terminal to confirm on`** — the run would write but has no
+  TTY to show the `[y/N]` prompt on (a pipe, CI, an agent). Add `--yes` to
+  import without confirmation, or `--dry-run` to preview the plan instead.
 - **`authentication failed`** — check `EAT_AGENT_KEY` is an owner-role agent key
   for this project and hasn't been revoked.
 - **`not found: /projects/<id>`** — the project id is wrong or the key can't

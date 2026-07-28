@@ -44,16 +44,46 @@ export function customizedIssuesLegend({ comments, tasks }) {
  * @returns {string[]}
  */
 export function describeCustomization({ states, milestones, storyType, comments, tasks }) {
+  const lines = describeFilters({ states, milestones });
+  if (storyType !== "infer") lines.push(`story type: all ${storyType}`);
+  if (!comments) lines.push("comments: not imported");
+  if (!tasks) lines.push("tasks: not imported");
+  return lines;
+}
+
+/**
+ * The subset of {@link describeCustomization} that can drop issues, so a run
+ * that maps nothing can name the filters responsible in the same words.
+ *
+ * @param {Pick<Customization, "states" | "milestones">} customization
+ * @returns {string[]}
+ */
+export function describeFilters({ states, milestones }) {
   /** @type {string[]} */
   const lines = [];
   if (states !== "all") lines.push(`issue states: ${states} only`);
   // A directly-built Customization could pass [] (the wizard never does); an empty
   // filter is "all", so render nothing rather than a bare "milestones:" line.
   if (milestones?.length) lines.push(`milestones: ${milestones.map(stripControls).join(", ")}`);
-  if (storyType !== "infer") lines.push(`story type: all ${storyType}`);
-  if (!comments) lines.push("comments: not imported");
-  if (!tasks) lines.push("tasks: not imported");
   return lines;
+}
+
+/**
+ * @param {any} issue
+ * @param {Customization["states"]} states
+ * @returns {boolean}
+ */
+export function matchesStates(issue, states) {
+  return states === "all" || String(issue.state ?? "").toLowerCase() === states;
+}
+
+/**
+ * @param {any} issue
+ * @param {Customization["milestones"]} milestones
+ * @returns {boolean}
+ */
+export function matchesMilestones(issue, milestones) {
+  return !milestones || milestones.includes(issue.milestone?.title);
 }
 
 /**
@@ -109,13 +139,24 @@ export function customizationFlagsGiven(values) {
  */
 function invalidValue(flag, value, allowed) {
   throw new Error(
-    `argument ${flag}: invalid value '${value}'; valid values: ${allowed.join(", ")}`,
+    `argument ${flag}: invalid value '${stripControls(value)}'; valid values: ${allowed.join(", ")}`,
   );
 }
 
 /**
+ * One `--milestones` occurrence's titles. Splitting on commas would put a
+ * comma-bearing GitHub milestone out of reach, so `\,` escapes one.
+ *
+ * @param {string} occurrence
+ * @returns {string[]}
+ */
+const splitTitles = (occurrence) =>
+  occurrence.split(/(?<!\\),/).map((title) => title.replace(/\\,/g, ","));
+
+/**
  * The declarative counterpart to the wizard: same object, no terminal. Omitted
  * flags keep their {@link DEFAULT_CUSTOMIZATION} value; a bad value throws.
+ * `--milestones` may repeat; every occurrence's titles flatten into one list.
  *
  * @param {Record<string, unknown>} values `parseArgs` values
  * @returns {Customization}
@@ -130,14 +171,14 @@ export function parseCustomization(values) {
     invalidValue("--story-type", storyType, STORY_TYPES);
   }
 
-  const raw = /** @type {string | undefined} */ (values.milestones);
+  const raw = /** @type {string | string[] | undefined} */ (values.milestones);
   /** @type {string[] | null} */
   let milestones = null;
   if (raw !== undefined) {
     milestones = [
       ...new Set(
-        raw
-          .split(",")
+        (Array.isArray(raw) ? raw : [raw])
+          .flatMap(splitTitles)
           .map((title) => title.trim())
           .filter(Boolean),
       ),
@@ -318,10 +359,8 @@ export function mapRepo(
   for (const issue of issues) {
     if (issue.pull_request) continue;
     const state = String(issue.state ?? "").toLowerCase();
-    if (customization.states !== "all" && state !== customization.states) continue;
-    if (customization.milestones && !customization.milestones.includes(issue.milestone?.title)) {
-      continue;
-    }
+    if (!matchesStates(issue, customization.states)) continue;
+    if (!matchesMilestones(issue, customization.milestones)) continue;
 
     /** @type {string[]} */
     const names = [];

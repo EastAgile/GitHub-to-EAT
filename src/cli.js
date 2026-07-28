@@ -46,7 +46,8 @@ options:
 
 customization (each implies --engine direct; no terminal needed; not with --customize):
   --states STATES       issue states to import: all|open|closed (default: all)
-  --milestones TITLES   comma-separated milestone titles to import, matched exactly (default: all)
+  --milestones TITLES   comma-separated milestone titles to import, matched exactly; repeatable,
+                        and \\, is a literal comma inside a title (default: all)
   --story-type TYPE     story type for every imported issue: infer|feature|bug|chore (default: infer)
   --no-comments         do not import issue comments
   --no-tasks            do not convert issue-body checklists into story tasks
@@ -70,11 +71,16 @@ export async function defaultConfirm(
   // OutStream is the minimal write-sink tests inject; readline only calls write.
   const rl = readline.createInterface({ input, output: /** @type {any} */ (output) });
   try {
-    output.write(question);
-    // Read via the iterator, not rl.question: that promise never settles when
-    // the input ends, so Ctrl-D at the prompt would hang instead of aborting.
+    // readline must own the prompt: a line edit redraws it, and anything written
+    // behind readline's back is erased by that redraw.
+    rl.setPrompt(question);
+    rl.prompt();
+    // Read through the iterator so tests can inject the streams; `done` is EOF,
+    // and a stdin that errors counts as "no" rather than crashing the CLI.
     const { value, done } = await rl[Symbol.asyncIterator]().next();
     return done ? false : /^y(es)?$/i.test(String(value).trim());
+  } catch {
+    return false;
   } finally {
     rl.close();
   }
@@ -185,8 +191,9 @@ function reportDryRunPlan(plan, { stdout, stderr, owner, repo, project, projectT
  * @property {typeof defaultRunWizard} [wizard] the --customize wizard; defaults
  *   to the real one, reading from `stdin` and prompting on stderr
  * @property {((question: string) => Promise<boolean>) | null} [confirm] yes/no
- *   prompt; defaults to a terminal prompt when stdin is a TTY, else null
- *   (no prompt — scripts keep running unattended)
+ *   prompt; defaults to a terminal prompt when stdin is a TTY, else null —
+ *   null means "nowhere to ask", and a run that would write then exits 2
+ *   naming --yes (CONTRACT.md, "Confirmation gate — fail closed off a terminal")
  * @property {{ isTTY?: boolean } & Partial<import("node:stream").Readable>} [stdin]
  *   the --customize gate's TTY probe and the wizard's input; defaults to process.stdin
  */
@@ -232,7 +239,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
         engine: { type: "string" },
         customize: { type: "boolean" },
         states: { type: "string" },
-        milestones: { type: "string" },
+        milestones: { type: "string", multiple: true },
         "story-type": { type: "string" },
         "no-comments": { type: "boolean" },
         "no-tasks": { type: "boolean" },
@@ -336,7 +343,15 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
   try {
     if (engine === "direct") assertDirectSupportsIncludes(included);
   } catch (err) {
-    return usageError(`argument --engine: ${err instanceof Error ? err.message : err}`);
+    // Blame the flag the caller actually typed: --engine is only one of the
+    // three ways a run ends up on the direct engine.
+    const blamed =
+      values.engine !== undefined
+        ? "--engine"
+        : values.customize === true
+          ? "--customize"
+          : (customizationFlagsGiven(values)[0] ?? "--include");
+    return usageError(`argument ${blamed}: ${err instanceof Error ? err.message : err}`);
   }
 
   // Fail closed: off-terminal there is no way to show the [y/N] confirm, so a

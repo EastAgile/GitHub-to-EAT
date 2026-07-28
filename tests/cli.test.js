@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { Readable } from "node:stream";
+import { Readable, Writable } from "node:stream";
 import { test } from "node:test";
 
 import { defaultConfirm, main, parseRepo } from "../src/cli.js";
@@ -1017,6 +1017,51 @@ test("customization flags thread a fixed customization, not a wizard, into the p
   );
 });
 
+test("--help documents every customization flag", async () => {
+  const out = capture();
+  const code = await main(["--help"], { stdout: out, stderr: capture() });
+  assert.equal(code, 0);
+  for (const flag of ["--states", "--milestones", "--story-type", "--no-comments", "--no-tasks"]) {
+    assert.ok(out.buf.includes(flag), `--help omits ${flag}`);
+  }
+});
+
+test("--milestones repeats: each occurrence adds titles to one allowlist", async () => {
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      /** @type {any} */
+      let seen = null;
+      const code = await main(
+        [
+          ...["--project", "91", "--repo", "o/r", "-y"],
+          ...["--milestones", "v1.0,v2.0", "--milestones", "v3.0"],
+        ],
+        {
+          stdout: capture(),
+          stderr: capture(),
+          preflight: async () => preflightResult(),
+          runDirect: async (_client, _project, _owner, _repo, opts) => {
+            seen = opts;
+            return outcome();
+          },
+        },
+      );
+      assert.equal(code, 0);
+      assert.deepEqual(seen.customization.milestones, ["v1.0", "v2.0", "v3.0"]);
+    }),
+  );
+});
+
+test("a --milestones typo surfaces the warning through main, not just runDirect", async () => {
+  const run = await runAgainstMock([
+    ...["--project", "91", "--repo", "o/r", "-y"],
+    ...["--milestones", "v9.9"],
+  ]);
+  assert.equal(run.code, 0);
+  assert.match(run.stderr, /warning:.*v9\.9/);
+  assert.deepEqual(run.rows, []);
+});
+
 test("--states sideways is a usage error naming the flag and its allowed values", async () => {
   const err = capture();
   const code = await main(["--project", "91", "--repo", "o/r", "--states", "sideways"], {
@@ -1071,6 +1116,62 @@ test("--engine server with a customization flag is a usage error naming the conf
   );
   assert.equal(code, 2);
   assert.ok(err.buf.includes("--no-tasks conflicts with --engine server"));
+});
+
+test("--engine direct with a customization flag is accepted, not a conflict", async () => {
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      /** @type {any[]} */
+      const direct = [];
+      const code = await main(
+        ["--project", "91", "--repo", "o/r", "--engine", "direct", "--states", "open", "-y"],
+        {
+          stdout: capture(),
+          stderr: capture(),
+          preflight: async () => preflightResult(),
+          runDirect: async (_client, _project, _owner, _repo, opts) => {
+            direct.push(opts.customization);
+            return outcome();
+          },
+        },
+      );
+      assert.equal(code, 0);
+      assert.equal(direct.length, 1);
+      assert.equal(direct[0].states, "open");
+    }),
+  );
+});
+
+test("an unsupported --include blames the customization flag that implied the engine", async () => {
+  const err = capture();
+  const code = await main(
+    ["--project", "91", "--repo", "o/r", "--include", "issues,prs", "--states", "open"],
+    { stdout: capture(), stderr: err },
+  );
+  assert.equal(code, 2);
+  assert.ok(err.buf.includes("argument --states:"));
+  assert.ok(!err.buf.includes("argument --engine:"));
+});
+
+test("an unsupported --include blames --customize when that implied the engine", async () => {
+  const err = capture();
+  const code = await main(
+    ["--project", "91", "--repo", "o/r", "--include", "issues,prs", "--customize"],
+    { stdout: ttyCapture(), stderr: err, stdin: { isTTY: true } },
+  );
+  assert.equal(code, 2);
+  assert.ok(err.buf.includes("argument --customize:"));
+  assert.ok(!err.buf.includes("argument --engine:"));
+});
+
+test("an unsupported --include still blames --engine when it was passed", async () => {
+  const err = capture();
+  const code = await main(
+    ["--project", "91", "--repo", "o/r", "--include", "issues,prs", "--engine", "direct"],
+    { stdout: capture(), stderr: err },
+  );
+  assert.equal(code, 2);
+  assert.ok(err.buf.includes("argument --engine:"));
 });
 
 test("a flag-driven run renders the Customized: block, and composes with --dry-run", async () => {
@@ -1189,6 +1290,51 @@ test("the terminal confirm treats EOF as no", async () => {
     output: capture(),
   });
   assert.equal(proceed, false);
+});
+
+test("the terminal confirm treats a broken stdin as no", async () => {
+  const input = new Readable({
+    read() {
+      this.destroy(new Error("stdin exploded"));
+    },
+  });
+  const proceed = await defaultConfirm("Import? [y/N] ", { input, output: capture() });
+  assert.equal(proceed, false);
+});
+
+/**
+ * A TTY input/output pair, so readline runs in terminal mode and redraws the
+ * line on every edit — the mode the `capture()` sink above cannot reach.
+ */
+function ttyStreams(/** @type {string[]} */ keystrokes) {
+  let buf = "";
+  const output = Object.assign(
+    new Writable({
+      write(chunk, _enc, cb) {
+        buf += String(chunk);
+        cb();
+      },
+    }),
+    { isTTY: true, columns: 80, rows: 24 },
+  );
+  return {
+    input: Object.assign(Readable.from(keystrokes), { isTTY: true }),
+    output,
+    // Everything drawn after the last line-clear: what the member ends up seeing.
+    get lastRedraw() {
+      return buf.split("\x1b[0J").at(-1) ?? "";
+    },
+  };
+}
+
+test("on a terminal the confirm question survives a backspace edit", async () => {
+  const io = ttyStreams(["n", "\x7f", "y\n"]);
+  const proceed = await defaultConfirm("Import o/r into project 91 (Demo)? [y/N] ", io);
+  assert.equal(proceed, true);
+  assert.ok(
+    io.lastRedraw.includes("Import o/r into project 91 (Demo)? [y/N] "),
+    `the redraw dropped the question: ${JSON.stringify(io.lastRedraw)}`,
+  );
 });
 
 // AC6 — the no-flags output is the byte-for-byte text this story inherited.

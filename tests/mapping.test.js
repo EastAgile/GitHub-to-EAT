@@ -719,6 +719,21 @@ test("--milestones is an exact-title allowlist, trimmed and deduplicated in orde
   ]);
 });
 
+test("--milestones can be repeated: every occurrence flattens into one allowlist", () => {
+  assert.deepEqual(parseCustomization({ milestones: ["v1.0,v2.0", " v3.0 ", "v1.0"] }).milestones, [
+    "v1.0",
+    "v2.0",
+    "v3.0",
+  ]);
+});
+
+test("a backslash-escaped comma keeps a comma-bearing milestone title in one piece", () => {
+  assert.deepEqual(parseCustomization({ milestones: ["v1.0\\, beta,v2.0"] }).milestones, [
+    "v1.0, beta",
+    "v2.0",
+  ]);
+});
+
 test("--no-comments and --no-tasks turn their field off", () => {
   assert.equal(parseCustomization({ "no-comments": true }).comments, false);
   assert.equal(parseCustomization({ "no-tasks": true }).tasks, false);
@@ -750,6 +765,17 @@ test("an unknown --story-type value names the flag and its allowed values", () =
       assert.match(err.message, /--story-type/);
       assert.match(err.message, /epic/);
       assert.match(err.message, /infer, feature, bug, chore/);
+      return true;
+    },
+  );
+});
+
+test("an invalid value is stripped of control characters before it is reported", () => {
+  assert.throws(
+    () => parseCustomization({ states: "x[2Jy" }),
+    (/** @type {Error} */ err) => {
+      assert.ok(!err.message.includes(""), err.message);
+      assert.match(err.message, /x\[2Jy/);
       return true;
     },
   );

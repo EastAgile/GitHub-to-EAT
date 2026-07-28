@@ -278,7 +278,7 @@ front-end for it, these flags are the other. Any of them implies
 | Flag            | `Customization` field | Values / effect                                    | Default   |
 | --------------- | --------------------- | -------------------------------------------------- | --------- |
 | `--states`      | `states`              | `all` \| `open` \| `closed`                        | `all`     |
-| `--milestones`  | `milestones`          | comma-separated exact `milestone.title` allowlist  | all       |
+| `--milestones`  | `milestones`          | exact `milestone.title` allowlist; comma-separated, repeatable | all |
 | `--story-type`  | `storyType`           | `infer` \| `feature` \| `bug` \| `chore`           | `infer`   |
 | `--no-comments` | `comments`            | sets it `false`                                    | imported  |
 | `--no-tasks`    | `tasks`               | sets it `false`                                    | converted |
@@ -286,9 +286,17 @@ front-end for it, these flags are the other. Any of them implies
 - An invalid `--states` / `--story-type` value exits 2 with a usage error naming
   the flag and its allowed values; `--milestones` with no titles does the same.
   Titles are trimmed and deduplicated, order preserved.
-- A `--milestones` title that no fetched issue carries would import nothing with
-  no explanation, so the run **warns** naming the unmatched titles (the match is
-  exact and case-sensitive).
+- `--milestones` may be given more than once; every occurrence's titles flatten
+  into one allowlist. Each occurrence is also split on commas, so a title that
+  contains one is written `\,` (e.g. `--milestones 'v1.0\, beta'`) — without
+  that escape the wizard could select such a milestone and the flags could not.
+- A `--milestones` title that no issue **surviving the other filters** carries
+  would import nothing with no explanation, so the run **warns** naming the
+  unmatched titles (the match is exact and case-sensitive). `--states open
+  --milestones v2.0`, where `v2.0` sits only on closed issues, warns for that
+  reason. Independently, a run whose filters together match no issue at all
+  warns that there is nothing to import, naming the filters — so a zero-story
+  import is never silent.
 - The customized legend, including the `Customized:` block, renders for a
   flag-driven run too — before the confirm, and under `--dry-run` — so the plan
   is always visible. With no customization flag the legend is byte-identical to
