@@ -285,6 +285,99 @@ test("a non-array 200 body throws GitHubError instead of reading as an empty pag
   );
 });
 
+test("a 200 body that is not JSON at all throws GitHubError, not a raw SyntaxError", async () => {
+  await withGitHub(
+    (_req, res) => {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end("<html><body>Corporate proxy: request blocked</body></html>");
+    },
+    async (base) => {
+      await assert.rejects(new GitHubClient("o", "r", { apiBase: base }).listIssues(), (err) => {
+        assert.ok(err instanceof GitHubError);
+        assert.ok(!(err instanceof SyntaxError));
+        assert.match(err.message, /expected a JSON array/);
+        return true;
+      });
+    },
+  );
+});
+
+test("a body that stalls past the timeout reports the timeout, not an unexpected payload", async () => {
+  await withGitHub(
+    (_req, res) => {
+      // Headers land, then the body never arrives: the abort clock fires mid-stream.
+      res.writeHead(200, { "Content-Type": "application/json", "Content-Length": "64" });
+      res.write("[{");
+    },
+    async (base) => {
+      await assert.rejects(
+        new GitHubClient("o", "r", { apiBase: base, timeout: 0.05 }).listIssues(),
+        (err) => {
+          assert.ok(err instanceof GitHubError);
+          assert.match(err.message, /timed out/);
+          assert.doesNotMatch(err.message, /unexpected payload/);
+          return true;
+        },
+      );
+    },
+  );
+});
+
+test("a socket reset mid-body reports a reachability failure, not an unexpected payload", async () => {
+  await withGitHub(
+    (_req, res) => {
+      // Headers first (fetch resolves on them), then kill the socket while the
+      // body is still streaming — otherwise the request phase catches it.
+      res.writeHead(200, { "Content-Type": "application/json", "Content-Length": "64" });
+      res.write("[{");
+      setTimeout(() => res.socket?.destroy(), 50);
+    },
+    async (base) => {
+      await assert.rejects(new GitHubClient("o", "r", { apiBase: base }).listIssues(), (err) => {
+        assert.ok(err instanceof GitHubError);
+        assert.match(err.message, /could not reach GitHub/);
+        assert.doesNotMatch(err.message, /unexpected payload/);
+        return true;
+      });
+    },
+  );
+});
+
+test("a >=400 body cut off mid-read still surfaces the status as GitHubError", async () => {
+  await withGitHub(
+    (_req, res) => {
+      res.writeHead(500, { "Content-Type": "text/plain", "Content-Length": "64" });
+      res.write("boom");
+      setTimeout(() => res.socket?.destroy(), 50);
+    },
+    async (base) => {
+      await assert.rejects(new GitHubClient("o", "r", { apiBase: base }).listIssues(), (err) => {
+        assert.ok(err instanceof GitHubError);
+        assert.match(err.message, /\(500\)/);
+        return true;
+      });
+    },
+  );
+});
+
+test("terminal escapes in a >=400 body are stripped before the message reaches the user", async () => {
+  await withGitHub(
+    (_req, res) => {
+      res.writeHead(502, { "Content-Type": "text/html" });
+      res.end("\x1b[2J\x1b[Hbad gateway\r\n\x1b]0;pwned\x07");
+    },
+    async (base) => {
+      await assert.rejects(new GitHubClient("o", "r", { apiBase: base }).listIssues(), (err) => {
+        assert.ok(err instanceof GitHubError);
+        assert.match(err.message, /\(502\)/);
+        assert.match(err.message, /bad gateway/);
+        assert.doesNotMatch(err.message, /\p{Cc}/u);
+        return true;
+      });
+    },
+  );
+});
+
 test("listComments hits the repo-wide issue comments endpoint", async () => {
   /** @type {string | undefined} */
   let path;

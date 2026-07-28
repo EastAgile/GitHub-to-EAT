@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
+import http from "node:http";
 import { Readable } from "node:stream";
 import { test } from "node:test";
 
 import { main, parseRepo } from "../src/cli.js";
 import { AuthError } from "../src/client.js";
 import { runDirect as realRunDirect } from "../src/direct.js";
-import { GitHubError } from "../src/github.js";
+import { GitHubClient, GitHubError } from "../src/github.js";
 import { MAPPINGS } from "../src/mappings.js";
 import { startMockServer } from "../src/mockserver.js";
 import { VERSION } from "../src/version.js";
@@ -464,6 +465,40 @@ test("a GitHub failure in the direct engine maps to a clean exit 1", async () =>
       assert.ok(err.buf.includes("error: GitHub request failed (404)"));
     }),
   );
+});
+
+test("a 200 non-JSON GitHub body exits 1 with error: on stderr, not a stack trace", async () => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { "Content-Type": "text/html" });
+    res.end("<html><body>Captive portal: sign in to continue</body></html>");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(undefined)));
+  const { port } = /** @type {import("node:net").AddressInfo} */ (server.address());
+  try {
+    await inTempDir(() =>
+      // Without an explicit base, loadConfig() resolves the production tracker:
+      // only the GitHub failure keeps this test offline today.
+      withEnv({ EAT_AGENT_KEY: "key", EAT_API_BASE: "http://127.0.0.1:9/api/v1" }, async () => {
+        const err = capture();
+        const code = await main(["--project", "91", "--repo", "o/r", "--engine", "direct", "-y"], {
+          stdout: capture(),
+          stderr: err,
+          preflight: async () => preflightResult(),
+          runDirect: (client, project, owner, repo, opts) =>
+            realRunDirect(client, project, owner, repo, {
+              ...opts,
+              github: new GitHubClient(owner, repo, { apiBase: `http://127.0.0.1:${port}` }),
+            }),
+        });
+        assert.equal(code, 1);
+        assert.match(err.buf, /error: .*expected a JSON array/);
+        assert.doesNotMatch(err.buf, /\n\s+at /);
+      }),
+    );
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(() => resolve(undefined)));
+  }
 });
 
 // --- --customize (V3 plumbing) -----------------------------------------------
