@@ -660,3 +660,106 @@ test("an old server ignores the pair and never advertises the filter", async () 
     await mock.close();
   }
 });
+
+test("backdated story create persists created_at; accepted completed_at clamps forward", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    // completed_at before created_at must clamp forward to created_at.
+    await client.createStory(
+      91,
+      {
+        name: "done",
+        current_state: "accepted",
+        created_at: "2020-06-01T00:00:00Z",
+        completed_at: "2020-01-01T00:00:00Z",
+      },
+      "k-clamp",
+    );
+    // completed_at on a non-done create is ignored.
+    await client.createStory(
+      91,
+      { name: "open", current_state: "unstarted", created_at: "2021-01-01T00:00:00Z" },
+      "k-open",
+    );
+    const [done, open] = mock.state.stories[91];
+    assert.equal(done.created_at, "2020-06-01T00:00:00Z");
+    assert.equal(done.completed_at, "2020-06-01T00:00:00Z");
+    assert.equal(open.created_at, "2021-01-01T00:00:00Z");
+    assert.ok(!("completed_at" in open));
+  } finally {
+    await mock.close();
+  }
+});
+
+test("async import returns 202 then a job that progresses to done with a result", async () => {
+  const mock = await startMockServer(makeState({ asyncImport: true }));
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const accept = await client.importGithub(91, "o", "r", { idempotencyKey: "k" });
+    assert.equal(accept.status, "pending");
+    assert.ok(accept.import_id);
+    assert.equal(accept.imported, undefined); // async accept carries no result
+
+    // Drive the job to its terminal phase; the mock advances one phase per GET.
+    const seen = [];
+    let status;
+    for (let i = 0; i < 50; i += 1) {
+      status = await client.getImport(91, accept.import_id);
+      seen.push(status.status);
+      if (status.status === "done" || status.status === "failed") break;
+    }
+    assert.equal(status.status, "done");
+    assert.equal(seen[0], "pending");
+    assert.ok(seen.includes("fetching"));
+    assert.ok(seen.includes("writing"));
+    // The done result equals the synchronous computed result.
+    assert.deepEqual(status.result.imported, { stories: 3, labels: 0 });
+    assert.equal(status.result.skipped, 0);
+    assert.equal(status.project_id, 91);
+    assert.equal(status.source, "github");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a non-backdating server ignores created_at on story creates", async () => {
+  const mock = await startMockServer(makeState({ backdating: false }));
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await client.createStory(91, { name: "s", created_at: "2020-01-01T00:00:00Z" }, "k");
+    assert.ok(!("created_at" in mock.state.stories[91][0]));
+  } finally {
+    await mock.close();
+  }
+});
+
+test("getImport 404s an unknown import id", async () => {
+  const mock = await startMockServer(makeState({ asyncImport: true }));
+  try {
+    await assert.rejects(
+      new EATClient(mock.baseUrl, "ea_token").getImport(91, "nope"),
+      NotFoundError,
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("async openapi folds 202 into the import path, no invented ':202' key", async () => {
+  const mock = await startMockServer(makeState({ asyncImport: true }));
+  try {
+    const spec = await (
+      await fetch(`${mock.baseUrl}/openapi.json`, { headers: { "X-TrackerToken": "t" } })
+    ).json();
+    const paths = Object.keys(spec.paths);
+    assert.ok(!paths.some((p) => p.includes(":202"))); // not a valid path key
+    const importPath = spec.paths["/api/v1/projects/{project_id}/import/json"];
+    assert.equal(importPath.post.responses["202"].description, "import accepted; poll for status");
+    assert.ok("/api/v1/projects/{project_id}/imports/{import_id}" in spec.paths);
+    // Feature-detection still reads the dry_run field off the same POST.
+    assert.equal(await new EATClient(mock.baseUrl, "t").supportsServerDryRun(), true);
+  } finally {
+    await mock.close();
+  }
+});

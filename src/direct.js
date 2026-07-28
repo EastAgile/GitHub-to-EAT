@@ -22,7 +22,8 @@ import { writePlan } from "./writer.js";
  * @typedef {import("./writer.js").WriterClient
  *   & import("./dedup.js").PrescanClient
  *   & { fieldLimits?: () => Promise<Partial<import("./mapping.js").FieldLimits>>,
- *       supportsProvenanceDedup?: () => Promise<boolean> }} DirectClient
+ *       supportsProvenanceDedup?: () => Promise<boolean>,
+ *       supportsBackdating?: () => Promise<boolean> }} DirectClient
  */
 
 /**
@@ -66,7 +67,10 @@ export async function runDirect(client, projectId, owner, repo, options) {
   // Clamp before the marker lands so the description budget can reserve room
   // for it — one giant GitHub comment must not 400 the whole run.
   const limits = { ...FALLBACK_LIMITS, ...(await (client.fieldLimits?.() ?? {})) };
-  const mapped = clampPlan(mapRepo(fetched, customization), limits, {
+  // One probe gates all three backdated fields; degrades to false, so an older
+  // server gets v3-identical payloads and the full-date comment prefix.
+  const sendDates = await (client.supportsBackdating?.() ?? false);
+  const mapped = clampPlan(mapRepo(fetched, customization, sendDates), limits, {
     reserveDescription: (op) =>
       Buffer.byteLength(markerFor(owner, repo, op.external_id), "utf8") + 2,
     warn: (message) => stream?.write(message),
@@ -121,7 +125,12 @@ export async function runDirect(client, projectId, owner, repo, options) {
     };
   }
 
-  const written = await writePlan(client, projectId, plan, { stream, runId, sendProvenance });
+  const written = await writePlan(client, projectId, plan, {
+    stream,
+    runId,
+    sendProvenance,
+    sendDates,
+  });
   return {
     importedStories: written.stories,
     importedLabels: written.labelsCreated,

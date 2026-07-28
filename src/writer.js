@@ -19,7 +19,7 @@ import { runWithProgress } from "./progress.js";
  * @property {(projectId: number, storyId: number, task: { description: string,
  *   complete?: boolean }, idempotencyKey: string) => Promise<any>} createTask
  * @property {(projectId: number, storyId: number, text: string,
- *   idempotencyKey: string) => Promise<any>} createComment
+ *   idempotencyKey: string, options?: { createdAt?: string | null }) => Promise<any>} createComment
  */
 
 /**
@@ -80,10 +80,12 @@ async function withRetry(fn, attempts, delayMs) {
  * @param {number} projectId
  * @param {WritePlan} plan
  * @param {{ runId?: string, stream?: import("./progress.js").OutStream,
- *   retryAttempts?: number, retryDelayMs?: number, sendProvenance?: boolean }}
- *   [options] `runId` scopes the idempotency keys (fresh per run, stable across
- *   in-run retries); `sendProvenance` adds the re-import pair (EAT #31427) to
- *   every story create
+ *   retryAttempts?: number, retryDelayMs?: number, sendProvenance?: boolean,
+ *   sendDates?: boolean }} [options]
+ *   `runId` scopes the idempotency keys (fresh per run, stable across in-run
+ *   retries); `sendProvenance` adds the re-import pair (EAT #31427) to every
+ *   story create; `sendDates` adds backdated `created_at`/`completed_at` to the
+ *   writes (server owner-gated) — off keeps the payloads byte-identical to v3
  * @returns {Promise<WriteResult>}
  */
 export async function writePlan(client, projectId, plan, options = {}) {
@@ -93,6 +95,7 @@ export async function writePlan(client, projectId, plan, options = {}) {
     retryAttempts = 3,
     retryDelayMs = 250,
     sendProvenance = false,
+    sendDates = false,
   } = options;
   /** @template T @param {() => Promise<T>} fn */
   const retrying = (fn) => withRetry(fn, retryAttempts, retryDelayMs);
@@ -133,6 +136,7 @@ export async function writePlan(client, projectId, plan, options = {}) {
         for (const op of ordered) {
           // Built from one object so no path can emit half the pair (EAT #31427
           // owner-gates it and 400s a lone field).
+          /** @type {Record<string, unknown>} */
           const body = {
             name: op.name,
             description: op.description,
@@ -143,6 +147,12 @@ export async function writePlan(client, projectId, plan, options = {}) {
               ? { import_source: "github", import_external_id: op.external_id }
               : {}),
           };
+          if (sendDates) {
+            body.created_at = op.created_at;
+            // completed_at is valid only on a done-state create; omit it for
+            // open issues rather than sending null.
+            if (op.completed_at != null) body.completed_at = op.completed_at;
+          }
           const created = await retrying(() =>
             client.createStory(projectId, body, `${runId}:story:${op.external_id}`),
           );
@@ -165,6 +175,7 @@ export async function writePlan(client, projectId, plan, options = {}) {
                 created.story_id,
                 comment.text,
                 `${runId}:comment:${op.external_id}:${i}`,
+                sendDates ? { createdAt: comment.created_at } : undefined,
               ),
             );
             result.comments += 1;

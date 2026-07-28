@@ -235,6 +235,24 @@ export class EATClient {
   }
 
   /**
+   * True when story/comment creates accept backdated timestamps (`created_at`,
+   * `completed_at`), feature-detected from the published spec's story-create
+   * body. The three fields shipped together, so one probe gates all of them.
+   * Any error (404, auth, parse) counts as "not supported" — the writer then
+   * sends v3-identical payloads.
+   *
+   * @returns {Promise<boolean>}
+   */
+  async supportsBackdating() {
+    const spec = await this.#openapi();
+    for (const [path, ops] of Object.entries(spec?.paths ?? {})) {
+      if (!path.includes("/projects/") || !path.endsWith("/stories")) continue;
+      if ("created_at" in EATClient.#postProperties(spec, ops)) return true;
+    }
+    return false;
+  }
+
+  /**
    * The write fields' `maxLength` limits from the published spec, when any.
    *
    * Aliased request fields (`text`/`comment_text`, `description`/`task_desc`)
@@ -354,19 +372,23 @@ export class EATClient {
   }
 
   /**
-   * Create a comment on a story (direct engine).
+   * Create a comment on a story (direct engine). Pass `createdAt` (an RFC 3339
+   * instant) to backdate it — owner-gated server-side; omit it for a v3-identical
+   * body. Callers gate this on {@link supportsBackdating}.
    *
    * @param {number} projectId
    * @param {number} storyId
    * @param {string} text
    * @param {string} idempotencyKey
+   * @param {{ createdAt?: string | null }} [options]
    * @returns {Promise<any>}
    */
-  async createComment(projectId, storyId, text, idempotencyKey) {
+  async createComment(projectId, storyId, text, idempotencyKey, { createdAt } = {}) {
+    const json = createdAt ? { text, created_at: createdAt } : { text };
     const response = await this.#request(
       "POST",
       `/projects/${projectId}/stories/${storyId}/comments`,
-      { json: { text }, headers: { "Idempotency-Key": idempotencyKey } },
+      { json, headers: { "Idempotency-Key": idempotencyKey } },
     );
     return response.json();
   }
@@ -400,6 +422,19 @@ export class EATClient {
       headers: { "Idempotency-Key": idempotencyKey },
       timeout: timeout ?? DEFAULT_IMPORT_TIMEOUT,
     });
+    return response.json();
+  }
+
+  /**
+   * Fetch the status of an async import job (v2 async accept).
+   *
+   * @param {number} projectId
+   * @param {string} importId
+   * @returns {Promise<any>} the status doc — `{ import_id, status,
+   *   progress_current, progress_total, error, error_code, result }`
+   */
+  async getImport(projectId, importId) {
+    const response = await this.#request("GET", `/projects/${projectId}/imports/${importId}`);
     return response.json();
   }
 }

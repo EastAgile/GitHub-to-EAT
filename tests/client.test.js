@@ -254,6 +254,32 @@ test("supportsProvenanceDedup true when the openapi advertises the pair", async 
   }
 });
 
+// --- backdating feature detection + comment created_at (story #32427) ----------
+
+test("supportsBackdating is true when the spec advertises created_at, false otherwise", async () => {
+  const mock = await startMockServer();
+  try {
+    assert.equal(await new EATClient(mock.baseUrl, "tok").supportsBackdating(), true);
+  } finally {
+    await mock.close();
+  }
+  const older = await startMockServer(makeState({ backdating: false }));
+  try {
+    assert.equal(await new EATClient(older.baseUrl, "tok").supportsBackdating(), false);
+  } finally {
+    await older.close();
+  }
+});
+
+test("supportsBackdating is false when /openapi.json is absent", async () => {
+  const mock = await startMockServer(makeState({ serverDryRun: false }));
+  try {
+    assert.equal(await new EATClient(mock.baseUrl, "tok").supportsBackdating(), false);
+  } finally {
+    await mock.close();
+  }
+});
+
 test("supportsProvenanceDedup false when the pair is absent or the spec 404s", async () => {
   const noPair = await startMockServer(makeState({ provenance: false }));
   try {
@@ -287,4 +313,33 @@ test("listStoryPage sends the provenance filters as query params", async () => {
   );
   assert.equal(seen?.searchParams.get("import_source"), "github");
   assert.equal(seen?.searchParams.get("import_external_id"), "42");
+});
+
+test("supportsBackdating degrades to false on an unparseable spec", async () => {
+  await withServer(
+    (_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end("<<not json>>");
+    },
+    async (base) => {
+      assert.equal(await new EATClient(base, "tok").supportsBackdating(), false);
+    },
+  );
+});
+
+test("createComment sends created_at only when a date is supplied", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const story = await client.createStory(91, { name: "s" }, "k-story");
+    await client.createComment(91, story.story_id, "dated", "k-a", {
+      createdAt: "2020-01-05T00:00:00Z",
+    });
+    await client.createComment(91, story.story_id, "plain", "k-b");
+    const [dated, plain] = mock.state.stories[91][0].comments;
+    assert.equal(dated.created_at, "2020-01-05T00:00:00Z");
+    assert.ok(!("created_at" in plain));
+  } finally {
+    await mock.close();
+  }
 });

@@ -70,7 +70,11 @@ The tool assumes the EAT server provides:
 The API base is `.../api/v1`. Shapes the CLI parses:
 
 - **Import success** (`POST .../import/json`, HTTP 200 — synchronous; schema
-  pinned in the server's `GET .../openapi.json`):
+  pinned in the server's `GET .../openapi.json`). This 200 shape is now the
+  **legacy/fallback** path: the primary path is the async `202` accept +
+  poll (see *Async import* below). The CLI still accepts this synchronous body
+  from older servers, and the body below is byte-identical to the terminal
+  job's `result`:
   ```json
   {
     "dry_run": false,
@@ -108,10 +112,54 @@ The API base is `.../api/v1`. Shapes the CLI parses:
 
 These shapes are mirrored by the bundled mock server (`src/mockserver.js`).
 
-## v2 (reserved — not built yet)
+## v2 — async import
 
-- **Always-async import** — `POST` returns `202 { import_id }`; the CLI polls
-  `GET /projects/{id}/imports/{import_id}` for progress.
+The import is a background job. `POST .../import/json` **accepts** the work and
+returns immediately; the CLI polls a status endpoint until the job finishes.
+
+- **Accept** (`POST .../import/json`, HTTP **202**):
+  ```json
+  { "import_id": "imp-abc123", "status": "pending" }
+  ```
+  The Idempotency-Key semantics are unchanged (same key + same body replays the
+  same `202`/`import_id`; different body → `409 idempotency_conflict`). Dry-run
+  imports ride the **same** async job (`202` → poll → `done` with
+  `result.dry_run: true`).
+
+- **Status** (`GET .../projects/{id}/imports/{import_id}`, HTTP 200):
+  ```json
+  {
+    "import_id": "imp-abc123", "project_id": 91, "source": "github",
+    "created": "2026-07-24T00:00:00Z",
+    "status": "fetching",
+    "progress_current": 2, "progress_total": 5,
+    "error": null, "error_code": null,
+    "result": null
+  }
+  ```
+  - `status` lifecycle: `pending → fetching → writing → done | failed`. Only
+    **done** and **failed** are terminal; file sources skip `fetching`.
+  - `progress_current` / `progress_total` (`int|null`) — the X/Y for the current
+    phase, driving the live progress line.
+  - `error` / `error_code` (`string|null`) — set on `failed`.
+  - `result` (`ImportResult | null`) — present **only on `done`**, and
+    byte-identical to the legacy synchronous 200 body above.
+
+- **Client behaviour** — on a `202`, the CLI polls the status endpoint with
+  **capped exponential backoff** (0.5s → 5s, giving up after ~15 min) and
+  renders a **live progress line** on stderr (`queued` → `fetching X/Y` →
+  `writing` → `done`/`failed`); stdout and the final result rendering are
+  unchanged. A `failed` status raises the job's `error`/`error_code`. When the
+  server instead answers a synchronous `200` (older servers), the CLI uses that
+  body directly — no polling. The shape is detected by the response body, not a
+  version flag.
+
+The async accept, status endpoint, and progression are mirrored by the bundled
+mock server under `makeState({ asyncImport: true })` (`--async` when run
+standalone); `asyncFail: true` drives the `failed` branch.
+
+## Reserved — not built yet
+
 - **Private repos** — a GitHub App authorization flow so users can import their
   own private repositories.
 
@@ -413,13 +461,27 @@ and both are prescanned, in union.
 
 ### Fidelity limitations (direct engine)
 
-- **Timestamps** — `POST /stories` accepts no `created_at` / `completed_at`,
-  so GitHub's creation and close dates cannot be preserved; `created` is the
-  import time. The mapping profile still carries both in its plan for when
-  the API grows the fields.
-- **Comment authorship** — the API has no comment-author attribution;
-  comments are authored by the importing key, with the GitHub author and
-  date riding in the body prefix (`@login on YYYY-MM-DD:`).
+- **Timestamps** — feature-detected from `GET /openapi.json`: when the story
+  create advertises `created_at` (the probe gates all three backdated fields,
+  which shipped together), the direct writer sends `created_at` on **every**
+  story create, `completed_at` (GitHub's `closed_at`) on accepted (closed-issue)
+  creates only — open issues omit it entirely — and `created_at` on every
+  comment create. All are owner-gated server-side; the CLI's agent key
+  qualifies. Against a server that does **not** advertise the field (older
+  server, or `/openapi.json` missing/unparseable) every payload stays
+  byte-identical to v3 — no `created_at` / `completed_at` keys — and `created`
+  is the import time. Server behaviour (owner-gated): `completed_at` is valid
+  only on a done-state create and clamps forward to `created_at`; an accepted
+  create lands in the iteration window containing its completion. A completion
+  that predates the iteration grid falls back to the **current** iteration until
+  the grid-extension server ask (#32434) lands; the create response carries no
+  iteration info, so the write report cannot yet surface which iteration a
+  backdated story landed in.
+- **Comment authorship** — the API has no comment-author attribution; comments
+  are authored by the importing key, with the GitHub author riding in the body
+  prefix. When the comment's `created_at` is sent (backdating-capable server)
+  the prefix is `@login:`; against an older server the date rides there too
+  (`@login on YYYY-MM-DD:`).
 - **Cross-engine dedup** — against a server that exposes the re-import pair
   (EAT #31427), the direct and server engines share the
   `(project, import_source, import_external_id)` key, so mixing engines against
