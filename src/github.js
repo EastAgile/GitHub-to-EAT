@@ -30,7 +30,9 @@ export class GitHubAuthError extends GitHubError {}
  */
 function nextLink(link) {
   if (!link) return null;
-  for (const part of link.split(",")) {
+  // RFC 8288 link targets may carry commas inside <…>; only a comma that
+  // precedes the next `<` actually separates two link-values.
+  for (const part of link.split(/,\s*(?=<)/)) {
     const match = part.match(/<([^>]+)>\s*;\s*rel="next"/);
     if (match) return match[1];
   }

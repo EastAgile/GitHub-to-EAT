@@ -140,6 +140,89 @@ test("pagination picks rel=next out of a multi-rel Link header", async () => {
   );
 });
 
+test("pagination follows a rel=next URL whose query string contains a comma", async () => {
+  /** @type {(string | null)[]} */
+  const seenFields = [];
+  await withGitHub(
+    (req, res) => {
+      const url = new URL(req.url ?? "", "http://x");
+      seenFields.push(url.searchParams.get("fields"));
+      const here = `${url.protocol}//${req.headers.host}${url.pathname}`;
+      if (url.searchParams.get("page") === null) {
+        // The shape GitHub emits once a comma-bearing param paginates: every
+        // target carries the comma, so a bare-comma split shreds all of them.
+        json(res, 200, [{ number: 1 }], {
+          Link: `<${here}?fields=a,b&page=1>; rel="prev", <${here}?fields=a,b&page=2>; rel="next", <${here}?fields=a,b&page=9>; rel="last"`,
+        });
+      } else {
+        json(res, 200, [{ number: 2 }]);
+      }
+    },
+    async (base) => {
+      const issues = await new GitHubClient("o", "r", { apiBase: base }).listIssues();
+      assert.deepEqual(
+        issues.map((i) => i.number),
+        [1, 2],
+      );
+    },
+  );
+  assert.deepEqual(seenFields, [null, "a,b"]);
+});
+
+test("pagination is unaffected by a comma inside a non-next target", async () => {
+  let requests = 0;
+  await withGitHub(
+    (req, res) => {
+      requests += 1;
+      const url = new URL(req.url ?? "", "http://x");
+      const here = `${url.protocol}//${req.headers.host}${url.pathname}`;
+      if (url.searchParams.get("page") === null) {
+        json(res, 200, [{ number: 1 }], {
+          Link: `<${here}?fields=a,b&page=1>; rel="prev", <${here}?page=2>; rel="next"`,
+        });
+      } else {
+        json(res, 200, [{ number: 2 }]);
+      }
+    },
+    async (base) => {
+      const issues = await new GitHubClient("o", "r", { apiBase: base }).listIssues();
+      assert.deepEqual(
+        issues.map((i) => i.number),
+        [1, 2],
+      );
+    },
+  );
+  assert.equal(requests, 2);
+});
+
+test("a Link header without a rel=next ends pagination", async () => {
+  let requests = 0;
+  await withGitHub(
+    (req, res) => {
+      requests += 1;
+      const url = new URL(req.url ?? "", "http://x");
+      const here = `${url.protocol}//${req.headers.host}${url.pathname}`;
+      // Bounded on purpose: #paginate has no cycle guard, so an unbounded
+      // self-referential header would hang the run instead of failing it.
+      if (requests > 1) {
+        json(res, 200, []);
+        return;
+      }
+      json(res, 200, [{ number: 1 }], {
+        Link: `<${here}?page=1>; rel="prev", <${here}?page=1>; rel="first"`,
+      });
+    },
+    async (base) => {
+      const issues = await new GitHubClient("o", "r", { apiBase: base }).listIssues();
+      assert.deepEqual(
+        issues.map((i) => i.number),
+        [1],
+      );
+    },
+  );
+  assert.equal(requests, 1);
+});
+
 test("a request that outlives the timeout maps to GitHubError naming the timeout", async () => {
   await withGitHub(
     () => {
