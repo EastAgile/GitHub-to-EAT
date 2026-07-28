@@ -15,6 +15,7 @@ import { runDirect as defaultRunDirect } from "./direct.js";
 import { assertDirectSupportsIncludes, DEFAULT_ENGINE, ENGINES, parseEngine } from "./engine.js";
 import { GitHubError } from "./github.js";
 import { runImport as defaultRunImport } from "./importer.js";
+import { customizationFlagsGiven, parseCustomization } from "./mapping.js";
 import { MAPPINGS, parseInclude, renderLegend, requestFlags } from "./mappings.js";
 import { preflight as defaultPreflight } from "./preflight.js";
 import { makeImportReporter, runWithProgress } from "./progress.js";
@@ -23,7 +24,9 @@ import { runWizard as defaultRunWizard, WizardAborted } from "./wizard.js";
 
 const USAGE =
   "usage: github-to-eat [-h] [-V] --project ID --repo OWNER/NAME " +
-  "[--include TYPES] [--engine NAME] [--customize] [--dry-run] [-y] [--token GITHUB_TOKEN]";
+  "[--include TYPES] [--engine NAME] [--customize] [--states STATES] " +
+  "[--milestones TITLES] [--story-type TYPE] [--no-comments] [--no-tasks] " +
+  "[--dry-run] [-y] [--token GITHUB_TOKEN]";
 
 const HELP = `${USAGE}
 
@@ -36,10 +39,18 @@ options:
   --repo OWNER/NAME     public GitHub repository, e.g. octocat/hello-world
   --include TYPES       comma-separated types to import: ${Object.keys(MAPPINGS).join(",")} (default: issues)
   --engine NAME         import engine: ${ENGINES.join("|")} (default: ${DEFAULT_ENGINE})
-  --customize           customize the import per run (implies --engine direct; needs a terminal)
+  --customize           customize the import per run, interactively (implies --engine direct; needs a terminal)
   --dry-run             run preflight and show the plan without importing anything
-  -y, --yes             skip the interactive confirmation prompt
+  -y, --yes             skip the interactive confirmation prompt (required off a terminal, unless --dry-run)
   --token GITHUB_TOKEN  GitHub token for a private repo (or set GITHUB_TOKEN); public repos need none
+
+customization (each implies --engine direct; no terminal needed; not with --customize):
+  --states STATES       issue states to import: all|open|closed (default: all)
+  --milestones TITLES   comma-separated milestone titles to import, matched exactly; repeatable,
+                        and \\, is a literal comma inside a title (default: all)
+  --story-type TYPE     story type for every imported issue: infer|feature|bug|chore (default: infer)
+  --no-comments         do not import issue comments
+  --no-tasks            do not convert issue-body checklists into story tasks
 `;
 
 /** Thrown by the --customize announce hook when the member declines the post-wizard confirm. */
@@ -49,15 +60,27 @@ class ConfirmAborted extends Error {}
  * Ask a yes/no question on the controlling terminal; default no.
  *
  * @param {string} question
+ * @param {{ input?: import("node:stream").Readable,
+ *   output?: import("./progress.js").OutStream }} [streams] injected by tests
  * @returns {Promise<boolean>}
  */
-async function defaultConfirm(question) {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+export async function defaultConfirm(
+  question,
+  { input = process.stdin, output = process.stderr } = {},
+) {
+  // OutStream is the minimal write-sink tests inject; readline only calls write.
+  const rl = readline.createInterface({ input, output: /** @type {any} */ (output) });
   try {
-    const answer = await rl.question(question);
-    return /^y(es)?$/i.test(answer.trim());
+    // readline must own the prompt: a line edit redraws it, and anything written
+    // behind readline's back is erased by that redraw.
+    rl.setPrompt(question);
+    rl.prompt();
+    // Read through the iterator so tests can inject the streams; `done` is EOF,
+    // and a stdin that errors counts as "no" rather than crashing the CLI.
+    const { value, done } = await rl[Symbol.asyncIterator]().next();
+    return done ? false : /^y(es)?$/i.test(String(value).trim());
   } catch {
-    return false; // EOF (Ctrl-D) or closed input at the prompt means "no"
+    return false;
   } finally {
     rl.close();
   }
@@ -168,8 +191,9 @@ function reportDryRunPlan(plan, { stdout, stderr, owner, repo, project, projectT
  * @property {typeof defaultRunWizard} [wizard] the --customize wizard; defaults
  *   to the real one, reading from `stdin` and prompting on stderr
  * @property {((question: string) => Promise<boolean>) | null} [confirm] yes/no
- *   prompt; defaults to a terminal prompt when stdin is a TTY, else null
- *   (no prompt — scripts keep running unattended)
+ *   prompt; defaults to a terminal prompt when stdin is a TTY, else null —
+ *   null means "nowhere to ask", and a run that would write then exits 2
+ *   naming --yes (CONTRACT.md, "Confirmation gate — fail closed off a terminal")
  * @property {{ isTTY?: boolean } & Partial<import("node:stream").Readable>} [stdin]
  *   the --customize gate's TTY probe and the wizard's input; defaults to process.stdin
  */
@@ -214,6 +238,11 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
         include: { type: "string" },
         engine: { type: "string" },
         customize: { type: "boolean" },
+        states: { type: "string" },
+        milestones: { type: "string", multiple: true },
+        "story-type": { type: "string" },
+        "no-comments": { type: "boolean" },
+        "no-tasks": { type: "boolean" },
         "dry-run": { type: "boolean" },
         yes: { type: "boolean", short: "y" },
         token: { type: "string" },
@@ -270,6 +299,32 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
   } catch (err) {
     return usageError(`argument --engine: ${err instanceof Error ? err.message : err}`);
   }
+  // Flag combinations are settled before the TTY gate below: a caller that
+  // asked for two contradictory things should hear that, not "needs a terminal".
+  const givenFlags = customizationFlagsGiven(values);
+  /** @type {import("./mapping.js").Customization | null} */
+  let customization = null;
+  if (givenFlags.length) {
+    if (values.customize) {
+      return usageError(
+        `${givenFlags[0]} conflicts with --customize: the customization flags declare the ` +
+          "answers up front, --customize asks for them interactively; drop one of the two",
+      );
+    }
+    if (values.engine === "server") {
+      return usageError(
+        `${givenFlags[0]} conflicts with --engine server: the server engine maps everything ` +
+          "server-side, so there is nothing to customize; drop one of the two flags",
+      );
+    }
+    engine = "direct";
+    try {
+      customization = parseCustomization(values);
+    } catch (err) {
+      return usageError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   if (values.customize) {
     if (values.engine === "server") {
       return usageError(
@@ -284,18 +339,28 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
       );
     }
   }
+
   try {
     if (engine === "direct") assertDirectSupportsIncludes(included);
   } catch (err) {
-    // Blame the flag the member actually typed: --customize forces the direct
-    // engine; if neither was typed the engine is a default, so --include is theirs.
-    const flag =
+    // Blame the flag the caller actually typed: --engine is only one of the
+    // three ways a run ends up on the direct engine.
+    const blamed =
       values.engine !== undefined
         ? "--engine"
         : values.customize === true
           ? "--customize"
-          : "--include";
-    return usageError(`argument ${flag}: ${err instanceof Error ? err.message : err}`);
+          : (customizationFlagsGiven(values)[0] ?? "--include");
+    return usageError(`argument ${blamed}: ${err instanceof Error ? err.message : err}`);
+  }
+
+  // Fail closed: off-terminal there is no way to show the [y/N] confirm, so a
+  // run that would write must say --yes rather than have it assumed.
+  if (!values["dry-run"] && !values.yes && !confirm) {
+    return usageError(
+      "no interactive terminal to confirm on: pass --yes to import without confirmation, " +
+        "or --dry-run to preview the plan without writing",
+    );
   }
 
   let config;
@@ -331,7 +396,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
   // --customize defers the legend + confirm until after the wizard, so they can
   // reflect the member's choices; they run in the direct pipeline's announce hook.
   if (!values.customize) {
-    stdout.write(`${renderLegend(included, engine)}\n`);
+    stdout.write(`${renderLegend(included, engine, customization)}\n`);
 
     // One prompt for both engines — dry-run paths never prompt (they write nothing).
     if (!values["dry-run"] && !values.yes && confirm) {
@@ -362,6 +427,9 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
         included,
         dryRun: values["dry-run"],
         stream: stderr,
+        // The declarative flags land here already built; --customize instead
+        // threads the wizard below, which produces the same object.
+        customization: customization ?? undefined,
         // The wizard runs at the pipeline's fetch→map seam so its questions
         // reflect real issue data; prompts go to stderr, keeping stdout clean.
         customize: values.customize

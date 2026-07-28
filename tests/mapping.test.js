@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   clampPlan,
   contrastTextColor,
+  customizationFlagsGiven,
   DEFAULT_CUSTOMIZATION,
   FALLBACK_LIMITS,
   ISSUES_LEGEND,
@@ -11,6 +12,7 @@ import {
   mapRepo,
   normalizeHexColor,
   parseChecklist,
+  parseCustomization,
   TRUNCATION_NOTICE,
 } from "../src/mapping.js";
 import { MAPPINGS } from "../src/mappings.js";
@@ -690,4 +692,103 @@ test("clampPlan preserves created_at on an over-limit comment", () => {
   );
   assert.equal(stories[0].comments[0].created_at, "2020-01-05T00:00:00Z");
   assert.ok(stories[0].comments[0].text.endsWith(TRUNCATION_NOTICE));
+});
+
+// --- parseCustomization — the declarative flags (#32499) ---------------------
+
+test("no customization flags yield DEFAULT_CUSTOMIZATION", () => {
+  assert.deepEqual(parseCustomization({}), DEFAULT_CUSTOMIZATION);
+});
+
+for (const value of ["all", "open", "closed"]) {
+  test(`--states ${value} sets the states field`, () => {
+    assert.equal(parseCustomization({ states: value }).states, value);
+  });
+}
+
+for (const value of ["infer", "feature", "bug", "chore"]) {
+  test(`--story-type ${value} sets the storyType field`, () => {
+    assert.equal(parseCustomization({ "story-type": value }).storyType, value);
+  });
+}
+
+test("--milestones is an exact-title allowlist, trimmed and deduplicated in order", () => {
+  assert.deepEqual(parseCustomization({ milestones: " v1.0 , v2.0 ,v1.0" }).milestones, [
+    "v1.0",
+    "v2.0",
+  ]);
+});
+
+test("--milestones can be repeated: every occurrence flattens into one allowlist", () => {
+  assert.deepEqual(parseCustomization({ milestones: ["v1.0,v2.0", " v3.0 ", "v1.0"] }).milestones, [
+    "v1.0",
+    "v2.0",
+    "v3.0",
+  ]);
+});
+
+test("a backslash-escaped comma keeps a comma-bearing milestone title in one piece", () => {
+  assert.deepEqual(parseCustomization({ milestones: ["v1.0\\, beta,v2.0"] }).milestones, [
+    "v1.0, beta",
+    "v2.0",
+  ]);
+});
+
+test("--no-comments and --no-tasks turn their field off", () => {
+  assert.equal(parseCustomization({ "no-comments": true }).comments, false);
+  assert.equal(parseCustomization({ "no-tasks": true }).tasks, false);
+});
+
+test("combined flags build the expected object; omitted fields keep their defaults", () => {
+  assert.deepEqual(
+    parseCustomization({ states: "open", milestones: "v1.0", "no-comments": true }),
+    { states: "open", milestones: ["v1.0"], storyType: "infer", comments: false, tasks: true },
+  );
+});
+
+test("an unknown --states value names the flag and its allowed values", () => {
+  assert.throws(
+    () => parseCustomization({ states: "sideways" }),
+    (/** @type {Error} */ err) => {
+      assert.match(err.message, /--states/);
+      assert.match(err.message, /sideways/);
+      assert.match(err.message, /all, open, closed/);
+      return true;
+    },
+  );
+});
+
+test("an unknown --story-type value names the flag and its allowed values", () => {
+  assert.throws(
+    () => parseCustomization({ "story-type": "epic" }),
+    (/** @type {Error} */ err) => {
+      assert.match(err.message, /--story-type/);
+      assert.match(err.message, /epic/);
+      assert.match(err.message, /infer, feature, bug, chore/);
+      return true;
+    },
+  );
+});
+
+test("an invalid value is stripped of control characters before it is reported", () => {
+  assert.throws(
+    () => parseCustomization({ states: "x[2Jy" }),
+    (/** @type {Error} */ err) => {
+      assert.ok(!err.message.includes(""), err.message);
+      assert.match(err.message, /x\[2Jy/);
+      return true;
+    },
+  );
+});
+
+test("--milestones with no titles is an error, not an empty allowlist", () => {
+  assert.throws(() => parseCustomization({ milestones: " , " }), /--milestones/);
+});
+
+test("customizationFlagsGiven names only the customization flags that were passed", () => {
+  assert.deepEqual(customizationFlagsGiven({ project: "91", engine: "direct" }), []);
+  assert.deepEqual(customizationFlagsGiven({ states: "open", "no-tasks": true, yes: true }), [
+    "--states",
+    "--no-tasks",
+  ]);
 });
