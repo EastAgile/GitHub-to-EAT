@@ -476,7 +476,9 @@ test("a 200 non-JSON GitHub body exits 1 with error: on stderr, not a stack trac
   const { port } = /** @type {import("node:net").AddressInfo} */ (server.address());
   try {
     await inTempDir(() =>
-      withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      // Without an explicit base, loadConfig() resolves the production tracker:
+      // only the GitHub failure keeps this test offline today.
+      withEnv({ EAT_AGENT_KEY: "key", EAT_API_BASE: "http://127.0.0.1:9/api/v1" }, async () => {
         const err = capture();
         const code = await main(["--project", "91", "--repo", "o/r", "--engine", "direct", "-y"], {
           stdout: capture(),
@@ -490,6 +492,7 @@ test("a 200 non-JSON GitHub body exits 1 with error: on stderr, not a stack trac
         });
         assert.equal(code, 1);
         assert.match(err.buf, /error: .*expected a JSON array/);
+        assert.doesNotMatch(err.buf, /\n\s+at /);
       }),
     );
   } finally {
