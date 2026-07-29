@@ -83,9 +83,8 @@ const RELEASE_DRAFT_LINE =
   "draft release → story in the backlog (unstarted); no publish date to keep";
 
 /**
- * The releases legend for a run. No customization flag reaches releases — the filters
- * select issues and `release` is the story type that defines them — so only the engine
- * shapes these lines.
+ * No customization flag reaches releases — the filters select issues and `release` is the
+ * type that defines them — so only the engine shapes these lines.
  *
  * @param {import("./engine.js").Engine} [engine]
  * @returns {string[]}
@@ -512,9 +511,8 @@ export const RELEASE_EXTERNAL_ID = new RegExp(`^${RELEASE_ID_PREFIX}(\\d+)$`);
 export const releaseExternalId = (/** @type {string | number} */ id) => `${RELEASE_ID_PREFIX}${id}`;
 
 /**
- * Whether a fetched release can become a story at all. A non-positive-integer id has no
- * stable dedup key, and a blank tag has no story name (a `400 validation_failed` that
- * would abort the whole run) — both are dropped, and the direct pipeline warns.
+ * A non-positive-integer id has no stable dedup key and a blank tag has no story name (a
+ * `400` that would abort the run), so both are dropped — the direct pipeline warns.
  *
  * @param {any} release
  * @returns {boolean}
@@ -538,10 +536,8 @@ export function describeOp(externalId) {
 }
 
 /**
- * One release → its story op, mirroring `release_to_record` (github.rs:868-899): `tag_name`
- * → title (the release's own `name` is never deserialized server-side), notes → description,
- * published → `accepted` with the publish date, draft → the backlog. Never estimated —
- * the `release` story type has `allow_points = false`.
+ * Mirrors `release_to_record` (github.rs:868-899): the release's own `name` is never
+ * deserialized server-side, and `release` is seeded `allow_points = false`, so never estimated.
  *
  * @param {any} release
  * @returns {StoryOp}
@@ -693,9 +689,8 @@ export function mapRepo(
     stories.push(story);
   }
 
-  // Releases carry their own id space and none of the issue customization applies to
-  // them: the state/milestone filters select issues, and `release` is the whole point
-  // of the type, so `--story-type` cannot override it.
+  // No issue customization reaches releases: the filters select issues, and `release` is
+  // the whole point of the type, so `--story-type` cannot override it.
   for (const release of Array.isArray(releases) ? releases : []) {
     if (mappableRelease(release)) stories.push(releaseToStory(release));
   }

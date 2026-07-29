@@ -84,9 +84,8 @@ function warnFiltersMatchNothing({ issues, releases }, customization, stream) {
 }
 
 /**
- * Warn when a fetched release cannot become a story. Both causes are silent data loss
- * otherwise: no positive numeric id means no dedup key, and a blank tag means no story
- * name — a `400` that would abort the run rather than drop one row.
+ * Both drops are silent data loss otherwise: no positive numeric id means no dedup key,
+ * and a blank tag means no story name — a `400` that would abort the run, not lose a row.
  *
  * @param {{ releases?: any[] }} fetched
  * @param {import("./progress.js").OutStream} [stream]

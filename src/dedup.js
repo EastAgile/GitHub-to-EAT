@@ -9,9 +9,8 @@
 import { RELEASE_EXTERNAL_ID, releaseExternalId } from "./mapping.js";
 
 /**
- * The marker line for one external id. A release renders the API resource rather than a
- * `github.com` path: only `/releases/tag/{tag}` browses, and the tag cannot be recovered
- * from the numeric id the dedup key carries, while `/releases/{id}` on the web host 404s.
+ * A release renders the API resource: only `/releases/tag/{tag}` browses, the tag is not
+ * recoverable from the numeric key, and `github.com/…/releases/{id}` 404s.
  *
  * @param {string} owner
  * @param {string} repo

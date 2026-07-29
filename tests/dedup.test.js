@@ -176,9 +176,8 @@ test("applyDedup skips imported stories, stamps markers, and prunes their labels
 
 // --- release markers (#31932) ------------------------------------------------
 
-// github.com/{o}/{r}/releases/{id} 404s (only /releases/tag/{tag} browses, and the
-// tag is not recoverable from the dedup key) — the API resource is the one URL the
-// numeric external id can render that actually resolves.
+// github.com/{o}/{r}/releases/{id} 404s and the tag is not recoverable from the key, so
+// the API resource is the one URL the numeric external id can render that resolves.
 test("markerFor renders a release marker off the namespaced external id", () => {
   assert.equal(
     markerFor("octocat", "hello-world", "release-100"),

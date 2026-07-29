@@ -36,10 +36,8 @@ export function parseEngine(value) {
 /**
  * Reject an `--include` selection the direct engine can't do yet.
  *
- * The server engine handles every type. Throws an `Error` naming the unsupported types,
- * and its own scope straight from {@link DIRECT_SUPPORTED_INCLUDES} so the message cannot
- * outlive what it describes. It names no flag: its caller prefixes whichever flag the
- * member typed to select the engine.
+ * The scope it names comes from {@link DIRECT_SUPPORTED_INCLUDES}, so the message cannot
+ * outlive it; it names no flag, because the caller prefixes whichever one the member typed.
  *
  * @param {string[]} included types from {@link import("./mappings.js").parseInclude}
  */
