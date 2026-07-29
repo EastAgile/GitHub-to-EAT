@@ -372,27 +372,40 @@ falling back to the `x-ratelimit-reset` time); 401 → token rejected.
 
 The direct engine maps fetched GitHub JSON to an EAT write-op plan client-side
 (`src/mapping.js` — pure functions, no HTTP), mirroring the server importer's
-issue mapping so both engines classify the same repo identically:
+issue mapping so both engines classify the same repo identically — with one
+deliberate exception, the closed-reason labels below, which only the direct
+engine produces:
 
 - **State** — open issue → `unstarted` story; closed → `accepted`, keeping the
   GitHub closed date (`completed_at`).
-- **Closed reason** — a closed issue's `state_reason` stays out of the state
-  (closed is closed) and rides a label instead, so a board filter can tell
-  closed-as-done from closed-as-wontfix: `not_planned` → a `not-planned` label,
-  `duplicate` → a `duplicate` label. The mapping is total — `completed`,
-  `reopened`, an absent reason, any reason GitHub adds later, and a
-  `state_reason` on an open row all add no label, leaving that output identical
-  to v3. Reason labels go through the label pipeline below (no hard-coded
-  color, case-insensitive dedup), so an issue already carrying a same-named
-  repo label keeps that label's casing and color and gains nothing.
+- **Closed reason** (**direct engine only** — the server importer flattens every
+  closed issue and emits no such label) — a closed issue's `state_reason` stays
+  out of the state (closed is closed) and rides a label instead, so a board
+  filter can tell closed-as-done from closed-as-wontfix: `not_planned` → a
+  `not-planned` label, `duplicate` → a `duplicate` label, matched on GitHub's
+  exact lowercase spelling. The mapping is total — `completed`, `reopened`, an
+  absent or non-string reason, a differently-cased one, any reason GitHub adds
+  later, and a `state_reason` on an open row all add no label, leaving that
+  output identical to v3. Reason labels go through the label pipeline below (no
+  hard-coded color, case-insensitive dedup), so an issue already carrying a
+  same-named repo label keeps that label's casing and color and gains nothing.
+  The label is this mapper's own classification, not the author's, so it is
+  added *after* type inference has read the issue's labels and can never change
+  a story's type. Only issues imported after this landed carry reason labels —
+  an import appends and never updates, and "Marker dedup" below skips stories
+  already imported, so existing boards keep no reason labels and no re-label
+  pass exists to add them.
 - **Type inference** (labels + title, bug checked first) — a label containing
   `bug`/`fix`/`defect`, or a title starting with `fix`/`bug` → `bug`; a label
   containing `chore`/`maintenance`/`devops`/`infra` → `chore`; else `feature`.
-- **Labels** — names trimmed (blank dropped); colors normalized to lowercase
-  `#rrggbb` (anything else dropped, never an error) with a
-  perceptual-luminance text color (black on light, white on dark). The issue
-  payload's own color wins; the repo label list fills gaps. Only labels on
-  mapped issues are created.
+- **Labels** — names trimmed (blank dropped); duplicate names on one issue
+  collapse case-insensitively, the first spelling winning, so a story never
+  lists the same label twice (EAT get-or-creates labels case-insensitively, so
+  the collapsed spellings would have resolved to one label anyway); colors
+  normalized to lowercase `#rrggbb` (anything else dropped, never an error)
+  with a perceptual-luminance text color (black on light, white on dark). The
+  issue payload's own color wins; the repo label list fills gaps. Only labels
+  on mapped issues are created.
 - **Checklists** — `- [ ]` / `- [x]` items (also `*`/`+` markers, indentation
   allowed) become story tasks; the lines stay in the description verbatim.
 - **Comments** — joined to their issue by `issue_url`. The fetcher has already
@@ -403,11 +416,15 @@ issue mapping so both engines classify the same repo identically:
 - **Identity** — `external_id` is the issue number as a string; rows carrying
   a `pull_request` key are dropped (v3 is issues-only).
 
-The CLI legend's `issues` lines render from this module's own table
-(re-exported through the `MAPPINGS` registry), so legend and mapper cannot
-drift; the server engine's legend output stays byte-identical. The
+The CLI legend's `issues` lines are assembled by this module's own renderer,
+whose default output is what the `MAPPINGS` registry re-exports — the registry
+entry is that render path's product, not a parallel copy, so legend and mapper
+cannot drift. The server engine's legend output stays byte-identical. The
 closed-reason line is the one exception — it renders only under
-`--engine direct`, because the server importer flattens every closed issue.
+`--engine direct`, because the server importer flattens every closed issue. The
+legend describes the mapping, not the selection, so `--states open` still shows
+both the closed-state line and the closed-reason line, and only `--no-comments`
+/ `--no-tasks` ever drop a line.
 
 ### Write surface (direct engine)
 

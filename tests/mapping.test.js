@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  CLOSED_REASON_LABELS,
   clampPlan,
   contrastTextColor,
   customizationFlagsGiven,
@@ -10,6 +11,7 @@ import {
   FALLBACK_LIMITS,
   ISSUES_LEGEND,
   inferStoryType,
+  issuesLegend,
   mapRepo,
   matchesMilestones,
   normalizeHexColor,
@@ -17,7 +19,7 @@ import {
   parseCustomization,
   TRUNCATION_NOTICE,
 } from "../src/mapping.js";
-import { MAPPINGS } from "../src/mappings.js";
+import { MAPPINGS, renderLegend } from "../src/mappings.js";
 
 // --- inferStoryType — mirrors the server's common.rs rules -------------------
 
@@ -215,6 +217,16 @@ test("label dedup is case-insensitive with first-seen casing, like the server", 
   );
 });
 
+test("duplicate names on one issue collapse case-insensitively, first spelling winning", () => {
+  const plan = mapRepo({
+    issues: [ghIssue({ labels: [{ name: "Bug" }, { name: "bug" }, { name: "BUG" }] })],
+    comments: [],
+    labels: [],
+  });
+  assert.deepEqual(plan.stories[0].labels, ["Bug"]);
+  assert.deepEqual(plan.labels, [{ name: "Bug" }]);
+});
+
 test("repo-list color fill matches label names case-insensitively", () => {
   const plan = mapRepo({
     issues: [ghIssue({ labels: [{ name: "Docs" }] })],
@@ -336,7 +348,7 @@ for (const [reason, label] of /** @type {[string, string][]} */ ([
 }
 
 for (const reason of [undefined, null, "completed", "reopened", "some_future_reason"]) {
-  test(`a closed issue with state_reason ${JSON.stringify(reason)} maps byte-identical to v3`, () => {
+  test(`state_reason ${JSON.stringify(reason)} earns no label, mapping as if it were absent`, () => {
     const withReason = mapRepo({
       issues: [closedWith({ state_reason: reason })],
       comments: [],
@@ -348,6 +360,45 @@ for (const reason of [undefined, null, "completed", "reopened", "some_future_rea
     assert.deepEqual(withReason.labels, []);
   });
 }
+
+// Only GitHub's exact lowercase spelling maps: a cased or non-string reason is
+// not a reason GitHub sends, so it must not be coerced into one.
+for (const reason of ["NOT_PLANNED", " not_planned ", ["not_planned"], 7]) {
+  test(`state_reason ${JSON.stringify(reason)} is not GitHub's spelling and adds no label`, () => {
+    const plan = mapRepo({
+      issues: [closedWith({ state_reason: reason })],
+      comments: [],
+      labels: [],
+    });
+    assert.deepEqual(plan.stories[0].labels, []);
+    assert.deepEqual(plan.labels, []);
+  });
+}
+
+test("the closed-reason table is exactly the two reasons CONTRACT.md documents", () => {
+  assert.deepEqual(
+    [...CLOSED_REASON_LABELS],
+    [
+      ["not_planned", "not-planned"],
+      ["duplicate", "duplicate"],
+    ],
+  );
+});
+
+test("a reason label is our classification, so it never feeds story-type inference", () => {
+  CLOSED_REASON_LABELS.set("wontfix", "known-defect");
+  try {
+    const plan = mapRepo({
+      issues: [closedWith({ state_reason: "wontfix" })],
+      comments: [],
+      labels: [],
+    });
+    assert.deepEqual(plan.stories[0].labels, ["known-defect"]);
+    assert.equal(plan.stories[0].story_type, "feature");
+  } finally {
+    CLOSED_REASON_LABELS.delete("wontfix");
+  }
+});
 
 test("state_reason on an open issue is not a close reason and adds no label", () => {
   const plan = mapRepo({
@@ -411,6 +462,14 @@ test("MAPPINGS issues legend is the mapping module's own table, byte-identical",
     "labels → labels (with colors); issue-body checklists → story tasks",
     "comments → comments (body only)",
   ]);
+});
+
+test("the registry entry is the renderer's own output, not a parallel copy of it", () => {
+  assert.deepEqual(ISSUES_LEGEND, issuesLegend());
+  assert.deepEqual(ISSUES_LEGEND, issuesLegend("server", DEFAULT_CUSTOMIZATION));
+  for (const row of MAPPINGS.issues.legend) {
+    assert.ok(renderLegend(["issues"], "server").includes(`    - ${row}`));
+  }
 });
 
 // --- clampPlan — server length limits -----------------------------------------

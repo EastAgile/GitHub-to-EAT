@@ -1,6 +1,7 @@
 /**
  * The direct engine's default mapping profile: GitHub issue JSON in → EAT write-op plan out (pure, no HTTP).
- * Mirrors the server importer's issue mapping (agile-tracker github.rs + common.rs) so both engines classify identically.
+ * Mirrors the server importer's issue mapping (agile-tracker github.rs + common.rs) so both engines classify
+ * identically, with one deliberate exception: the closed-reason labels below, which the server never produces.
  */
 
 // Composed so `--customize` can drop the tasks fragment / comments line without
@@ -15,23 +16,17 @@ const COMMENTS_LINE = "comments → comments (body only)";
 const CLOSED_REASON_LINE =
   "closed as not planned / duplicate → accepted, plus a 'not-planned' / 'duplicate' label";
 
-/**
- * The default (server-engine) issues legend. Lives next to the functions that implement each
- * line and is re-exported through the MAPPINGS registry, so legend and mapper can't drift apart.
- */
-export const ISSUES_LEGEND = [STATE_LINE, `${LABELS_LINE}${TASKS_SUFFIX}`, COMMENTS_LINE];
-
 // Milestone titles are untrusted remote data; strip terminal control chars
 // (ESC/C0/C1/DEL) before they reach the terminal, in the wizard and the legend alike.
 export const stripControls = (/** @type {string} */ s) => s.replace(/\p{Cc}/gu, "");
 
 /**
- * The issues legend for a run: the direct engine adds the closed-reason line, and a
- * {@link Customization} drops the lines its answers turn off (all-default keeps them all).
+ * The issues legend for a run, and the only place these lines are assembled. It describes the
+ * mapping, not the selection, so only `comments`/`tasks` — never `states` — can drop a line.
  *
  * @param {import("./engine.js").Engine} [engine]
  * @param {Customization | null} [customization]
- * @returns {string[]} the server engine's default reproduces {@link ISSUES_LEGEND} verbatim
+ * @returns {string[]}
  */
 export function issuesLegend(engine = "server", customization = null) {
   const { comments, tasks } = customization ?? DEFAULT_CUSTOMIZATION;
@@ -128,6 +123,12 @@ export const DEFAULT_CUSTOMIZATION = {
   comments: true,
   tasks: true,
 };
+
+/**
+ * The default (server-engine) issues legend the MAPPINGS registry re-exports — the renderer's
+ * own output, not a second copy of it, so the registry entry can never describe a dead path.
+ */
+export const ISSUES_LEGEND = issuesLegend();
 
 /** @type {Customization["states"][]} */
 const STATES = ["all", "open", "closed"];
@@ -331,22 +332,22 @@ function commentText(comment, sendDates) {
  */
 
 /** The closed `state_reason` values that earn a label, by GitHub's spelling. */
-const CLOSED_REASON_LABELS = new Map([
+export const CLOSED_REASON_LABELS = new Map([
   ["not_planned", "not-planned"],
   ["duplicate", "duplicate"],
 ]);
 
 /**
- * Total by design: an open row, `completed`, an absent reason and any reason GitHub
- * adds later all fall through to no label, keeping that output identical to v3.
+ * Only GitHub's exact lowercase spellings map — an open row, `completed`, an absent or
+ * non-string reason and any reason GitHub adds later all leave that output identical to v3.
  *
  * @param {boolean} closed
  * @param {unknown} stateReason
  * @returns {string | null}
  */
 function closedReasonLabel(closed, stateReason) {
-  if (!closed) return null;
-  return CLOSED_REASON_LABELS.get(String(stateReason ?? "").toLowerCase()) ?? null;
+  if (!closed || typeof stateReason !== "string") return null;
+  return CLOSED_REASON_LABELS.get(stateReason) ?? null;
 }
 
 /**
@@ -427,21 +428,23 @@ export function mapRepo(
     };
     for (const label of issue.labels ?? []) addLabel(label.name, label.color);
 
+    const title = String(issue.title ?? "");
+    // Inferred before the reason label joins `names`: the type comes from the author's
+    // own labels, never from a label this mapper invented.
+    const storyType =
+      customization.storyType === "infer" ? inferStoryType(names, title) : customization.storyType;
+
     const closed = state === "closed";
     // Closed is closed, so the state stays `accepted`; the label is what lets a
     // board filter tell closed-as-done from closed-as-wontfix.
     addLabel(closedReasonLabel(closed, issue.state_reason), null);
 
-    const title = String(issue.title ?? "");
     const body = (issue.body ?? "").trim();
     const story = {
       external_id: String(issue.number),
       name: title,
       description: body || null,
-      story_type:
-        customization.storyType === "infer"
-          ? inferStoryType(names, title)
-          : customization.storyType,
+      story_type: storyType,
       current_state: /** @type {"unstarted" | "accepted"} */ (closed ? "accepted" : "unstarted"),
       created_at: issue.created_at ?? null,
       completed_at: (closed ? issue.closed_at : null) ?? null,

@@ -107,15 +107,34 @@ test("the direct legend documents the closed-reason labels; the server legend do
   assert.equal(renderLegend(["issues"], "server"), renderLegend(["issues"]));
 });
 
-test("the closed-reason line survives every customization the direct legend allows", () => {
+// The legend describes the mapping, not the selection — `--states open` still names
+// the closed rules, exactly as the pre-existing state line already does.
+test("the closed-reason line survives every customization field, states included", () => {
   for (const customization of [
     DEFAULT_CUSTOMIZATION,
+    ...["all", "open", "closed"].map((states) => ({ ...DEFAULT_CUSTOMIZATION, states })),
+    ...["infer", "feature", "bug", "chore"].map((storyType) => ({
+      ...DEFAULT_CUSTOMIZATION,
+      storyType,
+    })),
+    ...[null, [], ["v1.0"]].map((milestones) => ({ ...DEFAULT_CUSTOMIZATION, milestones })),
     { ...DEFAULT_CUSTOMIZATION, comments: false },
     { ...DEFAULT_CUSTOMIZATION, tasks: false },
   ]) {
-    assert.match(renderLegend(["issues"], "direct", customization), /not-planned/);
-    assert.doesNotMatch(renderLegend(["issues"], "server", customization), /not-planned/);
+    const c = /** @type {import("../src/mapping.js").Customization} */ (customization);
+    assert.match(renderLegend(["issues"], "direct", c), /not-planned/);
+    assert.doesNotMatch(renderLegend(["issues"], "server", c), /not-planned/);
   }
+});
+
+test("the state line and the closed-reason line agree: --states open keeps both", () => {
+  const openOnly = renderLegend(["issues"], "direct", {
+    ...DEFAULT_CUSTOMIZATION,
+    states: "open",
+  });
+  assert.match(openOnly, /closed issue → story \(accepted/);
+  assert.match(openOnly, /closed as not planned \/ duplicate/);
+  assert.match(openOnly, /- issue states: open only/);
 });
 
 test("renderLegend strips terminal control chars from milestone titles", () => {

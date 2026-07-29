@@ -20,8 +20,8 @@ import { describeCustomization, ISSUES_LEGEND, issuesLegend } from "./mapping.js
 export const MAPPINGS = {
   issues: {
     requestField: null,
-    // Lives in mapping.js next to the functions that implement each line, so
-    // the legend and the direct engine's mapper can't drift apart.
+    // What issuesLegend() renders by default, not a second copy of it: a run's lines
+    // come from that same function, so this entry can't drift from what prints.
     legend: ISSUES_LEGEND,
   },
   prs: {
@@ -80,10 +80,10 @@ export function parseInclude(value) {
 /**
  * Render the GitHub → EAT mapping legend for a selection ("show the mirror").
  *
- * One block per selected type, straight from the registry, ending with the
- * append + dedup behaviour so users know a run never replaces or updates. The
- * header names the active engine only when it isn't the default `server`, so
- * the default output stays byte-identical.
+ * One block per selected type — straight from the registry, except `issues`, which
+ * {@link import("./mapping.js").issuesLegend} renders per engine — ending with the append +
+ * dedup behaviour so users know a run never replaces or updates. The header names the active
+ * engine only when it isn't the default `server`, so the default output stays byte-identical.
  *
  * With a `--customize` {@link import("./mapping.js").Customization}, the issues
  * block reflects the choices (comments/checklist lines drop when off) and a
