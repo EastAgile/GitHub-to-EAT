@@ -243,9 +243,8 @@ export const ISSUE_TYPE_STORY_TYPES = new Map([
 ]);
 
 /**
- * The story type an issue's org-defined type declares, or null when there is none to read.
- * Type names are org-authored free text, so the match is case- and space-insensitive — but
- * only on a real string, so a non-string `name` is never coerced into a match.
+ * The story type an org's issue type declares, or null. Names are org-authored free text, so
+ * the match is case- and space-insensitive — and string-guarded, never coercing a non-string.
  *
  * @param {unknown} issueType the REST row's `type` (absent before March 2025, null when unset)
  * @returns {"bug" | "chore" | "feature" | null}
