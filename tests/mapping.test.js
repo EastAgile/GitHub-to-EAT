@@ -356,8 +356,8 @@ for (const reason of [undefined, null, "completed", "reopened", "some_future_rea
       comments: [],
       labels: [],
     });
-    const v3 = mapRepo({ issues: [closedWith({})], comments: [], labels: [] });
-    assert.deepEqual(withReason, v3);
+    const noReason = mapRepo({ issues: [closedWith({})], comments: [], labels: [] });
+    assert.deepEqual(withReason, noReason);
     assert.deepEqual(withReason.stories[0].labels, []);
     assert.deepEqual(withReason.labels, []);
   });
@@ -461,7 +461,7 @@ for (const [name, expected] of /** @type {[string, string][]} */ ([
   ["Bug", "bug"],
   ["Feature", "feature"],
   ["Enhancement", "feature"],
-  ["Task", "chore"],
+  ["Task", "feature"],
   ["Chore", "chore"],
 ])) {
   test(`issue type '${name}' maps to a ${expected} story with no matching label or title`, () => {
@@ -475,14 +475,16 @@ for (const [name, expected] of /** @type {[string, string][]} */ ([
   });
 }
 
-test("the issue-type table is exactly the names CONTRACT.md documents", () => {
+// Task lands on feature, not chore: GitHub seeds every org with Bug/Feature/Task,
+// so Task is ordinary product work and belongs inside velocity (see CONTRACT.md).
+test("the issue-type table classifies exactly these five names", () => {
   assert.deepEqual(
     [...ISSUE_TYPE_STORY_TYPES],
     [
       ["bug", "bug"],
       ["feature", "feature"],
       ["enhancement", "feature"],
-      ["task", "chore"],
+      ["task", "feature"],
       ["chore", "chore"],
     ],
   );
@@ -491,7 +493,7 @@ test("the issue-type table is exactly the names CONTRACT.md documents", () => {
 // GitHub issue-type names are org-authored free text, so the match is
 // case-insensitive on the trimmed name.
 for (const name of ["bug", "BUG", "bUg", "  Bug  "]) {
-  test(`issue type ${JSON.stringify(name)} matches case- and space-insensitively`, () => {
+  test(`issue type ${JSON.stringify(name)} matches case-insensitively, surrounding space ignored`, () => {
     const plan = mapRepo({
       issues: [ghIssue({ title: "Add a widget", type: { name } })],
       comments: [],
@@ -524,12 +526,12 @@ for (const type of [undefined, null, {}, { name: null }, { name: "" }]) {
       comments: [],
       labels: [],
     });
-    const v3 = mapRepo({
+    const noTypeKey = mapRepo({
       issues: [ghIssue({ title: "Fix the parser" })],
       comments: [],
       labels: [],
     });
-    assert.deepEqual(withType, v3);
+    assert.deepEqual(withType, noTypeKey);
     assert.equal(withType.stories[0].story_type, "bug");
   });
 }
@@ -560,8 +562,11 @@ test("an unknown issue-type name never reaches the plan, control chars included"
     comments: [],
     labels: [],
   });
+  // Deep-equality against a no-`type` control, not a fragment match: nothing the
+  // name contains can survive, whatever the fixture's other text happens to be.
+  const noType = mapRepo({ issues: [ghIssue({})], comments: [], labels: [] });
   assert.ok(!JSON.stringify(plan).includes("\\u001b"));
-  assert.ok(!JSON.stringify(plan).includes("ike"));
+  assert.deepEqual(plan, noType);
 });
 
 test("--story-type overrides the issue type, exactly as it overrides the heuristic", () => {
@@ -572,14 +577,21 @@ test("--story-type overrides the issue type, exactly as it overrides the heurist
   assert.equal(plan.stories[0].story_type, "bug");
 });
 
+// The type must NOT classify here, or the heuristic never runs and the ordering
+// this test exists to pin becomes unobservable.
 test("a closed-reason label is added after typing, so it cannot become the type", () => {
-  const plan = mapRepo({
-    issues: [closedWith({ state_reason: "duplicate", type: { name: "Task" } })],
-    comments: [],
-    labels: [],
-  });
-  assert.equal(plan.stories[0].story_type, "chore");
-  assert.deepEqual(plan.stories[0].labels, ["duplicate"]);
+  CLOSED_REASON_LABELS.set("wontfix", "known-defect");
+  try {
+    const plan = mapRepo({
+      issues: [closedWith({ state_reason: "wontfix", type: { name: "Spike" } })],
+      comments: [],
+      labels: [],
+    });
+    assert.deepEqual(plan.stories[0].labels, ["known-defect"]);
+    assert.equal(plan.stories[0].story_type, "feature");
+  } finally {
+    CLOSED_REASON_LABELS.delete("wontfix");
+  }
 });
 
 test("storyTypeFromIssueType returns null for anything it does not classify", () => {

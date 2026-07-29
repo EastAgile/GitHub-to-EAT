@@ -1456,8 +1456,8 @@ test("on a terminal the confirm question survives a backspace edit", async () =>
 const CLOSED_REASON_LINE =
   "    - closed as not planned / duplicate → accepted, plus a 'not-planned' / 'duplicate' label\n";
 const ISSUE_TYPE_LINE =
-  "    - issue type Bug / Feature / Task → bug / feature / chore story; " +
-  "unset or unknown types infer from labels + title\n";
+  "    - issue type Bug → bug; Feature / Enhancement / Task → feature; Chore → chore; " +
+  "otherwise labels + title decide\n";
 const DIRECT_ONLY_LINES = CLOSED_REASON_LINE + ISSUE_TYPE_LINE;
 
 /** @param {string} [directOnlyLines] */
