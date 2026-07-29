@@ -126,6 +126,92 @@ test("unreachable host raises EATError", async () => {
   await assert.rejects(client.getMeta(), EATError);
 });
 
+test("a 200 non-JSON body raises EATError, not a raw SyntaxError", async () => {
+  await withServer(
+    (_req, res) => {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end("<html><body>Captive portal: sign in to continue</body></html>");
+    },
+    async (base) => {
+      await assert.rejects(new EATClient(base, "tok").getMeta(), (err) => {
+        assert.ok(err instanceof EATError);
+        assert.ok(!(err instanceof SyntaxError));
+        assert.match(err.message, /unexpected payload for \/meta \(expected JSON\)/);
+        assert.ok(err.cause instanceof SyntaxError);
+        return true;
+      });
+    },
+  );
+});
+
+test("every JSON-returning endpoint maps a non-JSON body to EATError", async () => {
+  await withServer(
+    (_req, res) => {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end("<html>nope</html>");
+    },
+    async (base) => {
+      const client = new EATClient(base, "tok");
+      for (const call of [
+        () => client.getProject(91),
+        () => client.projectHasStories(91),
+        () => client.listStoryPage(91),
+        () => client.createLabel(91, { name: "bug" }, "k"),
+        () => client.createStory(91, { name: "s" }, "k"),
+        () => client.createTask(91, 1, { description: "t" }, "k"),
+        () => client.createComment(91, 1, "hi", "k"),
+        () => client.importGithub(91, "o", "r", { idempotencyKey: "k" }),
+        () => client.getImport(91, "imp-1"),
+      ]) {
+        await assert.rejects(call(), EATError);
+      }
+    },
+  );
+});
+
+test("a body-phase failure keeps the timeout wording, not the payload wording", async () => {
+  await withServer(
+    (_req, res) => {
+      // Headers land at once and the body then stalls: the request's abort clock
+      // is still armed, so this failure arrives during the parse, not the fetch.
+      res.writeHead(200, { "Content-Type": "application/json", "Content-Length": "64" });
+      res.write("{");
+    },
+    async (base) => {
+      const client = new EATClient(base, "tok", { timeout: 0.2 });
+      await assert.rejects(client.getMeta(), EATTimeout);
+    },
+  );
+});
+
+test("a hostile error body is scrubbed of control characters", async () => {
+  await withServer(
+    (_req, res) => {
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("boom[2J\rrewritten");
+    },
+    async (base) => {
+      await assert.rejects(new EATClient(base, "tok").getMeta(), (err) => {
+        assert.ok(err instanceof EATError);
+        assert.match(err.message, /request to \/meta failed \(500\): boom\[2Jrewritten/);
+        return true;
+      });
+    },
+  );
+});
+
+test("openapi feature detection still degrades to false on a non-JSON spec", async () => {
+  await withServer(
+    (_req, res) => {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end("<html>not a spec</html>");
+    },
+    async (base) => {
+      assert.equal(await new EATClient(base, "tok").supportsServerDryRun(), false);
+    },
+  );
+});
+
 test("projectHasStories true on a bare list", async () => {
   await withServer(
     (req, res) => {
