@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { DEFAULT_CUSTOMIZATION, ISSUE_TYPE_STORY_TYPES } from "../src/mapping.js";
+import { DEFAULT_CUSTOMIZATION, ISSUE_TYPE_STORY_TYPES, releasesLegend } from "../src/mapping.js";
 import { MAPPINGS, parseInclude, renderLegend, requestFlags } from "../src/mappings.js";
 
 test("issues is a known type with no request field", () => {
@@ -260,4 +260,54 @@ test("no --include subset or customization leaks sub-issue text into --engine se
     }
   }
   assert.equal(cases, INCLUDE_SUBSETS.length * (CUSTOMIZATIONS.length + 1));
+});
+
+// --- releases in the legend (#31932) -----------------------------------------
+
+// Transcribed from `renderLegend` at a309000, before the direct engine imported
+// releases: a same-build comparison could not catch a line leaking into `server`.
+const SERVER_RELEASES_BLOCK_AT_a309000 = [
+  "  releases:",
+  "    - release → release-type story (tag → title, notes → description, publish date kept)",
+].join("\n");
+
+test("--engine server renders the pre-#31932 releases block for every customization", () => {
+  let cases = 0;
+  for (const customization of [null, ...CUSTOMIZATIONS]) {
+    cases += 1;
+    const legend = renderLegend(["issues", "releases"], "server", customization);
+    assert.ok(legend.includes(SERVER_RELEASES_BLOCK_AT_a309000), "server releases block drifted");
+    assert.doesNotMatch(legend, /draft/i);
+  }
+  assert.equal(cases, CUSTOMIZATIONS.length + 1);
+});
+
+test("the direct legend documents draft releases; the server legend does not", () => {
+  const direct = renderLegend(["issues", "releases"], "direct");
+  assert.match(direct, /- draft release → story in the backlog \(unstarted\)/);
+  assert.ok(direct.includes(SERVER_RELEASES_BLOCK_AT_a309000.split("\n")[1]));
+  assert.doesNotMatch(renderLegend(["issues", "releases"], "server"), /draft/i);
+});
+
+// No customization flag touches releases, so no case may drop or reshape the block.
+test("the release lines survive every customization on the direct engine", () => {
+  let cases = 0;
+  for (const customization of [null, ...CUSTOMIZATIONS]) {
+    cases += 1;
+    const legend = renderLegend(["issues", "releases"], "direct", customization);
+    assert.match(legend, /- release → release-type story/);
+    assert.match(legend, /- draft release → /);
+  }
+  assert.equal(cases, CUSTOMIZATIONS.length + 1);
+});
+
+test("a run without --include releases renders no release lines at all", () => {
+  for (const engine of /** @type {const} */ (["server", "direct"])) {
+    assert.doesNotMatch(renderLegend(["issues"], engine), /release/i);
+  }
+});
+
+test("the releases registry entry is the renderer's own default output", () => {
+  assert.deepEqual(MAPPINGS.releases.legend, releasesLegend());
+  assert.deepEqual(MAPPINGS.releases.legend, releasesLegend("server"));
 });

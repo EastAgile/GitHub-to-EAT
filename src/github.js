@@ -19,6 +19,9 @@ const UNEXPECTED_PAYLOAD = "GitHub returned an unexpected payload (expected a JS
 // `Link` following is otherwise unbounded, and this stage runs once per parent:
 // 2000 sub-issues is far past any real hierarchy, so more means a broken server.
 const MAX_SUB_ISSUE_PAGES = 20;
+// The server importer's own release cap (github.rs MAX_PAGES), so no repo it
+// accepts is refused here. Exported so the bound is testable without guessing.
+export const MAX_RELEASE_PAGES = 200;
 // A repo-wide failure would otherwise render one line per advertised parent.
 const MAX_NAMED_FAILURES = 10;
 
@@ -262,6 +265,15 @@ export class GitHubClient {
   }
 
   /**
+   * List the repo's releases (`GET /releases`), drafts included.
+   *
+   * @returns {Promise<any[]>}
+   */
+  async listReleases() {
+    return this.#paginate("/releases?per_page=100", MAX_RELEASE_PAGES);
+  }
+
+  /**
    * List one issue's sub-issues (`GET /issues/{n}/sub_issues`).
    *
    * @param {string} number
@@ -358,14 +370,17 @@ export class GitHubClient {
    * The repo-wide comments endpoint includes PR conversation comments; only
    * comments on kept issues survive, so mapping never sees PR chatter.
    *
+   * @param {{ releases?: boolean }} [options] `releases` adds the releases listing
+   *   (`--include releases`); off, that endpoint is never requested
    * @returns {Promise<{ issues: any[], comments: any[], labels: any[],
-   *   subIssues: Map<string, string[]> }>}
+   *   subIssues: Map<string, string[]>, releases: any[] }>}
    */
-  async fetchAll() {
-    const [issues, comments, labels] = await Promise.all([
+  async fetchAll({ releases = false } = {}) {
+    const [issues, comments, labels, releaseRows] = await Promise.all([
       this.listIssues(),
       this.listComments(),
       this.listLabels(),
+      releases ? this.listReleases() : [],
     ]);
     const kept = new Set(issues.map((issue) => String(issue.number)));
     return {
@@ -376,6 +391,7 @@ export class GitHubClient {
       }),
       labels,
       subIssues: await this.#fetchSubIssues(issues),
+      releases: releaseRows,
     };
   }
 }

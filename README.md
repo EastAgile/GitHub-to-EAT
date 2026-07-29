@@ -112,7 +112,8 @@ must contain `issues` — the other types only add to an issue import:
   its own.
 - `milestones` — GitHub milestones become epics.
 - `releases` — GitHub Releases become release-type stories (tag → title,
-  notes → description, publish date kept).
+  notes → description, publish date kept). Draft releases are imported too,
+  landing in the backlog rather than being skipped. Works on both engines.
 
 **Sub-issues** need no flag. EAT has no parent/child story relation, so on
 `--engine direct` the hierarchy rides the description's last paragraph instead:

@@ -18,6 +18,7 @@ import {
   FALLBACK_LIMITS,
   hasMilestoneFilter,
   ISSUE_TYPE_NAMES,
+  mappableRelease,
   mapRepo,
   matchesMilestones,
   matchesStates,
@@ -44,11 +45,11 @@ import { writePlan } from "./writer.js";
  * zero stories with no explanation. Unmatched titles are named on their own
  * because the run may still import the other ones.
  *
- * @param {{ issues: any[] }} fetched
+ * @param {{ issues: any[], releases?: any[] }} fetched
  * @param {import("./mapping.js").Customization} customization
  * @param {import("./progress.js").OutStream} [stream]
  */
-function warnFiltersMatchNothing({ issues }, customization, stream) {
+function warnFiltersMatchNothing({ issues, releases }, customization, stream) {
   const filters = describeFilters(customization);
   if (!filters.length) return;
   const { states, milestones } = customization;
@@ -70,11 +71,33 @@ function warnFiltersMatchNothing({ issues }, customization, stream) {
   }
 
   if (!candidates.some((issue) => matchesMilestones(issue, milestones))) {
+    // The filters select issues only, so a release-bearing run still imports something
+    // and must not be told otherwise.
+    const stillImports = (releases ?? []).filter(mappableRelease).length;
     stream?.write(
       `warning: no fetched issue matches this run's filters (${filters.join("; ")}) — ` +
-        "nothing to import.\n",
+        (stillImports
+          ? `no issues to import; the run still imports ${stillImports} release(s).\n`
+          : "nothing to import.\n"),
     );
   }
+}
+
+/**
+ * Warn when a fetched release cannot become a story. Both causes are silent data loss
+ * otherwise: no positive numeric id means no dedup key, and a blank tag means no story
+ * name — a `400` that would abort the run rather than drop one row.
+ *
+ * @param {{ releases?: any[] }} fetched
+ * @param {import("./progress.js").OutStream} [stream]
+ */
+function warnUnmappableReleases({ releases }, stream) {
+  const dropped = (releases ?? []).filter((release) => !mappableRelease(release)).length;
+  if (!dropped) return;
+  stream?.write(
+    `warning: ${dropped} fetched release(s) carry no positive numeric id or no tag name and are ` +
+      "not imported — the id is the re-import key and the tag is the story's title.\n",
+  );
 }
 
 /**
@@ -124,23 +147,25 @@ function warnUnrecognisedIssueTypes({ issues }, customization, stream) {
  *     => Promise<import("./mapping.js").Customization>,
  *   announce?: (fetched: { issues: any[], comments: any[], labels: any[] },
  *     customization: import("./mapping.js").Customization) => Promise<void>,
- *   github?: { fetchAll(): Promise<{ issues: any[], comments: any[], labels: any[],
- *     subIssues?: Map<string, string[]> }> } }} options `customize` (the wizard) runs at the
+ *   github?: { fetchAll(options?: { releases?: boolean }): Promise<{ issues: any[],
+ *     comments: any[], labels: any[], subIssues?: Map<string, string[]>,
+ *     releases?: any[] }> } }} options `customize` (the wizard) runs at the
  *   fetch→map seam so its questions use real data; `announce` (the customized
  *   legend + confirm) runs right after, and may throw to abort before any
  *   write; `github` is a test seam
  * @returns {Promise<import("./importer.js").ImportOutcome>}
  */
 export async function runDirect(client, projectId, owner, repo, options) {
-  const { token, dryRun, stream, runId, github, customize, announce } = options;
+  const { token, dryRun, stream, runId, github, customize, announce, included = [] } = options;
   // Buffered, not written straight through: the fetch runs under a TTY spinner that
   // holds an open `\r` line, which would otherwise swallow the first warning.
   /** @type {string[]} */
   const fetchWarnings = [];
   const source =
     github ?? new GitHubClient(owner, repo, { token, warn: (m) => fetchWarnings.push(m) });
+  const releases = included.includes("releases");
   const fetched = await runWithProgress(
-    () => source.fetchAll(),
+    () => source.fetchAll({ releases }),
     `fetching ${owner}/${repo} from GitHub`,
     { stream },
   );
@@ -152,6 +177,7 @@ export async function runDirect(client, projectId, owner, repo, options) {
     : (options.customization ?? DEFAULT_CUSTOMIZATION);
   warnFiltersMatchNothing(fetched, customization, stream);
   warnUnrecognisedIssueTypes(fetched, customization, stream);
+  warnUnmappableReleases(fetched, stream);
   // The customized legend + confirm reflect those answers, so they land here —
   // a declined confirm throws, aborting before any prescan or write.
   if (announce) await announce(fetched, customization);

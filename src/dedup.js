@@ -6,14 +6,23 @@
  * See CONTRACT.md "Marker dedup".
  */
 
+import { RELEASE_EXTERNAL_ID, releaseExternalId } from "./mapping.js";
+
 /**
+ * The marker line for one external id. A release renders the API resource rather than a
+ * `github.com` path: only `/releases/tag/{tag}` browses, and the tag cannot be recovered
+ * from the numeric id the dedup key carries, while `/releases/{id}` on the web host 404s.
+ *
  * @param {string} owner
  * @param {string} repo
- * @param {string} externalId the GitHub issue number, as a string
+ * @param {string} externalId the GitHub issue number, or `release-<id>` for a release
  * @returns {string}
  */
 export function markerFor(owner, repo, externalId) {
-  return `Imported from https://github.com/${owner}/${repo}/issues/${externalId}`;
+  const release = RELEASE_EXTERNAL_ID.exec(externalId);
+  return release
+    ? `Imported from https://api.github.com/repos/${owner}/${repo}/releases/${release[1]}`
+    : `Imported from https://github.com/${owner}/${repo}/issues/${externalId}`;
 }
 
 /**
@@ -44,13 +53,15 @@ function escapeRegExp(s) {
 export function markerExternalId(description, owner, repo) {
   const lines = (description ?? "").trimEnd().split("\n");
   const last = lines[lines.length - 1].trim();
-  const match = last.match(
-    new RegExp(
-      `^Imported from https://github\\.com/${escapeRegExp(owner)}/${escapeRegExp(repo)}/issues/(\\d+)$`,
-      "i",
-    ),
+  const scope = `${escapeRegExp(owner)}/${escapeRegExp(repo)}`;
+  const issue = last.match(
+    new RegExp(`^Imported from https://github\\.com/${scope}/issues/(\\d+)$`, "i"),
   );
-  return match ? match[1] : null;
+  if (issue) return issue[1];
+  const release = last.match(
+    new RegExp(`^Imported from https://api\\.github\\.com/repos/${scope}/releases/(\\d+)$`, "i"),
+  );
+  return release ? releaseExternalId(release[1]) : null;
 }
 
 /**

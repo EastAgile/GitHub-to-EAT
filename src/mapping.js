@@ -75,6 +75,30 @@ export function issuesLegend(engine = "server", customization = null) {
   return lines;
 }
 
+const RELEASE_LINE =
+  "release → release-type story (tag → title, notes → description, publish date kept)";
+// Direct-only: naming drafts in the server legend would change bytes the server
+// engine has always printed, and only the direct engine's mapping is documented here.
+const RELEASE_DRAFT_LINE =
+  "draft release → story in the backlog (unstarted); no publish date to keep";
+
+/**
+ * The releases legend for a run. No customization flag reaches releases — the filters
+ * select issues and `release` is the story type that defines them — so only the engine
+ * shapes these lines.
+ *
+ * @param {import("./engine.js").Engine} [engine]
+ * @returns {string[]}
+ */
+export function releasesLegend(engine = "server") {
+  const lines = [RELEASE_LINE];
+  if (engine === "direct") lines.push(RELEASE_DRAFT_LINE);
+  return lines;
+}
+
+/** The default (server-engine) releases legend the MAPPINGS registry re-exports. */
+export const RELEASES_LEGEND = releasesLegend();
+
 /**
  * One human-readable line per non-default choice, for the legend's `Customized:`
  * block. Empty when every field is at its default (an all-default customization
@@ -479,6 +503,67 @@ function closedReasonLabel(closed, stateReason) {
   return CLOSED_REASON_LABELS.get(stateReason) ?? null;
 }
 
+// The server importer namespaces a release's external id (`github.rs:896`) so a
+// release id can't collide with an issue / PR number in the #26483 dedup key.
+const RELEASE_ID_PREFIX = "release-";
+
+/** Both derived from the prefix above, so the writer's key and the marker's parse cannot drift. */
+export const RELEASE_EXTERNAL_ID = new RegExp(`^${RELEASE_ID_PREFIX}(\\d+)$`);
+export const releaseExternalId = (/** @type {string | number} */ id) => `${RELEASE_ID_PREFIX}${id}`;
+
+/**
+ * Whether a fetched release can become a story at all. A non-positive-integer id has no
+ * stable dedup key, and a blank tag has no story name (a `400 validation_failed` that
+ * would abort the whole run) — both are dropped, and the direct pipeline warns.
+ *
+ * @param {any} release
+ * @returns {boolean}
+ */
+export function mappableRelease(release) {
+  const id = release?.id;
+  const tag = release?.tag_name;
+  return Number.isInteger(id) && id > 0 && typeof tag === "string" && tag.trim() !== "";
+}
+
+/**
+ * How one plan op is named in a warning — `issue #64`, or `release #100` for the
+ * namespaced release key, which would otherwise read `issue #release-100`.
+ *
+ * @param {string} externalId
+ * @returns {string}
+ */
+export function describeOp(externalId) {
+  const release = RELEASE_EXTERNAL_ID.exec(externalId);
+  return release ? `release #${release[1]}` : `issue #${externalId}`;
+}
+
+/**
+ * One release → its story op, mirroring `release_to_record` (github.rs:868-899): `tag_name`
+ * → title (the release's own `name` is never deserialized server-side), notes → description,
+ * published → `accepted` with the publish date, draft → the backlog. Never estimated —
+ * the `release` story type has `allow_points = false`.
+ *
+ * @param {any} release
+ * @returns {StoryOp}
+ */
+function releaseToStory(release) {
+  const publishedAt = release.published_at ?? null;
+  const published = release.draft !== true && publishedAt !== null;
+  const body = typeof release.body === "string" ? release.body.trim() : "";
+  return {
+    external_id: releaseExternalId(release.id),
+    name: release.tag_name.trim(),
+    description: body || null,
+    story_type: "release",
+    current_state: published ? "accepted" : "unstarted",
+    created_at: release.created_at ?? null,
+    completed_at: published ? publishedAt : null,
+    labels: [],
+    tasks: [],
+    comments: [],
+  };
+}
+
 /**
  * Story types whose state set includes `rejected` — the server's `valid_states_for_type`
  * (`handlers/stories.rs`) gives a chore only unstarted/started/accepted, so a chore
@@ -488,13 +573,13 @@ const REJECTABLE_TYPES = new Set(["feature", "bug"]);
 
 /**
  * @typedef {object} StoryOp one EAT story to create, with its sub-resources
- * @property {string} external_id the GitHub issue number, as a string
+ * @property {string} external_id the GitHub issue number, or `release-<id>` for a release
  * @property {string} name EAT's create-body title field
  * @property {string | null} description issue body, trimmed, plus `crossLinks`
  * @property {string} [crossLinks] the cross-link block already at the tail of
  *   `description` (empty when the issue is in no sub-issue relation). Carried so
  *   {@link clampPlan} can cut the body around it; the writer never sends it.
- * @property {"bug" | "chore" | "feature"} story_type
+ * @property {"bug" | "chore" | "feature" | "release"} story_type
  * @property {"unstarted" | "accepted" | "rejected"} current_state
  * @property {string | null} created_at
  * @property {string | null} completed_at the GitHub closed date, kept
@@ -508,7 +593,7 @@ const REJECTABLE_TYPES = new Set(["feature", "bug"]);
  * writer's plan. Joining comments by `issue_url` drops PR chatter — those numbers are unmapped PRs.
  *
  * @param {{ issues: any[], comments: any[], labels: any[],
- *   subIssues?: Map<string, string[]> | null }} repo
+ *   subIssues?: Map<string, string[]> | null, releases?: any[] | null }} repo
  * @param {Customization} [customization] per-run overrides; the default reproduces
  *   this profile unchanged (the filter/override stories consume the other fields)
  * @param {boolean} [sendDates] when true the comment's date is sent on the write, so
@@ -517,7 +602,7 @@ const REJECTABLE_TYPES = new Set(["feature", "bug"]);
  * @returns {{ labels: LabelOp[], stories: StoryOp[] }}
  */
 export function mapRepo(
-  { issues, comments, labels, subIssues },
+  { issues, comments, labels, subIssues, releases },
   customization = DEFAULT_CUSTOMIZATION,
   sendDates = false,
 ) {
@@ -606,6 +691,13 @@ export function mapRepo(
     };
     byIssue.set(story.external_id, story.comments);
     stories.push(story);
+  }
+
+  // Releases carry their own id space and none of the issue customization applies to
+  // them: the state/milestone filters select issues, and `release` is the whole point
+  // of the type, so `--story-type` cannot override it.
+  for (const release of Array.isArray(releases) ? releases : []) {
+    if (mappableRelease(release)) stories.push(releaseToStory(release));
   }
 
   for (const comment of customization.comments ? comments : []) {
@@ -702,7 +794,7 @@ export function clampPlan(plan, limits, { reserveDescription = () => 0, warn = (
     /** @param {string} field @param {number} limit */
     const notice = (field, limit) =>
       warn(
-        `warning: issue #${op.external_id}: ${field} truncated to ${limit} bytes (server limit)\n`,
+        `warning: ${describeOp(op.external_id)}: ${field} truncated to ${limit} bytes (server limit)\n`,
       );
 
     if (byteLen(out.name) > limits.storyName) {

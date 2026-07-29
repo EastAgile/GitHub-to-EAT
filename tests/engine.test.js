@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   assertDirectSupportsIncludes,
   DEFAULT_ENGINE,
+  DIRECT_SUPPORTED_INCLUDES,
   ENGINES,
   parseEngine,
 } from "../src/engine.js";
@@ -28,11 +29,17 @@ for (const bad of ["", "SERVER", "local", "srever", "both"]) {
   });
 }
 
-test("assertDirectSupportsIncludes allows issues only", () => {
-  assert.doesNotThrow(() => assertDirectSupportsIncludes(["issues"]));
+test("DIRECT_SUPPORTED_INCLUDES is issues plus releases", () => {
+  assert.deepEqual(DIRECT_SUPPORTED_INCLUDES, ["issues", "releases"]);
 });
 
-for (const extra of ["prs", "milestones", "releases"]) {
+for (const selected of [["issues"], ["issues", "releases"]]) {
+  test(`assertDirectSupportsIncludes allows ${selected.join(",")}`, () => {
+    assert.doesNotThrow(() => assertDirectSupportsIncludes(selected));
+  });
+}
+
+for (const extra of ["prs", "milestones"]) {
   test(`assertDirectSupportsIncludes rejects issues,${extra}`, () => {
     assert.throws(
       () => assertDirectSupportsIncludes(["issues", extra]),
@@ -42,15 +49,16 @@ for (const extra of ["prs", "milestones", "releases"]) {
 }
 
 // The CLI prefixes this message with whichever flag the member typed, so the
-// body must not name a flag of its own.
-test("assertDirectSupportsIncludes names the engine, not a flag", () => {
+// body must not name a flag of its own. The supported list is derived, so it
+// cannot go on claiming issues-only once another type lands.
+test("assertDirectSupportsIncludes names the engine and its real scope, not a flag", () => {
   assert.throws(
     () => assertDirectSupportsIncludes(["issues", "prs"]),
     (err) => {
       assert.ok(err instanceof Error);
       assert.equal(
         err.message,
-        "the direct engine imports issues only (V3); prs not supported by the direct engine yet",
+        "the direct engine imports issues + releases; prs not supported by the direct engine yet",
       );
       assert.ok(!err.message.includes("--"), `message names a flag: ${err.message}`);
       return true;

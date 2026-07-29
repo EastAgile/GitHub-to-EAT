@@ -173,3 +173,93 @@ test("applyDedup skips imported stories, stamps markers, and prunes their labels
   // The input plan is not mutated.
   assert.equal(plan.stories[1].description, null);
 });
+
+// --- release markers (#31932) ------------------------------------------------
+
+// github.com/{o}/{r}/releases/{id} 404s (only /releases/tag/{tag} browses, and the
+// tag is not recoverable from the dedup key) — the API resource is the one URL the
+// numeric external id can render that actually resolves.
+test("markerFor renders a release marker off the namespaced external id", () => {
+  assert.equal(
+    markerFor("octocat", "hello-world", "release-100"),
+    "Imported from https://api.github.com/repos/octocat/hello-world/releases/100",
+  );
+});
+
+test("the issue marker is untouched by the release form", () => {
+  assert.equal(
+    markerFor("octocat", "hello-world", "42"),
+    "Imported from https://github.com/octocat/hello-world/issues/42",
+  );
+});
+
+test("markerExternalId round-trips a release marker back to its namespaced id", () => {
+  assert.equal(markerExternalId(markerFor("o", "r", "release-100"), "o", "r"), "release-100");
+  assert.equal(
+    markerExternalId(`notes\n\n${markerFor("o", "r", "release-7")}`, "o", "r"),
+    "release-7",
+  );
+});
+
+test("a release marker for another repo never suppresses this repo's import", () => {
+  assert.equal(markerExternalId(markerFor("someone", "else", "release-1"), "o", "r"), null);
+});
+
+test("release-slug matching ignores casing, like the issue form", () => {
+  assert.equal(
+    markerExternalId(markerFor("Octocat", "Hello-World", "release-3"), "octocat", "hello-world"),
+    "release-3",
+  );
+});
+
+test("the two marker forms never read as each other", () => {
+  assert.equal(markerExternalId(markerFor("o", "r", "release-5"), "o", "r"), "release-5");
+  assert.equal(markerExternalId(markerFor("o", "r", "5"), "o", "r"), "5");
+  // A body quoting one form on the api host cannot be read as an issue marker.
+  assert.notEqual(markerFor("o", "r", "release-5"), markerFor("o", "r", "5"));
+});
+
+test("a release-shaped marker mid-body is not a marker", () => {
+  const quoted = `see also:\n${markerFor("o", "r", "release-7")}\nmore notes`;
+  assert.equal(markerExternalId(quoted, "o", "r"), null);
+});
+
+test("applyDedup stamps release markers and skips already-imported releases", () => {
+  const plan = /** @type {import("../src/writer.js").WritePlan} */ ({
+    labels: [],
+    stories: [
+      {
+        external_id: "release-1",
+        name: "v1.0",
+        description: "notes",
+        story_type: "release",
+        current_state: "accepted",
+        created_at: null,
+        completed_at: null,
+        labels: [],
+        tasks: [],
+        comments: [],
+      },
+      {
+        external_id: "release-2",
+        name: "v2.0",
+        description: null,
+        story_type: "release",
+        current_state: "accepted",
+        created_at: null,
+        completed_at: null,
+        labels: [],
+        tasks: [],
+        comments: [],
+      },
+    ],
+  });
+  const { plan: deduped, skipped } = applyDedup(plan, new Set(["release-1"]), "o", "r");
+  assert.equal(skipped, 1);
+  assert.deepEqual(
+    deduped.stories.map((s) => s.external_id),
+    ["release-2"],
+  );
+  assert.equal(deduped.stories[0].description, markerFor("o", "r", "release-2"));
+  assert.equal(markerExternalId(deduped.stories[0].description, "o", "r"), "release-2");
+});
