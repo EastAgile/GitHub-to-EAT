@@ -751,15 +751,146 @@ test("a parent whose sub-issue listing is 404 warns and contributes no links, ru
   assert.match(warnings[0], /warning: .*#7.*sub-issues/);
 });
 
-test("a rate limit on a sub-issue listing fails the fetch instead of dropping links silently", async () => {
+test("a 404 warning names the children that lose their parent line, not just the parent", async () => {
   const { handler } = subIssueHandler({
     issues: [{ number: 7, ...summary(1) }],
-    subIssueStatus: { 7: 429 },
+    subIssueStatus: { 7: 404 },
+  });
+  /** @type {string[]} */
+  const warnings = [];
+  await withGitHub(handler, async (base) => {
+    await new GitHubClient("o", "r", { apiBase: base, warn: (m) => warnings.push(m) }).fetchAll();
+  });
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /Sub-issues:/);
+  assert.match(warnings[0], /Sub-issue of #7/);
+});
+
+test("many failed parents are summarised in one warning, not one line each", async () => {
+  const issues = Array.from({ length: 30 }, (_, i) => ({ number: i + 1, ...summary(1) }));
+  const { handler } = subIssueHandler({
+    issues,
+    subIssueStatus: Object.fromEntries(issues.map((i) => [i.number, 404])),
+  });
+  /** @type {string[]} */
+  const warnings = [];
+  await withGitHub(handler, async (base) => {
+    const fetched = await new GitHubClient("o", "r", {
+      apiBase: base,
+      warn: (m) => warnings.push(m),
+    }).fetchAll();
+    assert.equal(fetched.subIssues.size, 0);
+  });
+  assert.equal(warnings.length, 1, `one aggregated warning, got ${warnings.length}`);
+  assert.match(warnings[0], /30 issues/);
+  // The list of numbers is capped, so 200 failures cannot render a 4000-char line.
+  assert.match(warnings[0], /and 20 more/);
+  assert.equal((warnings[0].match(/#\d+/g) ?? []).length, 10);
+});
+
+test("the sub-issue stage degrades on a rate limit instead of throwing away the fetch", async () => {
+  const { handler } = subIssueHandler({
+    issues: [
+      { number: 7, ...summary(1) },
+      { number: 9, ...summary(1) },
+    ],
+    subIssues: { 7: [{ number: 12 }] },
+    subIssueStatus: { 9: 429 },
+  });
+  /** @type {string[]} */
+  const warnings = [];
+  await withGitHub(handler, async (base) => {
+    const fetched = await new GitHubClient("o", "r", {
+      apiBase: base,
+      warn: (m) => warnings.push(m),
+    }).fetchAll();
+    // Everything gathered before the limit survives; the issues themselves are intact.
+    assert.deepEqual([...fetched.subIssues], [["7", ["12"]]]);
+    assert.equal(fetched.issues.length, 2);
+  });
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /rate limit/i);
+  assert.match(warnings[0], /--token/);
+});
+
+test("a rate limit anywhere but the sub-issue stage still fails the whole fetch", async () => {
+  for (const limited of ["/repos/o/r/issues", "/repos/o/r/issues/comments", "/repos/o/r/labels"]) {
+    await withGitHub(
+      (req, res) => {
+        const { pathname } = new URL(req.url ?? "", "http://x");
+        if (pathname === limited) return json(res, 429, { message: "slow down" });
+        if (pathname === "/repos/o/r/issues") return json(res, 200, [{ number: 7, ...summary(1) }]);
+        json(res, 200, []);
+      },
+      async (base) => {
+        await assert.rejects(
+          new GitHubClient("o", "r", { apiBase: base }).fetchAll(),
+          (err) => err instanceof RateLimitError,
+          `a 429 on ${limited} must fail the run`,
+        );
+      },
+    );
+  }
+});
+
+test("one parent's sub-issue pagination is bounded, so an endless rel=next cannot spin", async () => {
+  let pages = 0;
+  let base = "";
+  await withGitHub(
+    (req, res) => {
+      const { pathname } = new URL(req.url ?? "", "http://x");
+      if (pathname === "/repos/o/r/issues") return json(res, 200, [{ number: 7, ...summary(1) }]);
+      if (pathname !== "/repos/o/r/issues/7/sub_issues") return json(res, 200, []);
+      pages += 1;
+      json(res, 200, [{ number: 1000 + pages }], {
+        link: `<${base}/repos/o/r/issues/7/sub_issues?per_page=100&page=${pages + 1}>; rel="next"`,
+      });
+    },
+    async (started) => {
+      base = started;
+      await assert.rejects(new GitHubClient("o", "r", { apiBase: base }).fetchAll(), (err) => {
+        assert.ok(err instanceof GitHubError);
+        assert.match(err.message, /pages/);
+        return true;
+      });
+    },
+  );
+  assert.ok(pages <= 25, `pagination stopped early, got ${pages} pages`);
+});
+
+test("a parent whose whole listing is dropped contributes no entry at all", async () => {
+  const { handler } = subIssueHandler({
+    issues: [{ number: 7, ...summary(3) }],
+    subIssues: { 7: [{ number: 7 }, { number: "12" }, {}] },
   });
   await withGitHub(handler, async (base) => {
-    await assert.rejects(new GitHubClient("o", "r", { apiBase: base }).fetchAll(), (err) => {
-      assert.ok(err instanceof RateLimitError);
-      return true;
-    });
+    const fetched = await new GitHubClient("o", "r", { apiBase: base }).fetchAll();
+    assert.equal(fetched.subIssues.has("7"), false);
+    assert.equal(fetched.subIssues.size, 0);
   });
+});
+
+test("a client built without a warn sink still reports a failed listing, on stderr", async () => {
+  const { handler } = subIssueHandler({
+    issues: [{ number: 7, ...summary(1) }],
+    subIssueStatus: { 7: 404 },
+  });
+  /** @type {string[]} */
+  const written = [];
+  const realWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = /** @type {any} */ (
+    (/** @type {any} */ chunk) => {
+      written.push(String(chunk));
+      return true;
+    }
+  );
+  try {
+    await withGitHub(handler, async (base) => {
+      await new GitHubClient("o", "r", { apiBase: base }).fetchAll();
+    });
+  } finally {
+    process.stderr.write = realWrite;
+  }
+  assert.equal(written.length, 1);
+  assert.match(written[0], /#7/);
 });

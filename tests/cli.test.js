@@ -1459,8 +1459,8 @@ const ISSUE_TYPE_LINE =
   "    - issue type Bug → bug; Feature / Enhancement / Task → feature; Chore → chore; " +
   "otherwise labels + title decide\n";
 const SUB_ISSUES_LINE =
-  "    - sub-issues → 'Sub-issue of #n' / 'Sub-issues: #n, #n' ending the description " +
-  "(a linked number is named even when this run did not import it)\n";
+  "    - sub-issues → 'Sub-issue of #n' / 'Sub-issues: #n, #n' in the description's " +
+  "last paragraph\n";
 const DIRECT_ONLY_LINES = CLOSED_REASON_LINE + ISSUE_TYPE_LINE + SUB_ISSUES_LINE;
 
 /** @param {string} [directOnlyLines] */

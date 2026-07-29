@@ -1,8 +1,9 @@
 /**
  * The direct engine's default mapping profile: GitHub issue JSON in → EAT write-op plan out (pure, no HTTP).
  * Mirrors the server importer's issue mapping (agile-tracker github.rs + common.rs) so both engines classify
- * identically, with two deliberate exceptions the server never produces: the closed-reason labels, and the
- * org issue-type field (the server's `GhIssue` has no `type`, so serde drops it).
+ * identically, with three deliberate exceptions the server never produces: the closed-reason labels, the
+ * org issue-type field (the server's `GhIssue` has no `type`, so serde drops it), and the sub-issue
+ * cross-link block.
  */
 
 // Composed so `--customize` can drop the tasks fragment / comments line without
@@ -43,8 +44,8 @@ const SUB_ISSUES_PREFIX = "Sub-issues:";
 // Direct-only for the same reason as the two lines above. Built from the prefixes the
 // assembly itself renders, so renaming one cannot leave this line describing the old text.
 const SUB_ISSUES_LINE =
-  `sub-issues → '${SUB_ISSUE_OF_PREFIX} #n' / '${SUB_ISSUES_PREFIX} #n, #n' ending the ` +
-  "description (a linked number is named even when this run did not import it)";
+  `sub-issues → '${SUB_ISSUE_OF_PREFIX} #n' / '${SUB_ISSUES_PREFIX} #n, #n' in the ` +
+  "description's last paragraph";
 
 // Milestone titles are untrusted remote data; strip terminal control chars
 // (ESC/C0/C1/DEL) before they reach the terminal, in the wizard and the legend alike.
@@ -394,16 +395,18 @@ function indexSubIssues(subIssues) {
   const children = new Map();
   /** @type {Map<string, string>} */
   const parents = new Map();
-  for (const [parent, kids] of subIssues ?? []) {
+  for (const [parent, kids] of subIssues instanceof Map ? subIssues : []) {
     if (!isIssueNumber(parent) || !Array.isArray(kids)) continue;
     /** @type {string[]} */
     const kept = [];
     for (const kid of kids) {
-      if (!isIssueNumber(kid) || kid === parent || kept.includes(kid)) continue;
+      // `parents` is the arbiter for both directions, so a child claimed twice cannot
+      // leave one story listing it while the child disclaims that story.
+      if (!isIssueNumber(kid) || kid === parent || parents.has(kid)) continue;
+      parents.set(kid, parent);
       kept.push(kid);
-      if (!parents.has(kid)) parents.set(kid, parent);
     }
-    if (kept.length) children.set(parent, kept);
+    children.set(parent, kept);
   }
   return { children, parents };
 }
@@ -422,7 +425,7 @@ function subIssueLines(externalId, { children, parents }) {
   const parent = parents.get(externalId);
   if (parent !== undefined) lines.push(`${SUB_ISSUE_OF_PREFIX} #${parent}`);
   const kids = children.get(externalId);
-  if (kids) lines.push(`${SUB_ISSUES_PREFIX} ${kids.map((n) => `#${n}`).join(", ")}`);
+  if (kids?.length) lines.push(`${SUB_ISSUES_PREFIX} ${kids.map((n) => `#${n}`).join(", ")}`);
   return lines;
 }
 
@@ -479,7 +482,10 @@ function closedReasonLabel(closed, stateReason) {
  * @typedef {object} StoryOp one EAT story to create, with its sub-resources
  * @property {string} external_id the GitHub issue number, as a string
  * @property {string} name EAT's create-body title field
- * @property {string | null} description issue body, trimmed
+ * @property {string | null} description issue body, trimmed, plus `crossLinks`
+ * @property {string} [crossLinks] the cross-link block already at the tail of
+ *   `description` (empty when the issue is in no sub-issue relation). Carried so
+ *   {@link clampPlan} can cut the body around it; the writer never sends it.
  * @property {"bug" | "chore" | "feature"} story_type
  * @property {"unstarted" | "accepted"} current_state
  * @property {string | null} created_at
@@ -577,6 +583,7 @@ export function mapRepo(
       external_id: externalId,
       name: title,
       description: [body, crossLinks].filter(Boolean).join("\n\n") || null,
+      crossLinks,
       story_type: storyType,
       current_state: /** @type {"unstarted" | "accepted"} */ (closed ? "accepted" : "unstarted"),
       created_at: issue.created_at ?? null,
@@ -693,7 +700,14 @@ export function clampPlan(plan, limits, { reserveDescription = () => 0, warn = (
     }
     const descriptionLimit = limits.storyDescription - reserveDescription(op);
     if (out.description !== null && byteLen(out.description) > descriptionLimit) {
-      out.description = clampBlock(out.description, descriptionLimit);
+      // The cross-link block is the description's tail and no later run can repair it
+      // (an import never updates), so the body is cut around it, not with it.
+      const tail = op.crossLinks ? `\n\n${op.crossLinks}` : "";
+      const bodyLimit = descriptionLimit - byteLen(tail);
+      out.description =
+        tail && bodyLimit > 0 && out.description.endsWith(tail)
+          ? clampBlock(out.description.slice(0, -tail.length), bodyLimit) + tail
+          : clampBlock(out.description, descriptionLimit);
       notice("description", descriptionLimit);
     }
     out.tasks = op.tasks.map((task, i) => {

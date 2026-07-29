@@ -124,8 +124,8 @@ function warnUnrecognisedIssueTypes({ issues }, customization, stream) {
  *     => Promise<import("./mapping.js").Customization>,
  *   announce?: (fetched: { issues: any[], comments: any[], labels: any[] },
  *     customization: import("./mapping.js").Customization) => Promise<void>,
- *   github?: { fetchAll(): Promise<{ issues: any[], comments: any[],
- *     labels: any[] }> } }} options `customize` (the wizard) runs at the
+ *   github?: { fetchAll(): Promise<{ issues: any[], comments: any[], labels: any[],
+ *     subIssues?: Map<string, string[]> }> } }} options `customize` (the wizard) runs at the
  *   fetch→map seam so its questions use real data; `announce` (the customized
  *   legend + confirm) runs right after, and may throw to abort before any
  *   write; `github` is a test seam
@@ -133,12 +133,18 @@ function warnUnrecognisedIssueTypes({ issues }, customization, stream) {
  */
 export async function runDirect(client, projectId, owner, repo, options) {
   const { token, dryRun, stream, runId, github, customize, announce } = options;
-  const source = github ?? new GitHubClient(owner, repo, { token, warn: (m) => stream?.write(m) });
+  // Buffered, not written straight through: the fetch runs under a TTY spinner that
+  // holds an open `\r` line, which would otherwise swallow the first warning.
+  /** @type {string[]} */
+  const fetchWarnings = [];
+  const source =
+    github ?? new GitHubClient(owner, repo, { token, warn: (m) => fetchWarnings.push(m) });
   const fetched = await runWithProgress(
     () => source.fetchAll(),
     `fetching ${owner}/${repo} from GitHub`,
     { stream },
   );
+  for (const message of fetchWarnings) (stream ?? process.stderr).write(message);
   // The wizard sits after the fetch so its questions reflect real issues; EOF
   // rejects here, before any prescan or write.
   const customization = customize

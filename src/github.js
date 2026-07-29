@@ -2,11 +2,12 @@
  * Client-side GitHub REST fetcher for the direct engine.
  *
  * Pulls a repo's issues, their comments, and labels from the repo-wide list
- * endpoints (`per_page=100`, `Link`-header pagination) so a mid-sized repo stays
- * inside the anonymous 60 req/h budget; a token (`--token` / `GITHUB_TOKEN`)
- * lifts the ceiling to 5000/h and reaches private repos. The only per-issue call is
- * the sub-issue listing, and only for rows that advertise one. Zero runtime deps:
- * global `fetch` only.
+ * endpoints (`per_page=100`, `Link`-header pagination), which keeps a mid-sized flat
+ * repo inside the anonymous 60 req/h budget; a token (`--token` / `GITHUB_TOKEN`)
+ * lifts the ceiling to 5000/h and reaches private repos. The one per-issue call is the
+ * sub-issue listing, charged only to rows that advertise one — a hierarchy-heavy repo
+ * is the term that can push a run past the anonymous budget, so that stage degrades
+ * rather than failing the run. Zero runtime deps: global `fetch` only.
  */
 
 import { scrubControl } from "./progress.js";
@@ -14,6 +15,12 @@ import { scrubControl } from "./progress.js";
 export const GITHUB_API_BASE = "https://api.github.com";
 
 const UNEXPECTED_PAYLOAD = "GitHub returned an unexpected payload (expected a JSON array)";
+
+// `Link` following is otherwise unbounded, and this stage runs once per parent:
+// 2000 sub-issues is far past any real hierarchy, so more means a broken server.
+const MAX_SUB_ISSUE_PAGES = 20;
+// A repo-wide failure would otherwise render one line per advertised parent.
+const MAX_NAMED_FAILURES = 10;
 
 /** Base class for GitHub fetcher errors (kept distinct from the EAT errors). */
 export class GitHubError extends Error {}
@@ -53,7 +60,7 @@ function nextLink(link) {
  */
 function hasSubIssues(issue) {
   const total = issue?.sub_issues_summary?.total;
-  return typeof total === "number" && Number.isFinite(total) && total > 0;
+  return typeof total === "number" && total > 0;
 }
 
 /**
@@ -63,9 +70,9 @@ function hasSubIssues(issue) {
  * @param {any} row
  * @returns {string | null}
  */
-function issueNumber(row) {
+function issueNumberFromRow(row) {
   const value = row?.number;
-  return typeof value === "number" && Number.isInteger(value) && value > 0 ? String(value) : null;
+  return Number.isInteger(value) && value > 0 ? String(value) : null;
 }
 
 /** Fetcher for one GitHub repo's issues, comments, labels, and sub-issue links. */
@@ -81,13 +88,14 @@ export class GitHubClient {
    * @param {string} repo
    * @param {{ token?: string, timeout?: number, apiBase?: string,
    *   warn?: (message: string) => void }} [options]
-   *   `timeout` is per-request, in seconds (default 30).
+   *   `timeout` is per-request, in seconds (default 30); `warn` defaults to stderr, so a
+   *   construction site that forgets it cannot swallow a degraded fetch in silence.
    */
   constructor(owner, repo, { token, timeout = 30, apiBase = GITHUB_API_BASE, warn } = {}) {
     this.owner = owner;
     this.repo = repo;
     this.timeout = timeout;
-    this.#warn = warn ?? (() => {});
+    this.#warn = warn ?? ((message) => void process.stderr.write(message));
     this.apiBase = apiBase.replace(/\/+$/, "");
     this.#headers = {
       Accept: "application/vnd.github+json",
@@ -176,13 +184,16 @@ export class GitHubClient {
    * Follow `Link` pagination from `path`, concatenating every JSON array page.
    *
    * @param {string} path repo-relative path with query (e.g. `/issues?state=all`)
+   * @param {number} [maxPages] refuse to follow `Link` past this many pages
    * @returns {Promise<any[]>}
    */
-  async #paginate(path) {
+  async #paginate(path, maxPages = Number.POSITIVE_INFINITY) {
     /** @type {any[]} */
     const out = [];
+    let pages = 0;
     let url = `${this.apiBase}/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}${path}`;
     while (url) {
+      pages += 1;
       const response = await this.#get(url);
       /** @type {unknown} */
       let page;
@@ -209,6 +220,11 @@ export class GitHubClient {
       if (next && new URL(next).origin !== new URL(this.apiBase).origin) {
         throw new GitHubError(
           `GitHub pagination pointed off the API origin (${new URL(next).origin}); refusing to follow it`,
+        );
+      }
+      if (next && pages >= maxPages) {
+        throw new GitHubError(
+          `GitHub kept paginating ${path.split("?")[0]} past ${maxPages} pages; refusing to follow further`,
         );
       }
       url = next ?? "";
@@ -251,8 +267,45 @@ export class GitHubClient {
    * @param {string} number
    * @returns {Promise<any[]>}
    */
-  async listSubIssues(number) {
-    return this.#paginate(`/issues/${encodeURIComponent(number)}/sub_issues?per_page=100`);
+  async #listSubIssues(number) {
+    return this.#paginate(
+      `/issues/${encodeURIComponent(number)}/sub_issues?per_page=100`,
+      MAX_SUB_ISSUE_PAGES,
+    );
+  }
+
+  /**
+   * Report what a degraded sub-issue stage cost, in one line however many parents failed.
+   *
+   * @param {string[]} failed parents whose listing 404d
+   * @param {RateLimitError | null} limited the limit that stopped the stage, if any
+   */
+  #warnSubIssueLoss(failed, limited) {
+    if (failed.length === 1) {
+      this.#warn(
+        `warning: could not list issue #${failed[0]}'s sub-issues (404) — issue #${failed[0]} is ` +
+          `imported without its 'Sub-issues:' line, and every sub-issue of it without its ` +
+          `'Sub-issue of #${failed[0]}' line.\n`,
+      );
+    } else if (failed.length > 1) {
+      const named = failed
+        .slice(0, MAX_NAMED_FAILURES)
+        .map((n) => `#${n}`)
+        .join(", ");
+      const rest = failed.length - MAX_NAMED_FAILURES;
+      this.#warn(
+        `warning: could not list sub-issues for ${failed.length} issues (404): ${named}` +
+          `${rest > 0 ? `, and ${rest} more` : ""} — those stories are imported without their ` +
+          "'Sub-issues:' line, and their sub-issues without a 'Sub-issue of #n' line. " +
+          "A failure this wide usually means the host or org has sub-issues turned off.\n",
+      );
+    }
+    if (limited) {
+      this.#warn(
+        `warning: ${limited.message} Sub-issue cross-links stop here; the rest of the import ` +
+          "continues without them, and an import never updates a story it already created.\n",
+      );
+    }
   }
 
   /**
@@ -265,31 +318,37 @@ export class GitHubClient {
   async #fetchSubIssues(issues) {
     /** @type {Map<string, string[]>} */
     const subIssues = new Map();
+    /** @type {string[]} */
+    const failed = [];
+    /** @type {RateLimitError | null} */
+    let limited = null;
     for (const issue of issues) {
-      const parent = hasSubIssues(issue) ? issueNumber(issue) : null;
+      const parent = hasSubIssues(issue) ? issueNumberFromRow(issue) : null;
       if (parent === null) continue;
       /** @type {any[]} */
       let rows;
       try {
-        rows = await this.listSubIssues(parent);
+        rows = await this.#listSubIssues(parent);
       } catch (err) {
-        // An issue deleted or transferred mid-fetch must not abort an otherwise-fine
-        // import for a cross-link; rate limits, auth and transport errors still do.
+        // Optional stage, running last with the whole import in memory: neither a mid-fetch
+        // deletion nor a limit it provoked itself may throw that away. Other errors still do.
+        if (err instanceof RateLimitError) {
+          limited = err;
+          break;
+        }
         if (!(err instanceof RepoNotFoundError)) throw err;
-        this.#warn(
-          `warning: could not list issue #${parent}'s sub-issues (404) — ` +
-            "that story is imported without cross-links.\n",
-        );
+        failed.push(parent);
         continue;
       }
       /** @type {string[]} */
       const kept = [];
       for (const row of rows) {
-        const kid = issueNumber(row);
+        const kid = issueNumberFromRow(row);
         if (kid !== null && kid !== parent && !kept.includes(kid)) kept.push(kid);
       }
       if (kept.length) subIssues.set(parent, kept);
     }
+    this.#warnSubIssueLoss(failed, limited);
     return subIssues;
   }
 

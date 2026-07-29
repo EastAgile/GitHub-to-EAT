@@ -191,7 +191,10 @@ v3 adds a second import engine selectable with `--engine server|direct`
   the plan is computed client-side, so no server dry-run support is required.
   The would-import label count is the plan's label set; labels the project
   already has are only discovered at write time (`409` → existing), so a real
-  run may create fewer.
+  run may create fewer. A dry run pays the **full** fetch cost, sub-issue
+  listings included: it is a rehearsal of the real run, so it must render the
+  descriptions the real run would write — a cheaper dry run would print bodies
+  missing their cross-link block and quietly stop being a preview.
 
 ### Per-run customization
 
@@ -358,15 +361,28 @@ with `Link`-header pagination:
   requested **only** for rows whose `sub_issues_summary.total` is a number
   greater than zero (every issue row carries that summary; an absent, null or
   non-numeric one reads as "no sub-issues"). A flat repo therefore pays nothing
-  extra and a repo using sub-issues pays one extra request per parent. These
-  run sequentially, after the three list endpoints above (which still run
-  concurrently), so a wide hierarchy cannot burst into GitHub's secondary rate
-  limit. The stage runs before the wizard, so it cannot know `--states` /
-  `--milestones` and is deliberately filter-blind. A `404` on one parent's
-  listing (issue deleted or transferred mid-fetch) warns on stderr and leaves
-  that story without cross-links; every other failure — rate limit, auth,
-  transport, malformed payload — propagates and fails the run, like any other
-  page. Only rows whose `number` is a positive integer are kept, and a listing
+  extra and a repo using sub-issues pays **at least** one extra request per
+  parent — the listing itself paginates at `per_page=100`, so a parent with more
+  than 100 sub-issues costs a request per page, capped at 20 pages (a `Link`
+  chain past that is refused as a broken server, like the other two pagination
+  refusals below). These run sequentially, after the three list endpoints above
+  (which still run concurrently), so a wide hierarchy cannot burst into GitHub's
+  secondary rate limit. The stage runs before the wizard, so it cannot know
+  `--states` / `--milestones` and is deliberately filter-blind.
+
+  **This stage degrades; it never fails the run.** It is optional, un-budgeted
+  and runs last, with the issues, comments and labels already fetched — so
+  neither a `404` (issue deleted or transferred mid-fetch) nor a rate limit that
+  this stage itself provoked may throw away an import that has otherwise
+  succeeded. A `404` drops that parent's links and, with them, the
+  `Sub-issue of #n` line on every one of its children; a rate limit stops the
+  stage where it stands and keeps the links gathered so far. Both warn on stderr,
+  naming `--token` for the limit case, and however many parents failed the run
+  emits **one** aggregated line — a repo-wide `404` (a GHES without the endpoint,
+  or an org with sub-issues off) reports a count, not 200 near-identical lines.
+  Every other failure — auth, transport, malformed payload — propagates and fails
+  the run, like any other page, and a rate limit on any *other* endpoint stays
+  fatal. Only rows whose `number` is a positive integer are kept, and a listing
   that names its own parent, or the same sub-issue twice, is deduplicated.
 
 `owner` and `repo` are URL-encoded into the request path, so metacharacters in
@@ -376,8 +392,11 @@ unparseable or whose origin differs from the API base — the `Authorization`
 header never leaves the API origin — and a 200 body that is not a JSON array
 is a fetch error, not an empty page.
 
-Anonymous requests share GitHub's 60 req/h budget; a mid-sized repo (~1,000
-issues) stays ~15–25 requests. `--token` / `GITHUB_TOKEN` is sent as
+Anonymous requests share GitHub's 60 req/h budget; a mid-sized *flat* repo
+(~1,000 issues) stays ~15–25 requests. Sub-issues are the one term that scales
+with the repo's shape rather than its size — a repo with ~55 parents exhausts the
+anonymous budget on that stage alone, which is why it degrades instead of failing
+and why `--token` is what the warning names. `--token` / `GITHUB_TOKEN` is sent as
 `Authorization: Bearer` and raises the ceiling to 5000/h (and reaches private
 repos). Error mapping: 404 → repo-not-found; rate limits — HTTP 429, a 403
 with `x-ratelimit-remaining: 0`, or a secondary-limit 403 carrying
@@ -489,9 +508,16 @@ sub-issue cross-links below, which only the direct engine produces:
     numbers*, not EAT story ids: they match the imported story's `external_id`
     when the issue was imported and point at a real GitHub issue either way, and
     the text a story carries does not depend on which run created it.
-  - The block is part of the description, so it is clamped with it under "Length
-    limits" below. Only issues imported after this landed carry cross-links — an
-    import appends and never updates.
+  - **The clamp cuts the body around the block, never the block itself.** The
+    block is the description's tail, so a naive clamp would make it the *first*
+    thing lost — and precisely on umbrella issues, the ones with both long bodies
+    and children. Since an import never updates, that loss would be permanent and
+    one-sided: the children would still say `Sub-issue of #7` while the parent had
+    forgotten them. So "Length limits" below reserves the block's bytes (on top of
+    the dedup marker's) and truncates only the issue body, re-appending the block
+    intact; the `description truncated` warning still fires for the body. Only if
+    the block alone would exceed the whole limit does the clamp fall back to
+    cutting everything. Only issues imported after this landed carry cross-links.
 - **Checklists** — `- [ ]` / `- [x]` items (also `*`/`+` markers, indentation
   allowed) become story tasks; the lines stay in the description verbatim. They
   are parsed from the issue body alone, never from the cross-link block.
