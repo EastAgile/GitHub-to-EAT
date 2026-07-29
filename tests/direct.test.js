@@ -180,6 +180,8 @@ test("a story left incomplete by an interrupted run stays skipped but warns", as
       createStory: client.createStory.bind(client),
       createTask: client.createTask.bind(client),
       listStoryPage: client.listStoryPage.bind(client),
+      listEpics: client.listEpics.bind(client),
+      createEpic: client.createEpic.bind(client),
       createComment: async () => {
         throw new AuthError("simulated mid-run failure");
       },
@@ -627,7 +629,7 @@ test("every milestone title matching keeps the run silent", async () => {
       customization: customization({ milestones: ["v1.0", "v2.0"] }),
       github: { fetchAll: async () => milestonedRepo() },
     });
-    assert.ok(!stream.buf.includes("milestone"));
+    assert.ok(!stream.buf.includes("warning:"), stream.buf);
   } finally {
     await mock.close();
   }
@@ -1226,6 +1228,390 @@ test("a clamp warning names a release as a release, not as an issue", async () =
   }
   assert.match(stream.buf, /warning: release #100: description truncated/);
   assert.doesNotMatch(stream.buf, /issue #release-100/);
+});
+
+// --- milestones → epics (#31931) ---------------------------------------------
+
+/** @param {any} [overrides] */
+function epicRepo(overrides = {}) {
+  return {
+    issues: [
+      {
+        number: 7,
+        title: "in v1",
+        body: "",
+        state: "open",
+        created_at: "2024-05-01T00:00:00Z",
+        labels: [],
+        milestone: { title: "v1.0", state: "open", due_on: "2024-12-01T00:00:00Z" },
+      },
+      {
+        number: 3,
+        title: "also in v1",
+        body: "",
+        state: "closed",
+        created_at: "2020-01-01T00:00:00Z",
+        closed_at: "2020-02-01T00:00:00Z",
+        labels: [],
+        milestone: { title: "v1.0", state: "open", due_on: "2024-12-01T00:00:00Z" },
+      },
+      {
+        number: 9,
+        title: "no milestone",
+        body: "",
+        state: "open",
+        created_at: "2024-06-01T00:00:00Z",
+        labels: [],
+      },
+    ],
+    comments: [],
+    labels: [],
+    ...overrides,
+  };
+}
+
+test("a milestone becomes an epic and every member issue's story carries its label", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const outcome = await runDirect(client, 91, "o", "r", {
+      included: ["issues", "milestones"],
+      stream: capture(),
+      github: { fetchAll: async () => epicRepo() },
+    });
+
+    assert.equal(outcome.importedStories, 3);
+    // the epic's backing label is the epic's, not a plan label: nothing is counted
+    assert.equal(outcome.importedLabels, 0);
+
+    const epics = mock.state.epics[91];
+    assert.equal(epics.length, 1);
+    assert.equal(epics[0].epic_title, "v1.0");
+    assert.equal(epics[0].epic_desc, "GitHub milestone — State: open, Due: 2024-12-01");
+
+    const byTitle = Object.fromEntries(mock.state.stories[91].map((s) => [s.title, s]));
+    assert.deepEqual(
+      byTitle["in v1"].labels.map((/** @type {any} */ l) => l.label_name),
+      ["v1.0"],
+    );
+    assert.deepEqual(
+      byTitle["also in v1"].labels.map((/** @type {any} */ l) => l.label_name),
+      ["v1.0"],
+    );
+    assert.deepEqual(byTitle["no milestone"].labels, []);
+    // the label the stories carry IS the epic's backing label — that join is the epic
+    assert.equal(byTitle["in v1"].labels[0].label_id, epics[0].label_id);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a re-run creates no duplicate epic and no duplicate label", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const options = {
+      included: ["issues", "milestones"],
+      stream: capture(),
+      github: { fetchAll: async () => epicRepo() },
+    };
+    await runDirect(client, 91, "o", "r", options);
+    const rerun = await runDirect(client, 91, "o", "r", options);
+
+    assert.equal(rerun.importedStories, 0);
+    assert.equal(rerun.skipped, 3);
+    assert.equal(mock.state.epics[91].length, 1);
+    assert.equal(mock.state.labels[91].length, 1);
+    assert.equal(mock.state.stories[91].length, 3);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a new issue joining an existing milestone reuses that epic instead of 409ing", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const first = epicRepo();
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues", "milestones"],
+      stream: capture(),
+      github: { fetchAll: async () => first },
+    });
+    const grown = epicRepo();
+    grown.issues.push({
+      number: 11,
+      title: "joined later",
+      body: "",
+      state: "open",
+      created_at: "2025-01-01T00:00:00Z",
+      labels: [],
+      milestone: { title: "v1.0", state: "closed", due_on: null },
+    });
+    const out = capture();
+    const second = await runDirect(client, 91, "o", "r", {
+      included: ["issues", "milestones"],
+      stream: out,
+      github: { fetchAll: async () => grown },
+    });
+
+    assert.equal(second.importedStories, 1);
+    assert.equal(mock.state.epics[91].length, 1);
+    // epic_desc is written only on creation, so the reused epic keeps the first note
+    assert.equal(
+      mock.state.epics[91][0].epic_desc,
+      "GitHub milestone — State: open, Due: 2024-12-01",
+    );
+    assert.ok(!out.buf.includes("warning:"), out.buf);
+    const joined = mock.state.stories[91].find((s) => s.title === "joined later");
+    assert.equal(joined.labels[0].label_id, mock.state.epics[91][0].label_id);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("without --include milestones nothing is fetched, labelled, scanned or written", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    /** @type {any[]} */
+    const fetchArgs = [];
+    const outcome = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: {
+        fetchAll: async (options) => {
+          fetchArgs.push(options);
+          return epicRepo();
+        },
+      },
+    });
+
+    assert.equal(outcome.importedStories, 3);
+    // the milestone rides on the issue rows already fetched, so no flag asks for more
+    assert.deepEqual(fetchArgs, [{ releases: false }]);
+    assert.deepEqual(
+      mock.state.requests.filter((r) => r.includes("/epics")),
+      [],
+    );
+    assert.deepEqual(mock.state.epics[91] ?? [], []);
+    for (const story of mock.state.stories[91]) assert.deepEqual(story.labels, []);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a default run notes the milestones it is leaving behind, once", async () => {
+  const mock = await startMockServer();
+  try {
+    const out = capture();
+    await runDirect(new EATClient(mock.baseUrl, "ea_token"), 91, "o", "r", {
+      included: ["issues"],
+      stream: out,
+      github: { fetchAll: async () => epicRepo() },
+    });
+    assert.match(out.buf, /note: 2 issue\(s\) carry a GitHub milestone/);
+    assert.match(out.buf, /--include issues,milestones/);
+    assert.equal(out.buf.split("note: ").length - 1, 1);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("the leaving-behind note never fires with the flag on, or with no milestones", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const withFlag = capture();
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues", "milestones"],
+      stream: withFlag,
+      github: { fetchAll: async () => epicRepo() },
+    });
+    assert.ok(!withFlag.buf.includes("note:"), withFlag.buf);
+
+    const noMilestones = capture();
+    await runDirect(client, 91, "o", "r2", {
+      included: ["issues"],
+      stream: noMilestones,
+      github: { fetchAll: async () => fetchedRepo() },
+    });
+    assert.ok(!noMilestones.buf.includes("note:"), noMilestones.buf);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("the note counts only issues the run's filters actually keep", async () => {
+  const mock = await startMockServer();
+  try {
+    const out = capture();
+    await runDirect(new EATClient(mock.baseUrl, "ea_token"), 91, "o", "r", {
+      included: ["issues"],
+      customization: { ...DEFAULT_CUSTOMIZATION, states: "closed" },
+      stream: out,
+      github: { fetchAll: async () => epicRepo() },
+    });
+    assert.match(out.buf, /note: 1 issue\(s\) carry a GitHub milestone/);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("--milestones narrows which epics exist without dropping the mapping", async () => {
+  const mock = await startMockServer();
+  try {
+    const repo = epicRepo();
+    repo.issues.push({
+      number: 12,
+      title: "in v2",
+      body: "",
+      state: "open",
+      created_at: "2024-07-01T00:00:00Z",
+      labels: [],
+      milestone: { title: "v2.0", state: "open" },
+    });
+    const outcome = await runDirect(new EATClient(mock.baseUrl, "ea_token"), 91, "o", "r", {
+      included: ["issues", "milestones"],
+      customization: { ...DEFAULT_CUSTOMIZATION, milestones: ["v2.0"] },
+      stream: capture(),
+      github: { fetchAll: async () => repo },
+    });
+    assert.equal(outcome.importedStories, 1);
+    assert.deepEqual(
+      mock.state.epics[91].map((e) => e.epic_title),
+      ["v2.0"],
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a dry run plans the epics without creating any", async () => {
+  const mock = await startMockServer();
+  try {
+    const outcome = await runDirect(new EATClient(mock.baseUrl, "ea_token"), 91, "o", "r", {
+      included: ["issues", "milestones"],
+      dryRun: true,
+      stream: capture(),
+      github: { fetchAll: async () => epicRepo() },
+    });
+    assert.equal(outcome.dryRun, true);
+    assert.equal(outcome.importedStories, 3);
+    // epics are not counted in the plan's label total, exactly as on a real run
+    assert.equal(outcome.importedLabels, 0);
+    assert.deepEqual(mock.state.epics[91] ?? [], []);
+    assert.deepEqual(
+      mock.state.requests.filter((r) => r.includes("/epics")),
+      [],
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a milestone title longer than the column width is reported, not silently merged", async () => {
+  const mock = await startMockServer();
+  try {
+    const long = "v".repeat(260);
+    const repo = epicRepo({
+      issues: [
+        {
+          number: 1,
+          title: "long milestone",
+          body: "",
+          state: "open",
+          created_at: "2024-01-01T00:00:00Z",
+          labels: [],
+          milestone: { title: `${long}a`, state: "open" },
+        },
+        {
+          number: 2,
+          title: "other long milestone",
+          body: "",
+          state: "open",
+          created_at: "2024-01-02T00:00:00Z",
+          labels: [],
+          milestone: { title: `${long}b`, state: "open" },
+        },
+      ],
+    });
+    const out = capture();
+    await runDirect(new EATClient(mock.baseUrl, "ea_token"), 91, "o", "r", {
+      included: ["issues", "milestones"],
+      stream: out,
+      github: { fetchAll: async () => repo },
+    });
+    assert.match(out.buf, /warning: 2 milestone title\(s\) are longer than 255 bytes/);
+    assert.match(out.buf, /titles that agree on that prefix share one epic/);
+    // both titles clamp to the same 255 bytes, so they really do share one epic
+    assert.equal(mock.state.epics[91].length, 1);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("titles inside the column width raise no truncation warning", async () => {
+  const mock = await startMockServer();
+  try {
+    const out = capture();
+    await runDirect(new EATClient(mock.baseUrl, "ea_token"), 91, "o", "r", {
+      included: ["issues", "milestones"],
+      stream: out,
+      github: { fetchAll: async () => epicRepo() },
+    });
+    assert.ok(!out.buf.includes("longer than 255 bytes"), out.buf);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("the leaving-behind note ignores pull requests and honours --milestones", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const repo = epicRepo();
+    repo.issues.push({
+      number: 20,
+      title: "a PR in a milestone",
+      body: "",
+      state: "open",
+      created_at: "2024-08-01T00:00:00Z",
+      labels: [],
+      pull_request: { url: "https://api.github.com/repos/o/r/pulls/20" },
+      milestone: { title: "v9.9", state: "open" },
+    });
+    repo.issues.push({
+      number: 21,
+      title: "in v2",
+      body: "",
+      state: "open",
+      created_at: "2024-09-01T00:00:00Z",
+      labels: [],
+      milestone: { title: "v2.0", state: "open" },
+    });
+
+    // The PR row carries a milestone but is never mapped, so it is not counted.
+    const all = capture();
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: all,
+      github: { fetchAll: async () => repo },
+    });
+    assert.match(all.buf, /note: 3 issue\(s\) carry a GitHub milestone/);
+
+    // --milestones narrows what maps, so it narrows what the note counts.
+    const filtered = capture();
+    await runDirect(client, 91, "o", "r2", {
+      included: ["issues"],
+      customization: { ...DEFAULT_CUSTOMIZATION, milestones: ["v2.0"] },
+      stream: filtered,
+      github: { fetchAll: async () => repo },
+    });
+    assert.match(filtered.buf, /note: 1 issue\(s\) carry a GitHub milestone/);
+  } finally {
+    await mock.close();
+  }
 });
 
 // The release marker is 14 bytes longer than the issue marker for the same repo, so

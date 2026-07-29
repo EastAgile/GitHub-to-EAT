@@ -283,3 +283,67 @@ test("applyDedup stamps release markers and skips already-imported releases", ()
   assert.equal(deduped.stories[0].description, markerFor("o", "r", "release-2"));
   assert.equal(markerExternalId(deduped.stories[0].description, "o", "r"), "release-2");
 });
+
+// --- epics (#31931) ----------------------------------------------------------
+
+/**
+ * @param {string} externalId
+ * @param {string[]} labels
+ * @returns {any}
+ */
+const epicStory = (externalId, labels) => ({
+  external_id: externalId,
+  name: `issue ${externalId}`,
+  description: null,
+  story_type: "feature",
+  current_state: "unstarted",
+  created_at: null,
+  completed_at: null,
+  labels,
+  tasks: [],
+  comments: [],
+});
+
+test("applyDedup keeps only the epics a surviving story still carries", () => {
+  const plan = /** @type {import("../src/writer.js").WritePlan} */ ({
+    labels: [],
+    epics: [
+      { title: "V1", description: null },
+      { title: "V2", description: "GitHub milestone — State: closed" },
+    ],
+    stories: [epicStory("3", ["V1"]), epicStory("7", ["V2"])],
+  });
+  const { plan: pruned, skipped } = applyDedup(plan, new Set(["3"]), "o", "r");
+  assert.equal(skipped, 1);
+  assert.deepEqual(pruned.epics, [
+    { title: "V2", description: "GitHub milestone — State: closed" },
+  ]);
+});
+
+test("a re-run whose stories are all skipped plans no epic work at all", () => {
+  const plan = /** @type {import("../src/writer.js").WritePlan} */ ({
+    labels: [],
+    epics: [{ title: "V1", description: null }],
+    stories: [epicStory("3", ["V1"])],
+  });
+  assert.deepEqual(applyDedup(plan, new Set(["3"]), "o", "r").plan.epics, []);
+});
+
+test("epic pruning matches case-insensitively, like EAT's label names", () => {
+  const plan = /** @type {import("../src/writer.js").WritePlan} */ ({
+    labels: [],
+    epics: [{ title: "V1", description: null }],
+    stories: [epicStory("7", ["v1"])],
+  });
+  assert.deepEqual(applyDedup(plan, new Set(), "o", "r").plan.epics, [
+    { title: "V1", description: null },
+  ]);
+});
+
+test("a plan with no epics field still dedups, yielding an empty epic list", () => {
+  const plan = /** @type {import("../src/writer.js").WritePlan} */ ({
+    labels: [],
+    stories: [epicStory("7", [])],
+  });
+  assert.deepEqual(applyDedup(plan, new Set(), "o", "r").plan.epics, []);
+});

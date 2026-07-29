@@ -179,5 +179,8 @@ export function applyDedup(plan, importedIds, owner, repo) {
     survivors.flatMap((op) => op.labels.map((name) => name.toLowerCase())),
   );
   const labels = plan.labels.filter((label) => referenced.has(label.name.toLowerCase()));
-  return { plan: { labels, stories }, skipped: plan.stories.length - survivors.length };
+  // An epic's join is its label, so an epic no survivor carries has nothing to group:
+  // a fully-skipped re-run plans no epic work at all.
+  const epics = (plan.epics ?? []).filter((epic) => referenced.has(epic.title.toLowerCase()));
+  return { plan: { labels, stories, epics }, skipped: plan.stories.length - survivors.length };
 }

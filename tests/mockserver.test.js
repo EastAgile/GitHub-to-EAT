@@ -781,3 +781,120 @@ test("async openapi folds 202 into the import path, no invented ':202' key", asy
     await mock.close();
   }
 });
+
+// --- epics (#31931) ----------------------------------------------------------
+
+/** @param {string} baseUrl @param {string} path */
+function get(baseUrl, path) {
+  return fetch(`${baseUrl}${path}`, { headers: { "X-TrackerToken": "ea_token" } });
+}
+
+test("GET epics is a bare array; an unknown project 404s", async () => {
+  const mock = await startMockServer();
+  try {
+    const empty = await get(mock.baseUrl, "/projects/91/epics");
+    assert.equal(empty.status, 200);
+    assert.deepEqual(await empty.json(), []);
+    assert.equal((await get(mock.baseUrl, "/projects/999/epics")).status, 404);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("POST epics creates the epic and its backing label in one call", async () => {
+  const mock = await startMockServer();
+  try {
+    const epic = await (
+      await post(mock.baseUrl, "/projects/91/epics", { name: "V1", description: "note" })
+    ).json();
+    assert.equal(epic.epic_title, "V1");
+    assert.equal(epic.name, "V1");
+    assert.equal(epic.epic_desc, "note");
+    assert.equal(epic.project_id, 91);
+    assert.equal(epic.label.label_name, "V1");
+    assert.equal(epic.label_id, epic.label.label_id);
+    // the backing label is a real project label: a plain create of that name now conflicts
+    assert.equal(mock.state.labels[91].length, 1);
+    assert.equal((await post(mock.baseUrl, "/projects/91/labels", { name: "v1" })).status, 409);
+    assert.deepEqual((await (await get(mock.baseUrl, "/projects/91/epics")).json())[0], epic);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("epic_title is an accepted alias for name; neither is a 400", async () => {
+  const mock = await startMockServer();
+  try {
+    const epic = await (
+      await post(mock.baseUrl, "/projects/91/epics", { epic_title: "V2" })
+    ).json();
+    assert.equal(epic.epic_title, "V2");
+    assert.equal(epic.epic_desc, null);
+    const missing = await post(mock.baseUrl, "/projects/91/epics", { description: "x" });
+    assert.equal(missing.status, 400);
+    assert.match((await missing.json()).error, /name or epic_title is required/);
+    assert.equal((await post(mock.baseUrl, "/projects/91/epics", { name: "  " })).status, 400);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a duplicate epic title is a 409 conflict naming the epic, case-insensitively", async () => {
+  const mock = await startMockServer();
+  try {
+    assert.equal((await post(mock.baseUrl, "/projects/91/epics", { name: "V1" })).status, 200);
+    const conflict = await post(mock.baseUrl, "/projects/91/epics", { name: " v1 " });
+    assert.equal(conflict.status, 409);
+    const body = await conflict.json();
+    assert.equal(body.code, "conflict");
+    assert.equal(body.error, "Epic 'v1' already exists in this project");
+    assert.equal(mock.state.epics[91].length, 1);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a plain label of the same name blocks the epic with a Label conflict", async () => {
+  const mock = await startMockServer();
+  try {
+    await post(mock.baseUrl, "/projects/91/labels", { name: "V1" });
+    const conflict = await post(mock.baseUrl, "/projects/91/epics", { name: "v1" });
+    assert.equal(conflict.status, 409);
+    const body = await conflict.json();
+    assert.equal(body.code, "conflict");
+    assert.equal(body.error, "Label 'v1' already exists in this project");
+    assert.deepEqual(mock.state.epics[91] ?? [], []);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("POST epics to a missing project 404s and honours Idempotency-Key", async () => {
+  const mock = await startMockServer();
+  try {
+    assert.equal((await post(mock.baseUrl, "/projects/999/epics", { name: "x" })).status, 404);
+    const first = await (
+      await post(mock.baseUrl, "/projects/91/epics", { name: "V1" }, "e1")
+    ).json();
+    const replay = await post(mock.baseUrl, "/projects/91/epics", { name: "V1" }, "e1");
+    assert.equal(replay.status, 200);
+    assert.deepEqual(await replay.json(), first);
+    assert.equal(mock.state.epics[91].length, 1);
+    const reused = await post(mock.baseUrl, "/projects/91/epics", { name: "V2" }, "e1");
+    assert.equal(reused.status, 409);
+    assert.equal((await reused.json()).code, "idempotency_conflict");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("the mock records every request path, so a test can prove one never happened", async () => {
+  const mock = await startMockServer();
+  try {
+    await get(mock.baseUrl, "/projects/91/epics");
+    await post(mock.baseUrl, "/projects/91/labels", { name: "x" });
+    assert.deepEqual(mock.state.requests, ["GET /projects/91/epics", "POST /projects/91/labels"]);
+  } finally {
+    await mock.close();
+  }
+});

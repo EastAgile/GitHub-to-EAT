@@ -16,6 +16,7 @@ import {
   DEFAULT_CUSTOMIZATION,
   describeFilters,
   describeOp,
+  EPIC_TITLE_LIMIT,
   FALLBACK_LIMITS,
   hasMilestoneFilter,
   ISSUE_TYPE_NAMES,
@@ -23,6 +24,7 @@ import {
   mapRepo,
   matchesMilestones,
   matchesStates,
+  milestoneEpicTitle,
   storyTypeFromIssueType,
   stripControls,
 } from "./mapping.js";
@@ -102,6 +104,65 @@ function warnUnmappableReleases({ releases }, stream) {
 }
 
 /**
+ * The issues a run actually maps: not a PR, and past both selection filters.
+ *
+ * @param {any[]} issues
+ * @param {import("./mapping.js").Customization} customization
+ * @returns {any[]}
+ */
+function inScope(issues, { states, milestones }) {
+  return issues.filter(
+    (issue) =>
+      !issue.pull_request && matchesStates(issue, states) && matchesMilestones(issue, milestones),
+  );
+}
+
+/**
+ * Without `--include milestones` a milestone is dropped entirely — where the server engine
+ * would keep it as a `milestone:<title>` label. Say so once, with the count only: milestone
+ * titles are author-controlled text, and this path never needs to render one.
+ *
+ * @param {{ issues: any[] }} fetched
+ * @param {import("./mapping.js").Customization} customization
+ * @param {import("./progress.js").OutStream} [stream]
+ */
+function noteMilestonesNotImported({ issues }, customization, stream) {
+  const count = inScope(issues, customization).filter((issue) =>
+    milestoneEpicTitle(issue.milestone),
+  ).length;
+  if (!count) return;
+  stream?.write(
+    `note: ${count} issue(s) carry a GitHub milestone this run does not import — pass ` +
+      "--include issues,milestones to import each milestone as an epic.\n",
+  );
+}
+
+/**
+ * Two milestones agreeing on their first 255 bytes collapse into one epic (the server
+ * truncates before keying too), so the merge must not be silent.
+ *
+ * @param {{ issues: any[] }} fetched
+ * @param {import("./mapping.js").Customization} customization
+ * @param {import("./progress.js").OutStream} [stream]
+ */
+function warnTruncatedMilestones({ issues }, customization, stream) {
+  const long = new Set(
+    inScope(issues, customization)
+      .map((issue) => issue.milestone?.title)
+      .filter(
+        (title) =>
+          typeof title === "string" && Buffer.byteLength(title.trim(), "utf8") > EPIC_TITLE_LIMIT,
+      ),
+  );
+  if (!long.size) return;
+  stream?.write(
+    `warning: ${long.size} milestone title(s) are longer than ${EPIC_TITLE_LIMIT} bytes and ` +
+      "are cut to that length for the epic and its label — titles that agree on that prefix " +
+      "share one epic.\n",
+  );
+}
+
+/**
  * Warn once when issues carry an org issue type the table does not know — an org standardised
  * on `Spike`/`Support` would otherwise have every story silently typed by the old heuristic.
  * The count is all that is reported: type names are org-authored text, which never reaches the
@@ -165,6 +226,8 @@ export async function runDirect(client, projectId, owner, repo, options) {
   const source =
     github ?? new GitHubClient(owner, repo, { token, warn: (m) => fetchWarnings.push(m) });
   const releases = included.includes("releases");
+  // Every issue row carries its own milestone, so the epic mapping costs no extra fetch.
+  const epics = included.includes("milestones");
   const fetched = await runWithProgress(
     () => source.fetchAll({ releases }),
     `fetching ${owner}/${repo} from GitHub`,
@@ -179,6 +242,8 @@ export async function runDirect(client, projectId, owner, repo, options) {
   warnFiltersMatchNothing(fetched, customization, stream);
   warnUnrecognisedIssueTypes(fetched, customization, stream);
   warnUnmappableReleases(fetched, stream);
+  if (epics) warnTruncatedMilestones(fetched, customization, stream);
+  else noteMilestonesNotImported(fetched, customization, stream);
   // The customized legend + confirm reflect those answers, so they land here —
   // a declined confirm throws, aborting before any prescan or write.
   if (announce) await announce(fetched, customization);
@@ -188,7 +253,7 @@ export async function runDirect(client, projectId, owner, repo, options) {
   // One probe gates all three backdated fields; degrades to false, so an older
   // server gets v3-identical payloads and the full-date comment prefix.
   const sendDates = await (client.supportsBackdating?.() ?? false);
-  const mapped = clampPlan(mapRepo(fetched, customization, sendDates), limits, {
+  const mapped = clampPlan(mapRepo(fetched, customization, { sendDates, epics }), limits, {
     reserveDescription: (op) =>
       Buffer.byteLength(markerFor(owner, repo, op.external_id), "utf8") + 2,
     warn: (message) => stream?.write(message),

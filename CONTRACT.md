@@ -179,11 +179,12 @@ v3 adds a second import engine selectable with `--engine server|direct`
 
 ### v3 scope
 
-- **Issues and releases.** `--engine direct` composes with `--include`; it
-  supports `issues` (always imported) and `releases`. `prs` and `milestones`
-  exit with a usage error ("not supported by the direct engine yet"). The
-  message names the supported set straight from the engine module's own list,
-  so it cannot go on advertising a narrower scope than the engine has.
+- **Issues, milestones and releases.** `--engine direct` composes with
+  `--include`; it supports `issues` (always imported), `milestones` and
+  `releases`. `prs` exits with a usage error ("not supported by the direct
+  engine yet"). The message names the supported set straight from the engine
+  module's own list, so it cannot go on advertising a narrower scope than the
+  engine has.
 - **Staged build.** This epic ships across several stories; the pipeline is
   now wired end-to-end. `--engine direct` performs real imports,
   prompting for confirmation exactly like the server engine. `--dry-run` runs
@@ -408,6 +409,10 @@ with `Link`-header pagination:
   draft mapping below is unreachable, and the CLI cannot tell that any draft was
   omitted (an invisible draft is indistinguishable from a repo with none).
 
+There is deliberately **no** milestones endpoint: every issue row already embeds
+the milestone fields the mapping reads, so `--include …,milestones` adds no
+request at all (see "Milestones → epics" below).
+
 `owner` and `repo` are URL-encoded into the request path, so metacharacters in
 `--repo` yield a well-formed request (and a clear repo-not-found error), never
 a mangled query string. Pagination refuses a `Link` rel=next URL that is
@@ -581,6 +586,92 @@ that run; the `Customized:` block names the override instead). `--story-type
 infer` is the default, so it keeps the line. No override turns the sub-issue
 rule off, so its line renders for every `--engine direct` run.
 
+### Milestones → epics (direct engine)
+
+`--include …,milestones` maps each GitHub milestone to an EAT **epic**, mirroring
+the server importer's `issue_to_record` + `get_or_create_epic_label`
+(agile-tracker `github.rs` / `common.rs`) so both engines group a repo the same
+way. In EAT an epic *owns* a label and a story belongs to the epic by carrying
+that label, so the label is the whole join:
+
+- **Title — the milestone's own `title`, trimmed.** It is both the epic's name
+  and its backing label's name; the server uses the same string for both, with
+  no prefix and no `milestone:` namespacing. A milestone whose title is blank,
+  whitespace-only, or not a string yields **no** epic and **no** label — the
+  server's `Some(m) if !m.title.trim().is_empty()` guard.
+- **Description** — the milestone's state and due date, in the server's exact
+  format: `GitHub milestone — State: open, Due: 2024-12-01` (em dash U+2014;
+  state first, then due; `due_on` trimmed to its `YYYY-MM-DD` prefix). Either
+  part alone renders alone; neither leaves the description NULL. The legend's
+  example is rendered by that same builder, so it cannot describe stale text.
+  Epics carry no state column, so **a closed milestone does not close or archive
+  its epic** — `State: closed` in the description is the only trace.
+- **A milestone can never reclassify a story.** The epic's label is added after
+  type inference has read the issue's own labels, exactly like the closed-reason
+  label — a milestone called `bugfix` does not make its stories bugs.
+- **One epic per milestone, keyed case-insensitively**, like the server's
+  `epic_by_title` cache and EAT's own `lower(label_name)` unique index. The
+  first spelling encountered wins and every story in that epic carries that one
+  name, so two issues whose milestone differs only in case still share one epic.
+- **Titles are cut to 255 bytes** — `POST /epics` validates `name` with Rust's
+  `str::len()` and both columns are `varchar(255)`. The cut happens at map time,
+  before the dedup key, so the epic and the label its stories carry are always
+  the same string (the server truncates before keying too). Two milestones
+  agreeing on their first 255 bytes therefore **collapse into one epic**; that
+  merge is not silent — the run warns, with the count of over-long titles.
+- **Only milestones a mapped story carries become epics.** The epic set is
+  derived from the issues that survive `--states` / `--milestones`, so a
+  milestone no imported issue references creates nothing. That is the server's
+  rule (it reads `issue.milestone`, never a milestone listing) and it keeps
+  `--milestones v2.0` from seeding empty epics for the milestones it excluded.
+  Being a *selection* filter, `--milestones` narrows which epics exist but never
+  drops a milestone legend line.
+- **No extra GitHub request.** Every issue row from
+  `GET /repos/{owner}/{repo}/issues` embeds its milestone with the three fields
+  the mapping reads (`title`, `state`, `due_on`) — the same three the server's
+  `GhMilestone` deserializes — so `/repos/{owner}/{repo}/milestones` is **never**
+  requested and a run's GitHub request count is unchanged by the flag.
+- **Get-or-create is the CLI's job.** Unlike the server's internal writer, the
+  public `POST /projects/{id}/epics` does **not** dedup: a title matching an
+  existing epic *or* an existing plain label is a `409 conflict`. So the writer
+  lists `GET /projects/{id}/epics` first (a bare array, no pagination) and posts
+  only the titles that listing does not already carry, matched on
+  `LOWER(TRIM(epic_title))` — the server's own key. A `409` on the create is not
+  swallowed: the listing is re-read, and the epic is counted as existing only if
+  it is now there (the concurrent-writer case). If it is not, a **plain label of
+  that name** is holding it and no epic can be made — the run warns, naming the
+  title, and continues: the stories still carry the label, so they stay grouped.
+  An `idempotency_conflict` 409 is never mistaken for either and still fails.
+- **Epics are written before labels**, so the epic's backing label (auto-created
+  by `POST /epics` with the server's deterministic colour) claims the name first
+  and a same-named GitHub label folds into it as a `409 conflict` → *existing*.
+  The consequence, and the one deviation from the server's internal writer: when
+  a repo has both a milestone and a label of the same name, the label wears the
+  epic's colour here, where the server's promotion path keeps GitHub's.
+- **Epics are not counted.** `ImportCounts` is `{stories, labels}` and the
+  server counts neither an epic nor its backing label; the direct engine matches
+  — the epic title never enters the plan's label set, so both the real run and
+  the `--dry-run` preview report the same label total with or without the flag.
+- **A re-run creates neither a duplicate epic nor a duplicate label.** Epics are
+  pruned to those a *surviving* story still carries, so a fully-skipped re-run
+  plans no epic work at all and makes no epic request; a partially-new run finds
+  the epic in the listing and reuses it. `epic_desc` is written **only on
+  creation** on both engines, so a reused epic keeps its original note even if
+  the milestone's state or due date has since changed — an import never updates.
+- **Without the flag the direct engine imports the milestone as nothing.** This
+  is a deliberate divergence: with `include_milestones` off the *server* reverses
+  its own mapping and pushes a synthetic `milestone:<title>` label instead
+  (`github.rs`), while the direct engine's default profile must stay
+  byte-identical to what it produced before this rule existed — synthesising
+  labels by default would silently change every existing direct-engine board.
+  So the loss is announced instead: a run whose in-scope issues carry milestones
+  prints one `note:` naming the count and `--include issues,milestones`. The
+  count only — milestone titles are author-controlled text, and this path never
+  renders one.
+- The mock server mirrors both epic endpoints, the 409-on-duplicate behaviour
+  (epic *and* plain-label collisions alike), and the backing-label auto-create,
+  so the get-or-create path is exercised against a server that really refuses.
+
 ### Releases → release stories (direct engine)
 
 `--include …,releases` adds one `release`-type story per GitHub release,
@@ -676,6 +767,22 @@ real server 2026-07-16 and mirrored by `src/mockserver.js`):
   A duplicate name — case-insensitive — is a `409 conflict`, so "ensure
   label" means treating 409 as already-exists; a missing name is a
   `400 invalid_parameter`.
+- **`GET /epics`** → 200, a **bare JSON array** (no cursor page, no `Link`), one
+  row per epic with `epic_id`, `label_id`, `epic_title`, `epic_desc`, and an
+  embedded `label` object. Newer servers also publish `name` / `description`
+  aliases; `epic_title` is the field every version emits, so it is the one the
+  get-or-create scan matches on.
+- **`POST /epics`** — body `{ "name": "...", "description": "..." }`
+  (`epic_title` is an accepted request alias — the handler reads
+  `epic_title.or(name)` and 400s when both are absent; a blank name is
+  `400`; `name` ≤ 255 bytes, `description` ≤ 100,000). With no `label_id` the
+  handler auto-creates the epic's backing label with a deterministic colour in
+  the same transaction → 200 with the epic object. **It does not get-or-create:**
+  a name colliding case-insensitively with an existing epic is
+  `409 conflict "Epic '<title>' already exists in this project"`, and one
+  colliding with a plain label is the same 409 naming `Label`. Callers must
+  therefore list first and treat a 409 as "look again" — see "Milestones →
+  epics" above.
 - **`POST /stories`** — body requires `name` (the read-side field is `title`;
   missing → `400 validation_failed`); optional `description`, `story_type`,
   `current_state`, `estimate`, `icebox`, `created_at`, `completed_at`,

@@ -56,6 +56,9 @@ test("writePlan writes labels, then stories oldest-first with their subresources
     const result = await writePlan(client, 91, samplePlan(), { stream: out });
 
     assert.deepEqual(result, {
+      epicsCreated: 0,
+      epicsExisting: 0,
+      epicsBlocked: 0,
       labelsCreated: 2,
       labelsExisting: 0,
       stories: 2,
@@ -110,6 +113,8 @@ test("sendProvenance stamps the full pair on every create, never half of it", as
     },
     createTask: async () => ({}),
     createComment: async () => ({}),
+    listEpics: async () => [],
+    createEpic: async () => ({}),
   };
   await writePlan(client, 91, samplePlan(), { stream: capture(), sendProvenance: true });
   assert.equal(bodies.length, 2);
@@ -140,6 +145,8 @@ test("without sendProvenance the create body carries no pair", async () => {
     },
     createTask: async () => ({}),
     createComment: async () => ({}),
+    listEpics: async () => [],
+    createEpic: async () => ({}),
   };
   await writePlan(client, 91, samplePlan(), { stream: capture() });
   for (const body of bodies) {
@@ -197,6 +204,8 @@ function stubClient(createLabel) {
       createStory: async () => ({ story_id: 1 }),
       createTask: async () => ({}),
       createComment: async () => ({}),
+      listEpics: async () => [],
+      createEpic: async () => ({}),
     },
     calls: () => calls,
   };
@@ -267,6 +276,8 @@ function recordingClient() {
         return { story_id: stories.length };
       },
       createTask: async () => ({}),
+      listEpics: async () => [],
+      createEpic: async () => ({}),
       createComment: async (_p, _s, text, _k, options) => {
         comments.push({ text, options });
         return {};
@@ -339,4 +350,244 @@ test("without sendDates the story/comment bodies stay byte-identical to v3", asy
     ]);
   }
   assert.equal(comments[0].options, undefined);
+});
+
+// --- epics (#31931) ----------------------------------------------------------
+
+/**
+ * @param {import("../src/mapping.js").EpicOp[]} epics
+ * @param {string[]} labels
+ * @returns {import("../src/writer.js").WritePlan}
+ */
+function epicPlan(epics, labels = []) {
+  return {
+    epics,
+    labels: [],
+    stories: [
+      {
+        external_id: "1",
+        name: "in the epic",
+        description: null,
+        story_type: "feature",
+        current_state: "unstarted",
+        created_at: "2024-01-01T00:00:00Z",
+        completed_at: null,
+        labels,
+        tasks: [],
+        comments: [],
+      },
+    ],
+  };
+}
+
+test("epics are created before labels, so a same-named GitHub label folds into the epic", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const plan = epicPlan([{ title: "V1", description: "GitHub milestone — State: open" }], ["V1"]);
+    plan.labels = [{ name: "V1", background_color_hex: "#ff0000", text_color_hex: "#ffffff" }];
+    const result = await writePlan(client, 91, plan, { stream: capture() });
+
+    assert.equal(result.epicsCreated, 1);
+    assert.equal(result.epicsExisting, 0);
+    // the plain create 409s against the epic's own backing label, so it is not counted
+    assert.equal(result.labelsCreated, 0);
+    assert.equal(result.labelsExisting, 1);
+    assert.equal(mock.state.labels[91].length, 1);
+    assert.equal(mock.state.epics[91][0].epic_desc, "GitHub milestone — State: open");
+    assert.equal(mock.state.stories[91][0].labels[0].label_id, mock.state.epics[91][0].label_id);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("an epic the project already has is reused, not re-created", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await client.createEpic(91, { name: "v1", description: "kept" }, "seed");
+    const result = await writePlan(
+      client,
+      91,
+      epicPlan([{ title: "V1", description: "new" }], ["V1"]),
+      { stream: capture() },
+    );
+    assert.equal(result.epicsCreated, 0);
+    assert.equal(result.epicsExisting, 1);
+    assert.equal(mock.state.epics[91].length, 1);
+    // epic_desc is written only on creation — a second run never refreshes it
+    assert.equal(mock.state.epics[91][0].epic_desc, "kept");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a 409 from a racing writer re-reads the listing and counts the epic as existing", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    // The scan says "absent", then the create loses the race to another run.
+    let scans = 0;
+    /** @type {import("../src/writer.js").WriterClient} */
+    const racing = {
+      createLabel: client.createLabel.bind(client),
+      createStory: client.createStory.bind(client),
+      createTask: client.createTask.bind(client),
+      createComment: client.createComment.bind(client),
+      createEpic: client.createEpic.bind(client),
+      listEpics: async (projectId) => (scans++ === 0 ? [] : client.listEpics(projectId)),
+    };
+    await client.createEpic(91, { name: "V1", description: null }, "other-run");
+    const out = capture();
+    const result = await writePlan(
+      racing,
+      91,
+      epicPlan([{ title: "V1", description: null }], ["V1"]),
+      { stream: out },
+    );
+    assert.equal(scans, 2);
+    assert.equal(result.epicsCreated, 0);
+    assert.equal(result.epicsExisting, 1);
+    assert.ok(!out.buf.includes("warning:"), out.buf);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a plain label blocking an epic warns loudly and leaves the story labelled", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await client.createLabel(91, { name: "V1" }, "seed");
+    const out = capture();
+    const result = await writePlan(
+      client,
+      91,
+      epicPlan([{ title: "V1", description: null }], ["V1"]),
+      { stream: out },
+    );
+    assert.equal(result.epicsCreated, 0);
+    assert.equal(result.epicsExisting, 0);
+    assert.equal(result.epicsBlocked, 1);
+    assert.match(out.buf, /warning: epic 'V1' was not created/);
+    assert.match(out.buf, /a label of that name already exists/);
+    assert.deepEqual(mock.state.epics[91] ?? [], []);
+    assert.equal(mock.state.stories[91][0].labels[0].label_name, "V1");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a hostile epic title cannot write control characters to the terminal", async () => {
+  const hostile = "V\u001b[31m1";
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await client.createLabel(91, { name: hostile }, "seed");
+    const out = capture();
+    await writePlan(client, 91, epicPlan([{ title: hostile, description: null }], []), {
+      stream: out,
+    });
+    assert.ok(!out.buf.includes("\u001b"), JSON.stringify(out.buf));
+    assert.match(out.buf, /epic 'V\[31m1' was not created/);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("an idempotency conflict on an epic create is not swallowed as already-exists", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await client.createEpic(91, { name: "other", description: null }, "run:epic:0");
+    await assert.rejects(
+      writePlan(client, 91, epicPlan([{ title: "V1", description: null }], ["V1"]), {
+        runId: "run",
+        stream: capture(),
+      }),
+      /idempotency_conflict/,
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a plan with no epics never touches the epic endpoints", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await writePlan(client, 91, epicPlan([], ["plain"]), { stream: capture() });
+    assert.deepEqual(
+      mock.state.requests.filter((r) => r.includes("/epics")),
+      [],
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+// Production still answers `epic_title` only (`name`/`description` are newer aliases,
+// absent from the deployed tracker read 2026-07-29), and the server keys on
+// LOWER(TRIM(epic_title)) — so the scan must read that field, trimmed and folded.
+test("the epic scan reads epic_title alone, trimmed, and folds case", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    mock.state.epics[91] = [{ epic_id: 1, label_id: 2, epic_title: "  V1  " }];
+    const result = await writePlan(
+      client,
+      91,
+      epicPlan([{ title: "v1", description: null }], ["v1"]),
+      { stream: capture() },
+    );
+    assert.equal(result.epicsCreated, 0);
+    assert.equal(result.epicsExisting, 1);
+    assert.deepEqual(
+      mock.state.requests.filter((r) => r === "POST /projects/91/epics"),
+      [],
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+// A listing row whose title is not a string must match nothing: coercing it would let
+// `123` swallow an epic really named "123", and that epic would never be created.
+test("a non-string epic title in the listing matches nothing", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    mock.state.epics[91] = [{ epic_id: 1, label_id: 2, epic_title: null, name: 123 }];
+    const result = await writePlan(
+      client,
+      91,
+      epicPlan([{ title: "123", description: null }], ["123"]),
+      { stream: capture() },
+    );
+    assert.equal(result.epicsCreated, 1);
+    assert.equal(result.epicsExisting, 0);
+    assert.equal(mock.state.epics[91].length, 2);
+  } finally {
+    await mock.close();
+  }
+});
+
+// The listing is the get half of get-or-create: posting anyway and leaning on the 409
+// would work, but it spends a write per epic on every re-run and races for no reason.
+test("an epic the listing already names is never POSTed at all", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await client.createEpic(91, { name: "V1", description: null }, "seed");
+    mock.state.requests.length = 0;
+    await writePlan(client, 91, epicPlan([{ title: "V1", description: null }], ["V1"]), {
+      stream: capture(),
+    });
+    assert.deepEqual(
+      mock.state.requests.filter((r) => r.includes("/epics")),
+      ["GET /projects/91/epics"],
+    );
+  } finally {
+    await mock.close();
+  }
 });

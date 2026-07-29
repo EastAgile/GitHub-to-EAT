@@ -334,6 +334,37 @@ export class EATClient {
   }
 
   /**
+   * List a project's epics (direct engine). The endpoint answers a bare array and does
+   * not paginate; anything else reads as "no epics", so a malformed body degrades into
+   * the create path's own 409 handling instead of crashing the run.
+   *
+   * @param {number} projectId
+   * @returns {Promise<any[]>}
+   */
+  async listEpics(projectId) {
+    const data = await (await this.#request("GET", `/projects/${projectId}/epics`)).json();
+    return Array.isArray(data) ? data : [];
+  }
+
+  /**
+   * Create an epic and, with no `label_id`, its backing label in the same transaction.
+   * Unlike the internal importer this does **not** get-or-create: a title matching an
+   * existing epic *or* plain label raises {@link ConflictError} with `code: "conflict"`.
+   *
+   * @param {number} projectId
+   * @param {{ name: string, description?: string | null }} epic
+   * @param {string} idempotencyKey
+   * @returns {Promise<any>}
+   */
+  async createEpic(projectId, { name, description }, idempotencyKey) {
+    const response = await this.#request("POST", `/projects/${projectId}/epics`, {
+      json: description == null ? { name } : { name, description },
+      headers: { "Idempotency-Key": idempotencyKey },
+    });
+    return response.json();
+  }
+
+  /**
    * Create a story (direct engine). Payload labels are attached get-or-create;
    * `current_state: "accepted"` works at create time (no estimate guard) — see CONTRACT.md.
    *

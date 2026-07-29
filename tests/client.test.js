@@ -343,3 +343,82 @@ test("createComment sends created_at only when a date is supplied", async () => 
     await mock.close();
   }
 });
+
+// --- epics (#31931) ----------------------------------------------------------
+
+test("listEpics returns the project's epics; a non-array body reads as none", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    assert.deepEqual(await client.listEpics(91), []);
+    await client.createEpic(91, { name: "V1", description: "note" }, "k1");
+    const epics = await client.listEpics(91);
+    assert.equal(epics.length, 1);
+    assert.equal(epics[0].epic_title, "V1");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("listEpics treats a non-array 200 body as no epics rather than crashing", async () => {
+  await withServer(
+    (_req, res) => json(res, 200, { epics: [] }),
+    async (base) => {
+      assert.deepEqual(await new EATClient(base, "t").listEpics(91), []);
+    },
+  );
+});
+
+test("createEpic posts name + description with an Idempotency-Key", async () => {
+  /** @type {any} */
+  let seen = null;
+  /** @type {string | string[] | undefined} */
+  let key;
+  await withServer(
+    async (req, res) => {
+      key = req.headers["idempotency-key"];
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      seen = { path: req.url, body: JSON.parse(Buffer.concat(chunks).toString()) };
+      json(res, 200, { epic_id: 1 });
+    },
+    async (base) => {
+      await new EATClient(base, "t").createEpic(91, { name: "V1", description: "n" }, "run:epic:0");
+    },
+  );
+  assert.equal(seen.path, "/api/v1/projects/91/epics");
+  assert.deepEqual(seen.body, { name: "V1", description: "n" });
+  assert.equal(key, "run:epic:0");
+});
+
+test("createEpic omits a null description rather than sending it", async () => {
+  /** @type {any} */
+  let body = null;
+  await withServer(
+    async (req, res) => {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      body = JSON.parse(Buffer.concat(chunks).toString());
+      json(res, 200, {});
+    },
+    async (base) => {
+      await new EATClient(base, "t").createEpic(91, { name: "V1", description: null }, "k");
+    },
+  );
+  assert.deepEqual(body, { name: "V1" });
+});
+
+test("a duplicate epic surfaces as ConflictError with the server's conflict code", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await client.createEpic(91, { name: "V1", description: null }, "k1");
+    await assert.rejects(client.createEpic(91, { name: "V1", description: null }, "k2"), (err) => {
+      assert.ok(err instanceof ConflictError);
+      assert.equal(err.code, "conflict");
+      return true;
+    });
+  } finally {
+    await mock.close();
+  }
+});

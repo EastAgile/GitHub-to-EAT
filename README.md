@@ -110,7 +110,9 @@ must contain `issues` — the other types only add to an issue import:
   (with a `pull-request` label), closed-unmerged → rejected; a merged PR that
   closes an imported issue folds into that issue's story instead of creating
   its own.
-- `milestones` — GitHub milestones become epics.
+- `milestones` — GitHub milestones become epics; every story whose issue is in
+  the milestone carries the epic's label, and the milestone's state and due date
+  ride in the epic's description. Works on both engines.
 - `releases` — GitHub Releases become release-type stories (tag → title,
   notes → description, publish date kept). Draft releases are imported too,
   landing in the backlog rather than being skipped — but GitHub only lists

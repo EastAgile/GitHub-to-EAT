@@ -75,6 +75,73 @@ export function issuesLegend(engine = "server", customization = null) {
   return lines;
 }
 
+// The server importer's own note format (github.rs milestone_epic_desc): same prefix,
+// same order, same em dash, so a milestone reads identically whichever engine wrote it.
+const MILESTONE_NOTE_PREFIX = "GitHub milestone";
+const MILESTONE_STATE_LABEL = "State";
+const MILESTONE_DUE_LABEL = "Due";
+
+/**
+ * The epic's description for a milestone, or null when it carries neither a state nor a
+ * due date. The date is trimmed to its `YYYY-MM-DD` prefix, like the server's.
+ *
+ * @param {unknown} milestone
+ * @returns {string | null}
+ */
+export function milestoneEpicDescription(milestone) {
+  const row = /** @type {{ state?: unknown, due_on?: unknown } | null | undefined} */ (milestone);
+  /** @type {string[]} */
+  const parts = [];
+  const state = typeof row?.state === "string" ? row.state.trim() : "";
+  if (state) parts.push(`${MILESTONE_STATE_LABEL}: ${state}`);
+  const due = typeof row?.due_on === "string" ? row.due_on.trim() : "";
+  if (due) parts.push(`${MILESTONE_DUE_LABEL}: ${due.split("T")[0]}`);
+  return parts.length ? `${MILESTONE_NOTE_PREFIX} — ${parts.join(", ")}` : null;
+}
+
+/** Epic titles and label names are `varchar(255)`, and EAT validates the byte length. */
+export const EPIC_TITLE_LIMIT = 255;
+
+/**
+ * A milestone's epic title — its trimmed title, cut to the column width — or "" when the
+ * milestone names none. Cutting here, not at write time, keeps the epic and the label the
+ * stories carry the same string.
+ *
+ * @param {unknown} milestone
+ * @returns {string}
+ */
+export function milestoneEpicTitle(milestone) {
+  const title = /** @type {{ title?: unknown } | null | undefined} */ (milestone)?.title;
+  return typeof title === "string" ? sliceBytes(title.trim(), EPIC_TITLE_LIMIT) : "";
+}
+
+const MILESTONE_EPIC_LINE = "milestone → epic (an issue keeps its milestone as the epic's label)";
+// Direct-only: the server legend has always printed the one line above. The example is
+// rendered by the description builder itself, so the two cannot drift.
+const MILESTONE_NOTE_LINE =
+  "milestone state + due date → the epic's description ('" +
+  `${milestoneEpicDescription({ state: "open", due_on: "2024-12-01" })}'); ` +
+  "a closed milestone leaves its epic open";
+const MILESTONE_REUSE_LINE =
+  "an epic that already exists is reused, never duplicated; epics and their backing " +
+  "labels are not counted in the import totals";
+
+/**
+ * No customization flag reaches milestones — `--milestones` selects issues, it does not
+ * switch the epic mapping off — so only the engine shapes these lines.
+ *
+ * @param {import("./engine.js").Engine} [engine]
+ * @returns {string[]}
+ */
+export function milestonesLegend(engine = "server") {
+  const lines = [MILESTONE_EPIC_LINE];
+  if (engine === "direct") lines.push(MILESTONE_NOTE_LINE, MILESTONE_REUSE_LINE);
+  return lines;
+}
+
+/** The default (server-engine) milestones legend the MAPPINGS registry re-exports. */
+export const MILESTONES_LEGEND = milestonesLegend();
+
 const RELEASE_LINE =
   "release → release-type story (tag → title, notes → description, publish date kept)";
 // Direct-only: naming drafts in the server legend would change bytes the server
@@ -485,6 +552,12 @@ function commentText(comment, sendDates) {
  * @property {string} [text_color_hex] contrast-picked when a background exists
  */
 
+/**
+ * @typedef {object} EpicOp one EAT epic to get-or-create
+ * @property {string} title the epic's name, and the name of the label its stories carry
+ * @property {string | null} description the milestone's state + due note
+ */
+
 /** The closed `state_reason` values that earn a label, by GitHub's spelling. */
 export const CLOSED_REASON_LABELS = new Map([
   ["not_planned", "not-planned"],
@@ -623,15 +696,16 @@ const REJECTABLE_TYPES = new Set(["feature", "bug"]);
  *   subIssues?: Map<string, string[]> | null, releases?: any[] | null }} repo
  * @param {Customization} [customization] per-run overrides; the default reproduces
  *   this profile unchanged (the filter/override stories consume the other fields)
- * @param {boolean} [sendDates] when true the comment's date is sent on the write, so
- *   its prefix collapses to `@login:`; when false (default) it stays `@login on <date>:`,
- *   reproducing the older-server output byte-for-byte
- * @returns {{ labels: LabelOp[], stories: StoryOp[] }}
+ * @param {{ sendDates?: boolean, epics?: boolean }} [options] `sendDates` sends the
+ *   comment's date on the write, so its prefix collapses to `@login:` (off, it stays
+ *   `@login on <date>:`, reproducing the older-server output byte-for-byte); `epics`
+ *   (`--include milestones`) maps each milestone to an epic
+ * @returns {{ labels: LabelOp[], stories: StoryOp[], epics: EpicOp[] }}
  */
 export function mapRepo(
   { issues, comments, labels, subIssues, releases },
   customization = DEFAULT_CUSTOMIZATION,
-  sendDates = false,
+  { sendDates = false, epics = false } = {},
 ) {
   const links = indexSubIssues(subIssues);
   /** @type {Map<string, string | null>} repo-level color authority, by lowercased name */
@@ -644,6 +718,8 @@ export function mapRepo(
 
   /** @type {Map<string, LabelOp>} keyed by lowercased name, like the server's label cache */
   const labelOps = new Map();
+  /** @type {Map<string, EpicOp>} keyed by lowercased title, like the server's epic cache */
+  const epicOps = new Map();
   /** @type {Map<string, { text: string, created_at: string | null }[]>} comments per issue number */
   const byIssue = new Map();
 
@@ -659,15 +735,21 @@ export function mapRepo(
     const names = [];
     /** @type {Set<string>} names already on this story, lowercased like labelOps */
     const seen = new Set();
-    /** @param {unknown} rawName @param {unknown} rawColor */
-    const addLabel = (rawName, rawColor) => {
-      const name = String(rawName ?? "").trim();
-      if (!name) return;
+    /** @param {string} name @returns {string} the lowercased key, or "" for a blank name */
+    const addName = (name) => {
+      if (!name) return "";
       const key = name.toLowerCase();
       if (!seen.has(key)) {
         seen.add(key);
         names.push(name);
       }
+      return key;
+    };
+    /** @param {unknown} rawName @param {unknown} rawColor */
+    const addLabel = (rawName, rawColor) => {
+      const name = String(rawName ?? "").trim();
+      const key = addName(name);
+      if (!key) return;
       if (!labelOps.has(key)) {
         const color =
           (rawColor ? normalizeHexColor(String(rawColor)) : null) ?? repoColors.get(key);
@@ -695,6 +777,21 @@ export function mapRepo(
     const abandoned = closedReasonLabel(closed, issue.state_reason);
     addLabel(abandoned, null);
     const closedState = abandoned && REJECTABLE_TYPES.has(storyType) ? "rejected" : "accepted";
+
+    // Also after typing, for the same reason. The epic's own label is the join, so the
+    // title rides in `names` only — POST /epics creates that label itself.
+    const epicTitle = epics ? milestoneEpicTitle(issue.milestone) : "";
+    if (epicTitle) {
+      const key = epicTitle.toLowerCase();
+      if (!epicOps.has(key)) {
+        epicOps.set(key, {
+          title: epicTitle,
+          description: milestoneEpicDescription(issue.milestone),
+        });
+      }
+      // The first spelling wins, so every story in one epic carries one label name.
+      addName(/** @type {EpicOp} */ (epicOps.get(key)).title);
+    }
 
     const body = (issue.body ?? "").trim();
     const externalId = String(issue.number);
@@ -737,7 +834,7 @@ export function mapRepo(
     }
   }
 
-  return { labels: [...labelOps.values()], stories };
+  return { labels: [...labelOps.values()], stories, epics: [...epicOps.values()] };
 }
 
 /**
@@ -807,12 +904,12 @@ function clampBlock(text, limit) {
  * Cut every plan text field down to the server's limits so one giant GitHub
  * comment cannot 400 the whole run. Returns a new plan; the input is untouched.
  *
- * @param {{ labels: LabelOp[], stories: StoryOp[] }} plan
+ * @param {{ labels: LabelOp[], stories: StoryOp[], epics?: EpicOp[] }} plan
  * @param {FieldLimits} limits
  * @param {{ reserveDescription?: (op: StoryOp) => number,
  *   warn?: (message: string) => void }} [options] `reserveDescription` holds
  *   back room per story for text appended later (the dedup marker)
- * @returns {{ labels: LabelOp[], stories: StoryOp[] }}
+ * @returns {{ labels: LabelOp[], stories: StoryOp[], epics: EpicOp[] }}
  */
 export function clampPlan(plan, limits, { reserveDescription = () => 0, warn = () => {} } = {}) {
   const stories = plan.stories.map((op) => {
@@ -852,5 +949,6 @@ export function clampPlan(plan, limits, { reserveDescription = () => 0, warn = (
     });
     return out;
   });
-  return { labels: plan.labels, stories };
+  // Epic titles were cut to the column width at map time, so nothing here clamps them.
+  return { labels: plan.labels, stories, epics: plan.epics ?? [] };
 }

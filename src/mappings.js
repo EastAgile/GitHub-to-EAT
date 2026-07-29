@@ -11,6 +11,8 @@ import {
   describeCustomization,
   ISSUES_LEGEND,
   issuesLegend,
+  MILESTONES_LEGEND,
+  milestonesLegend,
   RELEASES_LEGEND,
   releasesLegend,
 } from "./mapping.js";
@@ -45,7 +47,8 @@ export const MAPPINGS = {
   },
   milestones: {
     requestField: "include_milestones",
-    legend: ["milestone → epic (an issue keeps its milestone as the epic's label)"],
+    legend: MILESTONES_LEGEND,
+    render: milestonesLegend,
   },
   releases: {
     requestField: "include_releases",

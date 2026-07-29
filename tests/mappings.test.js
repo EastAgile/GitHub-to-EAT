@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { DEFAULT_CUSTOMIZATION, ISSUE_TYPE_STORY_TYPES, releasesLegend } from "../src/mapping.js";
+import {
+  DEFAULT_CUSTOMIZATION,
+  ISSUE_TYPE_STORY_TYPES,
+  MILESTONES_LEGEND,
+  milestoneEpicDescription,
+  milestonesLegend,
+  releasesLegend,
+} from "../src/mapping.js";
 import { MAPPINGS, parseInclude, renderLegend, requestFlags } from "../src/mappings.js";
 
 test("issues is a known type with no request field", () => {
@@ -310,4 +317,97 @@ test("a run without --include releases renders no release lines at all", () => {
 test("the releases registry entry is the renderer's own default output", () => {
   assert.deepEqual(MAPPINGS.releases.legend, releasesLegend());
   assert.deepEqual(MAPPINGS.releases.legend, releasesLegend("server"));
+});
+
+// --- milestones → epics in the legend (#31931) -------------------------------
+
+// Transcribed from `renderLegend` at 715fc28, before the direct engine imported
+// milestones: a same-build comparison could not catch a line leaking into `server`.
+const SERVER_MILESTONES_BLOCK_AT_715fc28 = [
+  "  milestones:",
+  "    - milestone → epic (an issue keeps its milestone as the epic's label)",
+].join("\n");
+
+test("--engine server renders the pre-#31931 milestones block for every customization", () => {
+  let cases = 0;
+  for (const customization of [null, ...CUSTOMIZATIONS]) {
+    cases += 1;
+    const legend = renderLegend(["issues", "milestones"], "server", customization);
+    assert.ok(
+      legend.includes(SERVER_MILESTONES_BLOCK_AT_715fc28),
+      "server milestones block drifted",
+    );
+    assert.doesNotMatch(legend, /epic's description|reused, never duplicated/);
+  }
+  assert.equal(cases, CUSTOMIZATIONS.length + 1);
+});
+
+test("the direct legend documents the epic note and reuse; the server legend does not", () => {
+  const direct = renderLegend(["issues", "milestones"], "direct");
+  assert.ok(direct.includes(SERVER_MILESTONES_BLOCK_AT_715fc28.split("\n")[1]));
+  assert.match(direct, /- milestone state \+ due date → the epic's description/);
+  assert.match(direct, /a closed milestone leaves its epic open/);
+  assert.match(direct, /- an epic that already exists is reused, never duplicated/);
+  assert.match(direct, /not counted in the import totals/);
+});
+
+// The example in the note line is rendered by the description builder itself, so a
+// change to the server-mirroring format cannot leave the legend describing the old text.
+test("the epic-note legend line quotes what milestoneEpicDescription actually renders", () => {
+  const line = renderLegend(["issues", "milestones"], "direct")
+    .split("\n")
+    .find((l) => l.includes("epic's description"));
+  assert.ok(line, "the direct legend has an epic-description line");
+  assert.ok(
+    line.includes(String(milestoneEpicDescription({ state: "open", due_on: "2024-12-01" }))),
+  );
+});
+
+// `--milestones` is a *selection* filter, not a mapping override: it narrows which
+// issues map, it does not switch the milestone→epic rule off for the run.
+test("the milestone lines survive every customization on the direct engine", () => {
+  let cases = 0;
+  for (const customization of [null, ...CUSTOMIZATIONS]) {
+    cases += 1;
+    const legend = renderLegend(["issues", "milestones"], "direct", customization);
+    assert.match(legend, /- milestone → epic/);
+    assert.match(legend, /- milestone state \+ due date → /);
+    assert.match(legend, /- an epic that already exists is reused/);
+  }
+  assert.equal(cases, CUSTOMIZATIONS.length + 1);
+});
+
+test("a run without --include milestones renders no milestone mapping lines at all", () => {
+  for (const engine of /** @type {const} */ (["server", "direct"])) {
+    assert.doesNotMatch(renderLegend(["issues"], engine), /milestone/i);
+    assert.doesNotMatch(renderLegend(["issues", "releases"], engine), /milestone/i);
+  }
+});
+
+test("no --include subset or customization leaks epic text into --engine server", () => {
+  let cases = 0;
+  for (const selected of INCLUDE_SUBSETS) {
+    for (const customization of [null, ...CUSTOMIZATIONS]) {
+      cases += 1;
+      assert.doesNotMatch(renderLegend(selected, "server", customization), /epic's description/);
+    }
+  }
+  assert.equal(cases, INCLUDE_SUBSETS.length * (CUSTOMIZATIONS.length + 1));
+});
+
+test("the milestones registry entry is the renderer's own default output", () => {
+  assert.equal(MAPPINGS.milestones.legend, MILESTONES_LEGEND);
+  assert.deepEqual(MAPPINGS.milestones.legend, milestonesLegend());
+  assert.deepEqual(MAPPINGS.milestones.legend, milestonesLegend("server"));
+});
+
+// The description builder is the single source of that format: the legend quotes what it
+// renders, so changing the format without touching the legend cannot go unnoticed.
+test("the epic-note legend line and the description builder agree on one format", () => {
+  const line = renderLegend(["issues", "milestones"], "direct")
+    .split("\n")
+    .find((l) => l.includes("epic's description"));
+  const rendered = String(milestoneEpicDescription({ state: "open", due_on: "2024-12-01" }));
+  assert.ok(line?.includes(`('${rendered}')`), `legend quotes '${rendered}', got ${line}`);
+  assert.match(rendered, /^GitHub milestone — State: open, Due: 2024-12-01$/);
 });

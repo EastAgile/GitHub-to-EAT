@@ -1,10 +1,12 @@
 /**
- * The direct engine's write stage. Labels go first (the story payload's own
- * get-or-create would create them colorless), then stories oldest-first to keep board order.
+ * The direct engine's write stage. Epics go first (their backing label must exist before a
+ * same-named GitHub label claims the name), then the remaining labels (the story payload's
+ * own get-or-create would create them colorless), then stories oldest-first for board order.
  */
 
 import { randomUUID } from "node:crypto";
 import { AuthError, ConflictError, EATError, EATTimeout, NotFoundError } from "./client.js";
+import { stripControls } from "./mapping.js";
 import { runWithProgress } from "./progress.js";
 
 /**
@@ -20,21 +22,40 @@ import { runWithProgress } from "./progress.js";
  *   complete?: boolean }, idempotencyKey: string) => Promise<any>} createTask
  * @property {(projectId: number, storyId: number, text: string,
  *   idempotencyKey: string, options?: { createdAt?: string | null }) => Promise<any>} createComment
+ * @property {(projectId: number) => Promise<any[]>} listEpics
+ * @property {(projectId: number, epic: { name: string, description?: string | null },
+ *   idempotencyKey: string) => Promise<any>} createEpic
  */
 
 /**
  * @typedef {{ labels: import("./mapping.js").LabelOp[],
- *   stories: import("./mapping.js").StoryOp[] }} WritePlan
+ *   stories: import("./mapping.js").StoryOp[],
+ *   epics?: import("./mapping.js").EpicOp[] }} WritePlan
  */
 
 /**
  * @typedef {object} WriteResult
+ * @property {number} epicsCreated
+ * @property {number} epicsExisting epics the project already had
+ * @property {number} epicsBlocked epics a plain label of the same name refused
  * @property {number} labelsCreated
  * @property {number} labelsExisting labels the project already had (409 conflict)
  * @property {number} stories
  * @property {number} tasks
  * @property {number} comments
  */
+
+/**
+ * One epic listing row's dedup key — the server matches on `LOWER(TRIM(epic_title))`.
+ * `epic_title` is the field every server version publishes; `name` is its newer alias.
+ *
+ * @param {any} row
+ * @returns {string}
+ */
+function epicKey(row) {
+  const title = typeof row?.epic_title === "string" ? row.epic_title : row?.name;
+  return typeof title === "string" ? title.trim().toLowerCase() : "";
+}
 
 /**
  * Timeouts, network failures, and 5xx are retried — the per-op Idempotency-Key
@@ -100,7 +121,65 @@ export async function writePlan(client, projectId, plan, options = {}) {
   /** @template T @param {() => Promise<T>} fn */
   const retrying = (fn) => withRetry(fn, retryAttempts, retryDelayMs);
 
-  const result = { labelsCreated: 0, labelsExisting: 0, stories: 0, tasks: 0, comments: 0 };
+  const result = {
+    epicsCreated: 0,
+    epicsExisting: 0,
+    epicsBlocked: 0,
+    labelsCreated: 0,
+    labelsExisting: 0,
+    stories: 0,
+    tasks: 0,
+    comments: 0,
+  };
+
+  const epics = plan.epics ?? [];
+  if (epics.length) {
+    await runWithProgress(
+      async () => {
+        /** @param {number} id */
+        const scan = async (id) =>
+          new Set((await retrying(() => client.listEpics(id))).map(epicKey));
+        // The public create does not get-or-create — it 409s — so the listing is the
+        // get half, and the 409 below is the concurrent-writer safety net.
+        let existing = await scan(projectId);
+        for (const [i, epic] of epics.entries()) {
+          const key = epic.title.toLowerCase();
+          if (existing.has(key)) {
+            result.epicsExisting += 1;
+            continue;
+          }
+          try {
+            await retrying(() =>
+              client.createEpic(
+                projectId,
+                { name: epic.title, description: epic.description },
+                `${runId}:epic:${i}`,
+              ),
+            );
+            result.epicsCreated += 1;
+            existing.add(key);
+          } catch (err) {
+            if (!(err instanceof ConflictError) || err.code !== "conflict") throw err;
+            // Either another run created it, or a plain label of that name holds the
+            // name and no epic can ever take it — only a re-read tells the two apart.
+            existing = await scan(projectId);
+            if (existing.has(key)) {
+              result.epicsExisting += 1;
+              continue;
+            }
+            result.epicsBlocked += 1;
+            stream?.write(
+              `warning: epic '${stripControls(epic.title)}' was not created — a label of that ` +
+                "name already exists in this project; its stories still carry the label, so " +
+                "they stay grouped, but no epic row was made.\n",
+            );
+          }
+        }
+      },
+      `creating ${epics.length} epics`,
+      { stream },
+    );
+  }
 
   if (plan.labels.length) {
     await runWithProgress(

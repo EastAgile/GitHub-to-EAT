@@ -8,6 +8,8 @@
  *     GET  /projects/{id}/stories          (cursor mode + fields= projection)
  *     GET  /projects/{id}/imports/{id}     (async import job status; --async)
  *     POST /projects/{id}/import/json      (202 async accept under --async)
+ *     GET  /projects/{id}/epics
+ *     POST /projects/{id}/epics             (409 on a duplicate epic OR label name)
  *     POST /projects/{id}/labels
  *     POST /projects/{id}/stories
  *     POST /projects/{id}/stories/{id}/tasks
@@ -43,6 +45,9 @@ import { parseArgs } from "node:util";
  * @property {Record<number, any>} projects
  * @property {Record<number, any[]>} stories
  * @property {Record<number, any[]>} labels
+ * @property {Record<number, any[]>} epics
+ * @property {string[]} requests `"<METHOD> <path>"` per request, in order — lets a
+ *   test prove a call never happened, not just that its side effect is absent
  * @property {any} meta
  * @property {any} importResult
  * @property {{ issues: number, prs: number, milestones: number, releases: number,
@@ -92,6 +97,8 @@ export function makeState(overrides = {}) {
     projects: { 91: { project_id: 91, project_title: "Mock Project" } },
     stories: {},
     labels: {},
+    epics: {},
+    requests: [],
     // Mirrors the real /meta (probed 2026-07-29): `auth` + `hint` + `transitions`, and no
     // story-type list — `transitions` is the only place the response names the types at all.
     meta: {
@@ -394,6 +401,7 @@ async function handle(state, req, res) {
   }
   const url = new URL(req.url ?? "/", "http://mock");
   const path = url.pathname;
+  state.requests.push(`${req.method} ${path}`);
 
   if (req.method === "GET") {
     if (path === "/meta") {
@@ -489,6 +497,17 @@ async function handle(state, req, res) {
       } else {
         send(res, 200, applyFields(stories.map(toStoryPayload)));
       }
+      return;
+    }
+
+    m = path.match(/^\/projects\/(\d+)\/epics$/);
+    if (m) {
+      const projectId = Number(m[1]);
+      if (!(projectId in state.projects)) {
+        send(res, 404, { error: "not found" });
+        return;
+      }
+      send(res, 200, state.epics[projectId] ?? []);
       return;
     }
 
@@ -610,6 +629,9 @@ function routePost(state, path, body, idempotencyKey) {
     return { status: 200, payload: result };
   }
 
+  m = path.match(/^\/projects\/(\d+)\/epics$/);
+  if (m) return createEpic(state, Number(m[1]), body);
+
   m = path.match(/^\/projects\/(\d+)\/labels$/);
   if (m) return createLabel(state, Number(m[1]), body);
 
@@ -663,6 +685,79 @@ function createLabel(state, projectId, body) {
   };
   state.labels[projectId].push(label);
   return { status: 200, payload: label };
+}
+
+/**
+ * Get-or-create is NOT what the public endpoint does: it pre-checks the project's label
+ * names and 409s on a hit, naming `Epic` when that label already backs one and `Label`
+ * otherwise (handlers/epics.rs) — so a plain label of the same name blocks the epic.
+ * Deviation: titles are trimmed before keying and storing; the real handler stores them
+ * verbatim, which no caller of this mock sends.
+ *
+ * @param {MockState} state
+ * @param {number} projectId
+ * @param {any} body
+ * @returns {MockResponse}
+ */
+function createEpic(state, projectId, body) {
+  if (!(projectId in state.projects)) return NOT_FOUND;
+  const raw = body.epic_title ?? body.name;
+  if (raw == null) {
+    return { status: 400, payload: { error: "name or epic_title is required" } };
+  }
+  const title = String(raw).trim();
+  if (!title) {
+    return {
+      status: 400,
+      payload: {
+        code: "invalid_parameter",
+        details: { constraint: "required", fields: ["name"] },
+        error: "This field is required.",
+      },
+    };
+  }
+  state.epics[projectId] ??= [];
+  state.labels[projectId] ??= [];
+  const key = title.toLowerCase();
+  const clash = state.labels[projectId].find((l) => l.label_name.toLowerCase() === key);
+  if (clash) {
+    const kind = state.epics[projectId].some((e) => e.label_id === clash.label_id)
+      ? "Epic"
+      : "Label";
+    return {
+      status: 409,
+      payload: { code: "conflict", error: `${kind} '${title}' already exists in this project` },
+    };
+  }
+  // The backing label is auto-created in the same transaction, with a colour derived
+  // from the title — the real handler's `deterministic_label_colors`.
+  const hash = createHash("sha256").update(title).digest("hex");
+  const label = {
+    label_id: state.nextId++,
+    label_name: title,
+    project_id: projectId,
+    background_color_hex: `#${hash.slice(0, 6)}`,
+    text_color_hex: LABEL_DEFAULT_TEXT,
+  };
+  state.labels[projectId].push(label);
+  const now = new Date().toISOString();
+  const description = body.description == null ? null : String(body.description);
+  const epic = {
+    epic_id: state.nextId++,
+    project_id: projectId,
+    label_id: label.label_id,
+    epic_title: title,
+    name: title,
+    epic_desc: description,
+    description,
+    epic_code: null,
+    epic_url: null,
+    created: now,
+    updated_at: now,
+    label,
+  };
+  state.epics[projectId].push(epic);
+  return { status: 200, payload: epic };
 }
 
 /**
