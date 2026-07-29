@@ -129,7 +129,7 @@ Both are direct-engine only, and imply `--engine direct`:
 | --------------- | -------------------------------------------------- | ------------------------------ |
 | `--states`      | `all`, `open`, `closed`                            | `all`                          |
 | `--milestones`  | milestone titles, matched exactly; comma-separated, repeatable | every milestone     |
-| `--story-type`  | `infer`, `feature`, `bug`, `chore`                 | `infer` (from labels/title)    |
+| `--story-type`  | `infer`, `feature`, `bug`, `chore`                 | `infer` (org issue type, else labels/title) |
 | `--no-comments` | —                                                  | comments are imported          |
 | `--no-tasks`    | —                                                  | body checklists become tasks   |
 

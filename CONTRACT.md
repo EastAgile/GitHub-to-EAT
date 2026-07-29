@@ -372,9 +372,9 @@ falling back to the `x-ratelimit-reset` time); 401 → token rejected.
 
 The direct engine maps fetched GitHub JSON to an EAT write-op plan client-side
 (`src/mapping.js` — pure functions, no HTTP), mirroring the server importer's
-issue mapping so both engines classify the same repo identically — with one
-deliberate exception, the closed-reason labels below, which only the direct
-engine produces:
+issue mapping so both engines classify the same repo identically — with two
+deliberate exceptions, the closed-reason labels and the org issue type below,
+which only the direct engine produces:
 
 - **State** — open issue → `unstarted` story; closed → `accepted`, keeping the
   GitHub closed date (`completed_at`).
@@ -395,9 +395,30 @@ engine produces:
   an import appends and never updates, and "Marker dedup" below skips stories
   already imported, so existing boards keep no reason labels and no re-label
   pass exists to add them.
-- **Type inference** (labels + title, bug checked first) — a label containing
-  `bug`/`fix`/`defect`, or a title starting with `fix`/`bug` → `bug`; a label
-  containing `chore`/`maintenance`/`devops`/`infra` → `chore`; else `feature`.
+- **Issue type** (**direct engine only** — the server importer's issue struct has
+  no `type` field, so serde drops it and the server always infers) — GitHub
+  organizations can define issue types, and since March 2025 every REST issue row
+  carries a `type` object; the fetcher already downloads it, so reading it costs
+  no extra request. A recognised `type.name` classifies the story outright:
+  `Bug` → `bug`, `Feature`/`Enhancement` → `feature`, `Task`/`Chore` → `chore`.
+  Type names are org-authored free text, not a GitHub enum, so the match is
+  case-insensitive on the trimmed name (`bug`, `BUG` and `" Bug "` all classify)
+  — unlike the closed-reason table above, which matches GitHub's own lowercase
+  spelling exactly. The mapping is total: an unrecognised name, `type: null`, an
+  absent `type`, a `type` that is not an object and a `name` that is not a string
+  all fall through to the inference below, leaving that output identical to v3.
+  The name itself is only ever a lookup key — it never lands on the story or in
+  any message, so no org-authored text reaches the terminal from this path.
+  Precedence, highest first: an explicit `--story-type feature|bug|chore` (the
+  member's own instruction for the whole run), then `type.name`, then the
+  inference. Only issues imported after this landed carry type-derived story
+  types — an import appends and never updates.
+- **Type inference** (labels + title, bug checked first) — the fallback when the
+  org set no issue type. A label containing `bug`/`fix`/`defect`, or a title
+  starting with `fix`/`bug` → `bug`; a label containing
+  `chore`/`maintenance`/`devops`/`infra` → `chore`; else `feature`. It reads the
+  issue's own labels only: both the closed-reason label above and any other label
+  this mapper synthesises are added after typing, so neither can reclassify a story.
 - **Labels** — names trimmed (blank dropped); duplicate names on one issue
   collapse case-insensitively, the first spelling winning, so a story never
   lists the same label twice (EAT get-or-creates labels case-insensitively, so
@@ -420,11 +441,13 @@ The CLI legend's `issues` lines are assembled by this module's own renderer,
 whose default output is what the `MAPPINGS` registry re-exports — the registry
 entry is that render path's product, not a parallel copy, so legend and mapper
 cannot drift. The server engine's legend output stays byte-identical. The
-closed-reason line is the one exception — it renders only under
-`--engine direct`, because the server importer flattens every closed issue. The
-legend describes the mapping, not the selection, so `--states open` still shows
-both the closed-state line and the closed-reason line, and only `--no-comments`
-/ `--no-tasks` ever drop a line.
+closed-reason and issue-type lines are the exceptions — they render only under
+`--engine direct`, because the server importer flattens every closed issue and
+never reads `type`. The legend describes the mapping, not the selection, so
+`--states open` still shows both the closed-state line and the closed-reason
+line, `--story-type bug` still shows the issue-type line (the `Customized:`
+block is where that override is named), and only `--no-comments` / `--no-tasks`
+ever drop a line.
 
 ### Write surface (direct engine)
 

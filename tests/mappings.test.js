@@ -137,6 +137,32 @@ test("the state line and the closed-reason line agree: --states open keeps both"
   assert.match(openOnly, /- issue states: open only/);
 });
 
+// --- org-defined issue types in the legend (#31927) --------------------------
+
+test("the direct legend documents the issue-type rule; the server legend does not", () => {
+  assert.match(renderLegend(["issues"], "direct"), /issue type Bug \/ Feature \/ Task/);
+  assert.doesNotMatch(renderLegend(["issues"], "server"), /issue type/);
+  assert.equal(renderLegend(["issues"], "server"), renderLegend(["issues"]));
+});
+
+test("the issue-type line survives every customization field, --story-type included", () => {
+  for (const customization of [
+    DEFAULT_CUSTOMIZATION,
+    ...["all", "open", "closed"].map((states) => ({ ...DEFAULT_CUSTOMIZATION, states })),
+    ...["infer", "feature", "bug", "chore"].map((storyType) => ({
+      ...DEFAULT_CUSTOMIZATION,
+      storyType,
+    })),
+    ...[null, [], ["v1.0"]].map((milestones) => ({ ...DEFAULT_CUSTOMIZATION, milestones })),
+    { ...DEFAULT_CUSTOMIZATION, comments: false },
+    { ...DEFAULT_CUSTOMIZATION, tasks: false },
+  ]) {
+    const c = /** @type {import("../src/mapping.js").Customization} */ (customization);
+    assert.match(renderLegend(["issues"], "direct", c), /issue type Bug/);
+    assert.doesNotMatch(renderLegend(["issues"], "server", c), /issue type/);
+  }
+});
+
 test("renderLegend strips terminal control chars from milestone titles", () => {
   const legend = renderLegend(["issues"], "direct", {
     ...DEFAULT_CUSTOMIZATION,

@@ -1451,16 +1451,20 @@ test("on a terminal the confirm question survives a backspace edit", async () =>
   );
 });
 
-// AC6 — the no-flags output is the byte-for-byte text this story inherited; only
-// the direct engine gained a line (#31930's closed-reason labels).
+// AC6 — the no-flags output is the byte-for-byte text this story inherited; only the
+// direct engine gained lines (#31930's closed-reason labels, #31927's issue types).
 const CLOSED_REASON_LINE =
   "    - closed as not planned / duplicate → accepted, plus a 'not-planned' / 'duplicate' label\n";
+const ISSUE_TYPE_LINE =
+  "    - issue type Bug / Feature / Task → bug / feature / chore story; " +
+  "unset or unknown types infer from labels + title\n";
+const DIRECT_ONLY_LINES = CLOSED_REASON_LINE + ISSUE_TYPE_LINE;
 
-/** @param {string} [reasonLine] */
-const goldenTail = (reasonLine = "") =>
+/** @param {string} [directOnlyLines] */
+const goldenTail = (directOnlyLines = "") =>
   "  issues:\n" +
   "    - open issue → story (unstarted); closed issue → story (accepted, keeps the closed date)\n" +
-  reasonLine +
+  directOnlyLines +
   "    - labels → labels (with colors); issue-body checklists → story tasks\n" +
   "    - comments → comments (body only)\n" +
   "Imports append to the project; re-runs skip already-imported items; nothing is updated or deleted.\n" +
@@ -1474,7 +1478,7 @@ for (const [label, argv, header, tail] of /** @type {[string, string[], string, 
     "direct",
     ["--engine", "direct"],
     "Import mapping (GitHub → East Agile Tracker) [engine: direct]:\n",
-    goldenTail(CLOSED_REASON_LINE),
+    goldenTail(DIRECT_ONLY_LINES),
   ],
 ])) {
   test(`no customization flags: the ${label} engine's output is byte-identical`, async () => {

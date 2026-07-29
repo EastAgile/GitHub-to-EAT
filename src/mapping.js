@@ -1,7 +1,8 @@
 /**
  * The direct engine's default mapping profile: GitHub issue JSON in → EAT write-op plan out (pure, no HTTP).
  * Mirrors the server importer's issue mapping (agile-tracker github.rs + common.rs) so both engines classify
- * identically, with one deliberate exception: the closed-reason labels below, which the server never produces.
+ * identically, with two deliberate exceptions the server never produces: the closed-reason labels, and the
+ * org issue-type field (the server's `GhIssue` has no `type`, so serde drops it).
  */
 
 // Composed so `--customize` can drop the tasks fragment / comments line without
@@ -15,6 +16,10 @@ const COMMENTS_LINE = "comments → comments (body only)";
 // reason labels in its legend would promise output it does not produce.
 const CLOSED_REASON_LINE =
   "closed as not planned / duplicate → accepted, plus a 'not-planned' / 'duplicate' label";
+// Direct-only for the same reason: the server's issue struct has no `type` field.
+const ISSUE_TYPE_LINE =
+  "issue type Bug / Feature / Task → bug / feature / chore story; " +
+  "unset or unknown types infer from labels + title";
 
 // Milestone titles are untrusted remote data; strip terminal control chars
 // (ESC/C0/C1/DEL) before they reach the terminal, in the wizard and the legend alike.
@@ -31,7 +36,7 @@ export const stripControls = (/** @type {string} */ s) => s.replace(/\p{Cc}/gu, 
 export function issuesLegend(engine = "server", customization = null) {
   const { comments, tasks } = customization ?? DEFAULT_CUSTOMIZATION;
   const lines = [STATE_LINE];
-  if (engine === "direct") lines.push(CLOSED_REASON_LINE);
+  if (engine === "direct") lines.push(CLOSED_REASON_LINE, ISSUE_TYPE_LINE);
   lines.push(tasks ? `${LABELS_LINE}${TASKS_SUFFIX}` : LABELS_LINE);
   if (comments) lines.push(COMMENTS_LINE);
   return lines;
@@ -224,8 +229,36 @@ export function parseCustomization(values) {
 }
 
 /**
- * GitHub issues carry no native type, so infer one from the conventional labels + the title.
- * Bug is checked first: a row that matches both rules is a bug.
+ * The story types GitHub's org-defined issue-type names declare, by lowercased name.
+ * Only these classify; anything else falls through to {@link inferStoryType}.
+ *
+ * @type {Map<string, "bug" | "chore" | "feature">}
+ */
+export const ISSUE_TYPE_STORY_TYPES = new Map([
+  ["bug", "bug"],
+  ["feature", "feature"],
+  ["enhancement", "feature"],
+  ["task", "chore"],
+  ["chore", "chore"],
+]);
+
+/**
+ * The story type an issue's org-defined type declares, or null when there is none to read.
+ * Type names are org-authored free text, so the match is case- and space-insensitive — but
+ * only on a real string, so a non-string `name` is never coerced into a match.
+ *
+ * @param {unknown} issueType the REST row's `type` (absent before March 2025, null when unset)
+ * @returns {"bug" | "chore" | "feature" | null}
+ */
+export function storyTypeFromIssueType(issueType) {
+  const name = /** @type {{ name?: unknown } | null | undefined} */ (issueType)?.name;
+  if (typeof name !== "string") return null;
+  return ISSUE_TYPE_STORY_TYPES.get(name.trim().toLowerCase()) ?? null;
+}
+
+/**
+ * Infer a story type from the conventional labels + the title — the fallback when the org
+ * set no issue type. Bug is checked first: a row that matches both rules is a bug.
  *
  * @param {string[]} labels label names
  * @param {string} title
@@ -429,10 +462,12 @@ export function mapRepo(
     for (const label of issue.labels ?? []) addLabel(label.name, label.color);
 
     const title = String(issue.title ?? "");
-    // Inferred before the reason label joins `names`: the type comes from the author's
-    // own labels, never from a label this mapper invented.
+    // Precedence: --story-type, then the org's declared type, then the heuristic — run here so
+    // it reads the author's own labels, never one this mapper appends to `names` below.
     const storyType =
-      customization.storyType === "infer" ? inferStoryType(names, title) : customization.storyType;
+      customization.storyType === "infer"
+        ? (storyTypeFromIssueType(issue.type) ?? inferStoryType(names, title))
+        : customization.storyType;
 
     const closed = state === "closed";
     // Closed is closed, so the state stays `accepted`; the label is what lets a
