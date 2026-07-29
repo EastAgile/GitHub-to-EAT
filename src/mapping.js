@@ -52,6 +52,18 @@ export function describeCustomization({ states, milestones, storyType, comments,
 }
 
 /**
+ * Whether a milestone allowlist is actually in force. Legend, matcher and the
+ * zero-import warner must agree that an empty one means "all" — and `string[] | null`
+ * is truthy-checkable — so the rule lives here and nowhere else.
+ *
+ * @param {Customization["milestones"]} milestones
+ * @returns {milestones is string[]}
+ */
+export function hasMilestoneFilter(milestones) {
+  return Boolean(milestones?.length);
+}
+
+/**
  * The subset of {@link describeCustomization} that can drop issues, so a run
  * that maps nothing can name the filters responsible in the same words.
  *
@@ -62,9 +74,9 @@ export function describeFilters({ states, milestones }) {
   /** @type {string[]} */
   const lines = [];
   if (states !== "all") lines.push(`issue states: ${states} only`);
-  // A directly-built Customization could pass [] (the wizard never does); an empty
-  // filter is "all", so render nothing rather than a bare "milestones:" line.
-  if (milestones?.length) lines.push(`milestones: ${milestones.map(stripControls).join(", ")}`);
+  if (hasMilestoneFilter(milestones)) {
+    lines.push(`milestones: ${milestones.map(stripControls).join(", ")}`);
+  }
   return lines;
 }
 
@@ -83,16 +95,14 @@ export function matchesStates(issue, states) {
  * @returns {boolean}
  */
 export function matchesMilestones(issue, milestones) {
-  // `?.length`, not truthiness: an empty allowlist means "all" (as describeFilters
-  // renders it), never "match nothing" — that would silently import zero stories.
-  return !milestones?.length || milestones.includes(issue.milestone?.title);
+  return !hasMilestoneFilter(milestones) || milestones.includes(issue.milestone?.title);
 }
 
 /**
  * @typedef {object} Customization per-run mapping overrides (`--customize`)
  * @property {"all" | "open" | "closed"} states which GitHub issue states to import
  * @property {string[] | null} milestones exact `milestone.title` allowlist; null — or an
- *   empty array, which normalizes to the same thing — imports every issue
+ *   empty array, treated the same way — imports every issue
  * @property {"infer" | "feature" | "bug" | "chore"} storyType "infer" uses {@link inferStoryType}
  * @property {boolean} comments import issue comments
  * @property {boolean} tasks import body checklists as tasks

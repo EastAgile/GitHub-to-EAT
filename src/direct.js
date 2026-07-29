@@ -16,6 +16,7 @@ import {
   DEFAULT_CUSTOMIZATION,
   describeFilters,
   FALLBACK_LIMITS,
+  hasMilestoneFilter,
   mapRepo,
   matchesMilestones,
   matchesStates,
@@ -53,7 +54,7 @@ function warnFiltersMatchNothing({ issues }, customization, stream) {
   // that is the order mapRepo applies them in.
   const candidates = issues.filter((issue) => !issue.pull_request && matchesStates(issue, states));
 
-  if (milestones?.length) {
+  if (hasMilestoneFilter(milestones)) {
     const present = new Set(candidates.map((issue) => issue.milestone?.title));
     const unmatched = milestones.filter((title) => !present.has(title));
     if (unmatched.length) {

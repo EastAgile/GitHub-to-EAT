@@ -6,6 +6,7 @@ import {
   contrastTextColor,
   customizationFlagsGiven,
   DEFAULT_CUSTOMIZATION,
+  describeFilters,
   FALLBACK_LIMITS,
   ISSUES_LEGEND,
   inferStoryType,
@@ -600,11 +601,21 @@ test("an empty milestones allowlist imports every issue, exactly like null", () 
     labels: [],
   };
   assert.deepEqual(
-    mapRepo(repo, custom({ milestones: [] })).stories,
-    mapRepo(repo, custom({ milestones: null })).stories,
+    mapRepo(repo, custom({ milestones: [] })),
+    mapRepo(repo, custom({ milestones: null })),
   );
   assert.equal(mapRepo(repo, custom({ milestones: [] })).stories.length, 3);
   assert.equal(matchesMilestones(ghIssue({ number: 4 }), []), true);
+});
+
+test("describeFilters renders a milestones line only when an allowlist is in force", () => {
+  assert.deepEqual(describeFilters({ states: "all", milestones: ["V1"] }), ["milestones: V1"]);
+  // the legend half of the invariant matchesMilestones relies on: [] is "all", like null
+  assert.deepEqual(describeFilters({ states: "all", milestones: [] }), []);
+  assert.deepEqual(describeFilters({ states: "all", milestones: null }), []);
+  assert.deepEqual(describeFilters({ states: "open", milestones: [] }), [
+    "issue states: open only",
+  ]);
 });
 
 test("a fixed storyType overrides inference on every mapped story", () => {

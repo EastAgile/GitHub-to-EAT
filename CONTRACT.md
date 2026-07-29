@@ -225,8 +225,12 @@ A `Customization` object, defined next to the mapping profile in
   mapping; a dropped issue contributes no story, no labels, no comments.
 - `milestones` (`string[] | null`) — when set, keeps only issues whose
   `milestone.title` matches an entry exactly (case-sensitive); issues with no
-  milestone drop. `null` disables the filter, and an empty array normalizes to
-  the same thing — it imports every issue rather than matching none.
+  milestone drop. `null` disables the filter, and an empty array is treated the
+  same way — it imports every issue rather than matching none. That widening is
+  object-level only: `--milestones` with no titles is a usage error (exit 2, see
+  the flag rules below), so no CLI invocation reaches `mapRepo` with `[]`.
+  Entries match verbatim, so a blank entry is not special-cased and matches
+  nothing; neither the flag parser nor the wizard emits one.
 - `storyType` (`"infer" | "feature" | "bug" | "chore"`) — `"infer"` keeps the
   label/title inference; a fixed value applies to every mapped story.
 - `comments: false` maps no comments; `tasks: false` converts no body
@@ -296,7 +300,10 @@ front-end for it, these flags are the other. Any of them implies
 
 - An invalid `--states` / `--story-type` value exits 2 with a usage error naming
   the flag and its allowed values; `--milestones` with no titles does the same.
-  Titles are trimmed and deduplicated, order preserved.
+  Titles are trimmed and deduplicated, order preserved. The flag rejecting an
+  empty selection is deliberate, and does not contradict the object-level rule
+  above that an empty `milestones` array imports everything: the flag never
+  builds one.
 - `--milestones` may be given more than once; every occurrence's titles flatten
   into one allowlist. Each occurrence is also split on commas, so a title that
   contains one is written `\,` (e.g. `--milestones 'v1.0\, beta'`) — without
