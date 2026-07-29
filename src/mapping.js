@@ -36,6 +36,16 @@ function issueTypeLine() {
   return `issue type ${rules}; otherwise labels + title decide`;
 }
 
+// One definition of each opener, so the legend below and the description assembly
+// far below cannot drift apart.
+const SUB_ISSUE_OF_PREFIX = "Sub-issue of";
+const SUB_ISSUES_PREFIX = "Sub-issues:";
+// Direct-only for the same reason as the two lines above. Built from the prefixes the
+// assembly itself renders, so renaming one cannot leave this line describing the old text.
+const SUB_ISSUES_LINE =
+  `sub-issues → '${SUB_ISSUE_OF_PREFIX} #n' / '${SUB_ISSUES_PREFIX} #n, #n' ending the ` +
+  "description (a linked number is named even when this run did not import it)";
+
 // Milestone titles are untrusted remote data; strip terminal control chars
 // (ESC/C0/C1/DEL) before they reach the terminal, in the wizard and the legend alike.
 export const stripControls = (/** @type {string} */ s) => s.replace(/\p{Cc}/gu, "");
@@ -56,6 +66,7 @@ export function issuesLegend(engine = "server", customization = null) {
   if (engine === "direct") {
     lines.push(CLOSED_REASON_LINE);
     if (storyType === "infer") lines.push(issueTypeLine());
+    lines.push(SUB_ISSUES_LINE);
   }
   lines.push(tasks ? `${LABELS_LINE}${TASKS_SUFFIX}` : LABELS_LINE);
   if (comments) lines.push(COMMENTS_LINE);
@@ -362,6 +373,59 @@ export function parseChecklist(body) {
   return out;
 }
 
+/**
+ * A sub-issue reference as the fetcher renders one: digits only. Anything else is
+ * dropped rather than rendered, so no org-authored text can ride into a description.
+ *
+ * @param {unknown} value
+ * @returns {value is string}
+ */
+const isIssueNumber = (value) => typeof value === "string" && /^[0-9]+$/.test(value);
+
+/**
+ * Index a fetched parent → children map into the two lookups the description assembly
+ * needs. GitHub gives an issue one parent; if a payload claims two, the first wins.
+ *
+ * @param {Map<string, string[]> | null | undefined} subIssues
+ * @returns {{ children: Map<string, string[]>, parents: Map<string, string> }}
+ */
+function indexSubIssues(subIssues) {
+  /** @type {Map<string, string[]>} */
+  const children = new Map();
+  /** @type {Map<string, string>} */
+  const parents = new Map();
+  for (const [parent, kids] of subIssues ?? []) {
+    if (!isIssueNumber(parent) || !Array.isArray(kids)) continue;
+    /** @type {string[]} */
+    const kept = [];
+    for (const kid of kids) {
+      if (!isIssueNumber(kid) || kid === parent || kept.includes(kid)) continue;
+      kept.push(kid);
+      if (!parents.has(kid)) parents.set(kid, parent);
+    }
+    if (kept.length) children.set(parent, kept);
+  }
+  return { children, parents };
+}
+
+/**
+ * One issue's cross-link lines: its parent first, then its children — reading
+ * top-down, where the story sits before what sits under it.
+ *
+ * @param {string} externalId
+ * @param {ReturnType<typeof indexSubIssues>} index
+ * @returns {string[]}
+ */
+function subIssueLines(externalId, { children, parents }) {
+  /** @type {string[]} */
+  const lines = [];
+  const parent = parents.get(externalId);
+  if (parent !== undefined) lines.push(`${SUB_ISSUE_OF_PREFIX} #${parent}`);
+  const kids = children.get(externalId);
+  if (kids) lines.push(`${SUB_ISSUES_PREFIX} ${kids.map((n) => `#${n}`).join(", ")}`);
+  return lines;
+}
+
 /** @param {string | null | undefined} issueUrl @returns {string | null} */
 function issueNumberFromUrl(issueUrl) {
   const match = (issueUrl ?? "").match(/\/issues\/(\d+)$/);
@@ -429,7 +493,8 @@ function closedReasonLabel(closed, stateReason) {
  * Map a fetched repo ({@link import("./github.js").GitHubClient#fetchAll}'s shape) to the direct
  * writer's plan. Joining comments by `issue_url` drops PR chatter — those numbers are unmapped PRs.
  *
- * @param {{ issues: any[], comments: any[], labels: any[] }} repo
+ * @param {{ issues: any[], comments: any[], labels: any[],
+ *   subIssues?: Map<string, string[]> | null }} repo
  * @param {Customization} [customization] per-run overrides; the default reproduces
  *   this profile unchanged (the filter/override stories consume the other fields)
  * @param {boolean} [sendDates] when true the comment's date is sent on the write, so
@@ -438,10 +503,11 @@ function closedReasonLabel(closed, stateReason) {
  * @returns {{ labels: LabelOp[], stories: StoryOp[] }}
  */
 export function mapRepo(
-  { issues, comments, labels },
+  { issues, comments, labels, subIssues },
   customization = DEFAULT_CUSTOMIZATION,
   sendDates = false,
 ) {
+  const links = indexSubIssues(subIssues);
   /** @type {Map<string, string | null>} repo-level color authority, by lowercased name */
   const repoColors = new Map(
     labels.map((l) => [
@@ -503,10 +569,14 @@ export function mapRepo(
     addLabel(closedReasonLabel(closed, issue.state_reason), null);
 
     const body = (issue.body ?? "").trim();
+    const externalId = String(issue.number);
+    // The block is the description's last paragraph, so the dedup marker the writer
+    // appends after it stays the last line — `markerExternalId` reads only that line.
+    const crossLinks = subIssueLines(externalId, links).join("\n");
     const story = {
-      external_id: String(issue.number),
+      external_id: externalId,
       name: title,
-      description: body || null,
+      description: [body, crossLinks].filter(Boolean).join("\n\n") || null,
       story_type: storyType,
       current_state: /** @type {"unstarted" | "accepted"} */ (closed ? "accepted" : "unstarted"),
       created_at: issue.created_at ?? null,

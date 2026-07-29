@@ -354,6 +354,20 @@ with `Link`-header pagination:
   only comments whose `issue_url` points at a kept issue, so PR chatter never
   reaches the mapping stage.
 - `GET /repos/{owner}/{repo}/labels` — the repo's labels.
+- `GET /repos/{owner}/{repo}/issues/{n}/sub_issues` — one issue's sub-issues,
+  requested **only** for rows whose `sub_issues_summary.total` is a number
+  greater than zero (every issue row carries that summary; an absent, null or
+  non-numeric one reads as "no sub-issues"). A flat repo therefore pays nothing
+  extra and a repo using sub-issues pays one extra request per parent. These
+  run sequentially, after the three list endpoints above (which still run
+  concurrently), so a wide hierarchy cannot burst into GitHub's secondary rate
+  limit. The stage runs before the wizard, so it cannot know `--states` /
+  `--milestones` and is deliberately filter-blind. A `404` on one parent's
+  listing (issue deleted or transferred mid-fetch) warns on stderr and leaves
+  that story without cross-links; every other failure — rate limit, auth,
+  transport, malformed payload — propagates and fails the run, like any other
+  page. Only rows whose `number` is a positive integer are kept, and a listing
+  that names its own parent, or the same sub-issue twice, is deduplicated.
 
 `owner` and `repo` are URL-encoded into the request path, so metacharacters in
 `--repo` yield a well-formed request (and a clear repo-not-found error), never
@@ -374,9 +388,9 @@ falling back to the `x-ratelimit-reset` time); 401 → token rejected.
 
 The direct engine maps fetched GitHub JSON to an EAT write-op plan client-side
 (`src/mapping.js` — pure functions, no HTTP), mirroring the server importer's
-issue mapping so both engines classify the same repo identically — with two
-deliberate exceptions, the closed-reason labels and the org issue type below,
-which only the direct engine produces:
+issue mapping so both engines classify the same repo identically — with three
+deliberate exceptions, the closed-reason labels, the org issue type and the
+sub-issue cross-links below, which only the direct engine produces:
 
 - **State** — open issue → `unstarted` story; closed → `accepted`, keeping the
   GitHub closed date (`completed_at`).
@@ -446,8 +460,41 @@ which only the direct engine produces:
   with a perceptual-luminance text color (black on light, white on dark). The
   issue payload's own color wins; the repo label list fills gaps. Only labels
   on mapped issues are created.
+- **Sub-issue cross-links** (**direct engine only** — the server importer's issue
+  struct has no `sub_issues_summary` and it never calls `/sub_issues`, so serde
+  drops the field and the server produces no such text) — EAT has no native
+  parent/child story relation, so the hierarchy rides in the description. A
+  parent's description gains a `Sub-issues: #12, #14` line; each child's gains a
+  `Sub-issue of #7` line. A row that is both gets both, **parent line first**,
+  as one two-line block. The block is separated from the issue body by a blank
+  line and is the description's **last** paragraph — the dedup marker is
+  appended after it at write time and stays the last line, so "Marker dedup"
+  below is unaffected. An issue with an empty body gets the block as its whole
+  description.
+  - **Numbers only, never remote text.** A reference renders only when it is a
+    string of digits (the fetcher emits nothing else); anything else is dropped
+    rather than rendered, so no org-authored text can reach a description
+    through this path.
+  - **Order** — children appear in GitHub's own `/sub_issues` order, which is
+    the order maintainers set in the UI; the fetcher only concatenates pages.
+  - **The mapping is total.** A self-reference is dropped from both directions;
+    a repeated number renders once; an issue a payload somehow reports under two
+    parents names the **first** parent only, so a story never carries two parent
+    lines. An issue in no relation gets a description byte-identical to before
+    this rule existed.
+  - **A linked number may name an issue this run did not import.** The block is
+    computed from what GitHub declares, not from what survived `--states` /
+    `--milestones` — so a parent still lists a child the filters excluded, and a
+    child still names a filtered-out parent. The references are GitHub *issue
+    numbers*, not EAT story ids: they match the imported story's `external_id`
+    when the issue was imported and point at a real GitHub issue either way, and
+    the text a story carries does not depend on which run created it.
+  - The block is part of the description, so it is clamped with it under "Length
+    limits" below. Only issues imported after this landed carry cross-links — an
+    import appends and never updates.
 - **Checklists** — `- [ ]` / `- [x]` items (also `*`/`+` markers, indentation
-  allowed) become story tasks; the lines stay in the description verbatim.
+  allowed) become story tasks; the lines stay in the description verbatim. They
+  are parsed from the issue body alone, never from the cross-link block.
 - **Comments** — joined to their issue by `issue_url`. The fetcher has already
   dropped PR conversation comments by the same key, and the join keeps any
   stray unmatched comment inert (its issue is never mapped). The public EAT API has
@@ -460,10 +507,12 @@ The CLI legend's `issues` lines are assembled by this module's own renderer,
 whose default output is what the `MAPPINGS` registry re-exports — the registry
 entry is that render path's product, not a parallel copy, so legend and mapper
 cannot drift. The server engine's legend output stays byte-identical. The
-closed-reason and issue-type lines are the exceptions — they render only under
-`--engine direct`, because the server importer flattens every closed issue and
-never reads `type`. The issue-type line names every name the table classifies
-because it is built from that table, so a new entry cannot leave it stale.
+closed-reason, issue-type and sub-issue lines are the exceptions — they render
+only under `--engine direct`, because the server importer flattens every closed
+issue, never reads `type`, and never fetches `/sub_issues`. The issue-type line
+names every name the table classifies because it is built from that table, and
+the sub-issue line quotes the same two prefixes the description assembly
+renders, so neither can be left describing text the mapper no longer produces.
 
 The legend describes the mapping, not the selection: a *filter* never drops a
 line, so `--states open` still shows both the closed-state line and the
@@ -471,7 +520,8 @@ closed-reason line. A *mapping override* does, because it turns the described
 rule off for the whole run — `--no-comments` / `--no-tasks` drop their lines, and
 `--story-type feature|bug|chore` drops the issue-type line (the rule is dead for
 that run; the `Customized:` block names the override instead). `--story-type
-infer` is the default, so it keeps the line.
+infer` is the default, so it keeps the line. No override turns the sub-issue
+rule off, so its line renders for every `--engine direct` run.
 
 ### Write surface (direct engine)
 
@@ -581,7 +631,10 @@ and both are prescanned, in union.
   results are unioned), so rows written by an older marker-only CLI run (no pair
   on the server row) are still skipped. When the server does not advertise the
   pair, the direct engine sends no provenance and dedups on the marker alone,
-  byte-identical to earlier behaviour.
+  byte-identical to earlier behaviour. The marker is appended after everything
+  the mapper assembled, so the sub-issue cross-link block above sits *before* it
+  and the marker is still the description's last line — the only line the
+  prescan reads.
 - The prescan cursor-walks the project —
   `GET /stories?limit=…&cursor=…&fields=…` (cursor mode whenever `cursor=` or
   `limit=` is present; `fields=` is a sparse-fieldset allowlist, unknown values
@@ -631,6 +684,10 @@ and both are prescanned, in union.
   prefix. When the comment's `created_at` is sent (backdating-capable server)
   the prefix is `@login:`; against an older server the date rides there too
   (`@login on YYYY-MM-DD:`).
+- **Sub-issue hierarchy** — EAT has no parent/child story relation, so the
+  cross-links above are plain text in the description, not a queryable link: a
+  board can read them, nothing can filter or traverse on them, and moving or
+  deleting either story leaves the other's text stale (an import never updates).
 - **Cross-engine dedup** — against a server that exposes the re-import pair
   (EAT #31427), the direct and server engines share the
   `(project, import_source, import_external_id)` key, so mixing engines against

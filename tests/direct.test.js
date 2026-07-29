@@ -727,3 +727,101 @@ test("issues the filters dropped are not counted as unrecognised types", async (
     await mock.close();
   }
 });
+
+// --- sub-issue cross-links, end to end (#31928) ------------------------------
+
+/** A fetched repo whose #7 parents #12 and #14, in fetchAll's shape. */
+function fetchedSubIssueRepo() {
+  return {
+    issues: [
+      {
+        number: 7,
+        title: "parent",
+        body: "roll-up",
+        state: "open",
+        created_at: "2024-01-01T00:00:00Z",
+        labels: [],
+        sub_issues_summary: { total: 2, completed: 0, percent_completed: 0 },
+      },
+      {
+        number: 12,
+        title: "child one",
+        body: "first",
+        state: "open",
+        created_at: "2024-01-02T00:00:00Z",
+        labels: [],
+      },
+      {
+        number: 14,
+        title: "child two",
+        body: "",
+        state: "open",
+        created_at: "2024-01-03T00:00:00Z",
+        labels: [],
+      },
+    ],
+    comments: [],
+    labels: [],
+    subIssues: new Map([["7", ["12", "14"]]]),
+  };
+}
+
+test("runDirect writes cross-links on a parent and both its sub-issues, marker still last", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const options = {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedSubIssueRepo() },
+    };
+
+    const first = await runDirect(client, 91, "o", "r", options);
+    assert.equal(first.importedStories, 3);
+
+    const byTitle = new Map(mock.state.stories[91].map((row) => [row.title, row]));
+    assert.equal(
+      byTitle.get("parent").description,
+      `roll-up\n\nSub-issues: #12, #14\n\n${markerFor("o", "r", "7")}`,
+    );
+    assert.equal(
+      byTitle.get("child one").description,
+      `first\n\nSub-issue of #7\n\n${markerFor("o", "r", "12")}`,
+    );
+    assert.equal(
+      byTitle.get("child two").description,
+      `Sub-issue of #7\n\n${markerFor("o", "r", "14")}`,
+    );
+
+    // The prescan reads these same descriptions back, so a re-run must skip all three.
+    const before = mock.state.stories[91].map((row) => row.description);
+    const rerun = await runDirect(client, 91, "o", "r", options);
+    assert.equal(rerun.importedStories, 0);
+    assert.equal(rerun.skipped, 3);
+    assert.deepEqual(
+      mock.state.stories[91].map((row) => row.description),
+      before,
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("cross-linked descriptions still dedup on the marker alone, without provenance", async () => {
+  const mock = await startMockServer(makeState({ provenance: false }));
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const options = {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedSubIssueRepo() },
+    };
+    assert.equal((await runDirect(client, 91, "o", "r", options)).importedStories, 3);
+    const rerun = await runDirect(client, 91, "o", "r", options);
+    assert.equal(rerun.importedStories, 0);
+    assert.equal(rerun.skipped, 3);
+    assert.equal(mock.state.stories[91].length, 3);
+  } finally {
+    await mock.close();
+  }
+});

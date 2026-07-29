@@ -4,8 +4,9 @@
  * Pulls a repo's issues, their comments, and labels from the repo-wide list
  * endpoints (`per_page=100`, `Link`-header pagination) so a mid-sized repo stays
  * inside the anonymous 60 req/h budget; a token (`--token` / `GITHUB_TOKEN`)
- * lifts the ceiling to 5000/h and reaches private repos. Zero runtime deps:
- * global `fetch` only.
+ * lifts the ceiling to 5000/h and reaches private repos. The only per-issue call
+ * is the sub-issue listing, made solely for rows that advertise sub-issues. Zero
+ * runtime deps: global `fetch` only.
  */
 
 import { scrubControl } from "./progress.js";
@@ -43,21 +44,50 @@ function nextLink(link) {
   return null;
 }
 
-/** Fetcher for one GitHub repo's issues, comments, and labels. */
+/**
+ * Whether a listing row advertises sub-issues. Only a positive numeric total earns
+ * the extra request, so a flat repo pays nothing.
+ *
+ * @param {any} issue
+ * @returns {boolean}
+ */
+function hasSubIssues(issue) {
+  const total = issue?.sub_issues_summary?.total;
+  return typeof total === "number" && Number.isFinite(total) && total > 0;
+}
+
+/**
+ * A row's issue number as an external id, or null for anything that is not a
+ * positive integer — only digits ever reach a story description.
+ *
+ * @param {any} row
+ * @returns {string | null}
+ */
+function issueNumber(row) {
+  const value = row?.number;
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? String(value) : null;
+}
+
+/** Fetcher for one GitHub repo's issues, comments, labels, and sub-issue links. */
 export class GitHubClient {
   /** @type {Record<string, string>} */
   #headers;
 
+  /** @type {(message: string) => void} */
+  #warn;
+
   /**
    * @param {string} owner
    * @param {string} repo
-   * @param {{ token?: string, timeout?: number, apiBase?: string }} [options]
+   * @param {{ token?: string, timeout?: number, apiBase?: string,
+   *   warn?: (message: string) => void }} [options]
    *   `timeout` is per-request, in seconds (default 30).
    */
-  constructor(owner, repo, { token, timeout = 30, apiBase = GITHUB_API_BASE } = {}) {
+  constructor(owner, repo, { token, timeout = 30, apiBase = GITHUB_API_BASE, warn } = {}) {
     this.owner = owner;
     this.repo = repo;
     this.timeout = timeout;
+    this.#warn = warn ?? (() => {});
     this.apiBase = apiBase.replace(/\/+$/, "");
     this.#headers = {
       Accept: "application/vnd.github+json",
@@ -216,12 +246,63 @@ export class GitHubClient {
   }
 
   /**
-   * Fetch issues, comments, and labels in one call.
+   * List one issue's sub-issues (`GET /issues/{n}/sub_issues`).
+   *
+   * @param {string} number
+   * @returns {Promise<any[]>}
+   */
+  async listSubIssues(number) {
+    return this.#paginate(`/issues/${encodeURIComponent(number)}/sub_issues?per_page=100`);
+  }
+
+  /**
+   * Map each parent issue's number to its sub-issues' numbers, in GitHub's own order.
+   *
+   * Sequential and gated on `sub_issues_summary.total`: one extra request per parent,
+   * none at all on a flat repo, and no burst for the secondary rate limit to throttle.
+   *
+   * @param {any[]} issues
+   * @returns {Promise<Map<string, string[]>>}
+   */
+  async #fetchSubIssues(issues) {
+    /** @type {Map<string, string[]>} */
+    const subIssues = new Map();
+    for (const issue of issues) {
+      const parent = hasSubIssues(issue) ? issueNumber(issue) : null;
+      if (parent === null) continue;
+      /** @type {any[]} */
+      let rows;
+      try {
+        rows = await this.listSubIssues(parent);
+      } catch (err) {
+        // An issue deleted or transferred mid-fetch must not abort an otherwise-fine
+        // import for a cross-link; rate limits, auth and transport errors still do.
+        if (!(err instanceof RepoNotFoundError)) throw err;
+        this.#warn(
+          `warning: could not list issue #${parent}'s sub-issues (404) — ` +
+            "that story is imported without cross-links.\n",
+        );
+        continue;
+      }
+      /** @type {string[]} */
+      const kept = [];
+      for (const row of rows) {
+        const kid = issueNumber(row);
+        if (kid !== null && kid !== parent && !kept.includes(kid)) kept.push(kid);
+      }
+      if (kept.length) subIssues.set(parent, kept);
+    }
+    return subIssues;
+  }
+
+  /**
+   * Fetch issues, comments, labels, and the sub-issue hierarchy in one call.
    *
    * The repo-wide comments endpoint includes PR conversation comments; only
    * comments on kept issues survive, so mapping never sees PR chatter.
    *
-   * @returns {Promise<{ issues: any[], comments: any[], labels: any[] }>}
+   * @returns {Promise<{ issues: any[], comments: any[], labels: any[],
+   *   subIssues: Map<string, string[]> }>}
    */
   async fetchAll() {
     const [issues, comments, labels] = await Promise.all([
@@ -237,6 +318,7 @@ export class GitHubClient {
         return match !== null && kept.has(match[1]);
       }),
       labels,
+      subIssues: await this.#fetchSubIssues(issues),
     };
   }
 }

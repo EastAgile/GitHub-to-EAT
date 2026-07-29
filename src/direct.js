@@ -133,7 +133,7 @@ function warnUnrecognisedIssueTypes({ issues }, customization, stream) {
  */
 export async function runDirect(client, projectId, owner, repo, options) {
   const { token, dryRun, stream, runId, github, customize, announce } = options;
-  const source = github ?? new GitHubClient(owner, repo, { token });
+  const source = github ?? new GitHubClient(owner, repo, { token, warn: (m) => stream?.write(m) });
   const fetched = await runWithProgress(
     () => source.fetchAll(),
     `fetching ${owner}/${repo} from GitHub`,

@@ -625,3 +625,141 @@ test("fetchAll drops comments whose issue_url points at a PR or unknown issue", 
     },
   );
 });
+
+// --- sub-issue listings (#31928) ---------------------------------------------
+
+/**
+ * A GitHub stand-in serving `issues` on the list endpoint and `subIssues[n]` on
+ * each `/issues/{n}/sub_issues`, recording every path it was asked for.
+ *
+ * @param {{ issues: any[], subIssues?: Record<string, any[]>,
+ *   subIssueStatus?: Record<string, number> }} repo
+ */
+function subIssueHandler({ issues, subIssues = {}, subIssueStatus = {} }) {
+  /** @type {string[]} */
+  const paths = [];
+  /** @type {import("node:http").RequestListener} */
+  const handler = (req, res) => {
+    const { pathname } = new URL(req.url ?? "", "http://x");
+    paths.push(pathname);
+    const sub = pathname.match(/^\/repos\/o\/r\/issues\/(\d+)\/sub_issues$/);
+    if (sub) {
+      const status = subIssueStatus[sub[1]];
+      if (status) return json(res, status, { message: "nope" }, { "x-ratelimit-remaining": "42" });
+      return json(res, 200, subIssues[sub[1]] ?? []);
+    }
+    if (pathname === "/repos/o/r/issues") return json(res, 200, issues);
+    json(res, 200, []);
+  };
+  return { paths, handler };
+}
+
+const summary = (/** @type {number} */ total) => ({
+  sub_issues_summary: { total, completed: 0, percent_completed: 0 },
+});
+
+test("fetchAll lists sub-issues only for rows whose sub_issues_summary.total is positive", async () => {
+  const { paths, handler } = subIssueHandler({
+    issues: [
+      { number: 7, ...summary(2) },
+      { number: 12, ...summary(0) },
+      { number: 14 },
+      { number: 20, sub_issues_summary: null },
+      { number: 21, sub_issues_summary: { total: "3" } },
+    ],
+    subIssues: { 7: [{ number: 12 }, { number: 14 }] },
+  });
+  await withGitHub(handler, async (base) => {
+    const fetched = await new GitHubClient("o", "r", { apiBase: base }).fetchAll();
+    assert.deepEqual([...fetched.subIssues], [["7", ["12", "14"]]]);
+  });
+  assert.deepEqual(
+    paths.filter((p) => p.endsWith("/sub_issues")),
+    ["/repos/o/r/issues/7/sub_issues"],
+  );
+});
+
+test("a sub-issue listing sends per_page=100 and follows its Link pagination", async () => {
+  /** @type {string[]} */
+  const seen = [];
+  let base = "";
+  await withGitHub(
+    (req, res) => {
+      const url = new URL(req.url ?? "", "http://x");
+      if (url.pathname === "/repos/o/r/issues") {
+        return json(res, 200, [{ number: 7, ...summary(3) }]);
+      }
+      if (url.pathname !== "/repos/o/r/issues/7/sub_issues") return json(res, 200, []);
+      seen.push(url.search);
+      if (url.searchParams.get("page") === "2") return json(res, 200, [{ number: 14 }]);
+      json(res, 200, [{ number: 12 }], {
+        link: `<${base}/repos/o/r/issues/7/sub_issues?per_page=100&page=2>; rel="next"`,
+      });
+    },
+    async (started) => {
+      base = started;
+      const fetched = await new GitHubClient("o", "r", { apiBase: base }).fetchAll();
+      assert.deepEqual(fetched.subIssues.get("7"), ["12", "14"]);
+    },
+  );
+  assert.ok(seen[0].includes("per_page=100"), `first page asked for per_page=100, got ${seen[0]}`);
+  assert.equal(seen.length, 2);
+});
+
+test("sub-issue rows that are not positive integers, or the parent itself, are dropped", async () => {
+  const { handler } = subIssueHandler({
+    issues: [{ number: 7, ...summary(9) }],
+    subIssues: {
+      7: [
+        { number: 7 },
+        { number: "12" },
+        { number: 12.5 },
+        { number: 0 },
+        { number: -3 },
+        {},
+        null,
+        { number: 14 },
+        { number: 14 },
+      ],
+    },
+  });
+  await withGitHub(handler, async (base) => {
+    const fetched = await new GitHubClient("o", "r", { apiBase: base }).fetchAll();
+    assert.deepEqual(fetched.subIssues.get("7"), ["14"]);
+  });
+});
+
+test("a parent whose sub-issue listing is 404 warns and contributes no links, run continues", async () => {
+  const { handler } = subIssueHandler({
+    issues: [
+      { number: 7, ...summary(1) },
+      { number: 9, ...summary(1) },
+    ],
+    subIssues: { 9: [{ number: 14 }] },
+    subIssueStatus: { 7: 404 },
+  });
+  /** @type {string[]} */
+  const warnings = [];
+  await withGitHub(handler, async (base) => {
+    const fetched = await new GitHubClient("o", "r", {
+      apiBase: base,
+      warn: (m) => warnings.push(m),
+    }).fetchAll();
+    assert.deepEqual([...fetched.subIssues], [["9", ["14"]]]);
+  });
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /warning: .*#7.*sub-issues/);
+});
+
+test("a rate limit on a sub-issue listing fails the fetch instead of dropping links silently", async () => {
+  const { handler } = subIssueHandler({
+    issues: [{ number: 7, ...summary(1) }],
+    subIssueStatus: { 7: 429 },
+  });
+  await withGitHub(handler, async (base) => {
+    await assert.rejects(new GitHubClient("o", "r", { apiBase: base }).fetchAll(), (err) => {
+      assert.ok(err instanceof RateLimitError);
+      return true;
+    });
+  });
+});

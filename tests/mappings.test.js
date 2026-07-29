@@ -192,3 +192,73 @@ test("renderLegend strips terminal control chars from milestone titles", () => {
   assert.ok(!legend.includes("\u001b"));
   assert.match(legend, /- milestones: v1\[31m\.0/);
 });
+
+// --- sub-issue cross-links in the legend (#31928) ----------------------------
+
+/** Every `--include` selection parseInclude accepts — issues is mandatory, the rest optional. */
+const INCLUDE_SUBSETS = /** @type {string[][]} */ ([["issues"]]);
+for (const type of ["prs", "milestones", "releases"]) {
+  for (const subset of INCLUDE_SUBSETS.slice()) INCLUDE_SUBSETS.push([...subset, type]);
+}
+
+/** Every single-field customization the flags can produce, plus the default. */
+const CUSTOMIZATIONS = [
+  DEFAULT_CUSTOMIZATION,
+  ...["all", "open", "closed"].map((states) => ({ ...DEFAULT_CUSTOMIZATION, states })),
+  ...["infer", "feature", "bug", "chore"].map((storyType) => ({
+    ...DEFAULT_CUSTOMIZATION,
+    storyType,
+  })),
+  ...[null, [], ["v1.0"]].map((milestones) => ({ ...DEFAULT_CUSTOMIZATION, milestones })),
+  { ...DEFAULT_CUSTOMIZATION, comments: false },
+  { ...DEFAULT_CUSTOMIZATION, tasks: false },
+].map((c) => /** @type {import("../src/mapping.js").Customization} */ (c));
+
+test("the direct legend documents the sub-issue cross-links; the server legend does not", () => {
+  assert.match(renderLegend(["issues"], "direct"), /- sub-issues → /);
+  assert.match(renderLegend(["issues"], "direct"), /Sub-issue of #n.*Sub-issues: #n/);
+  assert.doesNotMatch(renderLegend(["issues"], "server"), /sub-issue/i);
+  assert.equal(renderLegend(["issues"], "server"), renderLegend(["issues"]));
+});
+
+// The rule has no `--customize` off switch, so unlike the issue-type line no
+// override may drop it — and being a *filter* never has, for any line.
+test("the sub-issue line survives every customization field, none of which disables the rule", () => {
+  for (const c of CUSTOMIZATIONS) {
+    assert.match(renderLegend(["issues"], "direct", c), /- sub-issues → /);
+  }
+});
+
+// The pre-#31928 text of the server legend, transcribed from `renderLegend` at
+// 7f1046d: a same-build comparison could not catch a line leaking into `server`.
+const SERVER_ISSUES_BLOCK_AT_7f1046d = [
+  "  issues:",
+  "    - open issue → story (unstarted); closed issue → story (accepted, keeps the closed date)",
+  "    - labels → labels (with colors); issue-body checklists → story tasks",
+  "    - comments → comments (body only)",
+].join("\n");
+
+test("--engine server renders the pre-#31928 issues block for every include subset", () => {
+  for (const selected of INCLUDE_SUBSETS) {
+    for (const customization of [null, DEFAULT_CUSTOMIZATION]) {
+      assert.ok(
+        renderLegend(selected, "server", customization).includes(SERVER_ISSUES_BLOCK_AT_7f1046d),
+        `server legend drifted for --include ${selected.join(",")}`,
+      );
+    }
+  }
+});
+
+// `--no-comments` / `--no-tasks` already reshape the server block (those lines are
+// engine-agnostic), so byte-identity there is asserted above only for the default;
+// what must hold for *every* case is that no sub-issue text reaches --engine server.
+test("no --include subset or customization leaks sub-issue text into --engine server", () => {
+  let cases = 0;
+  for (const selected of INCLUDE_SUBSETS) {
+    for (const customization of [null, ...CUSTOMIZATIONS]) {
+      cases += 1;
+      assert.doesNotMatch(renderLegend(selected, "server", customization), /sub-issue/i);
+    }
+  }
+  assert.equal(cases, INCLUDE_SUBSETS.length * (CUSTOMIZATIONS.length + 1));
+});
