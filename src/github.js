@@ -4,9 +4,9 @@
  * Pulls a repo's issues, their comments, and labels from the repo-wide list
  * endpoints (`per_page=100`, `Link`-header pagination) so a mid-sized repo stays
  * inside the anonymous 60 req/h budget; a token (`--token` / `GITHUB_TOKEN`)
- * lifts the ceiling to 5000/h and reaches private repos. The only per-issue call
- * is the sub-issue listing, made solely for rows that advertise sub-issues. Zero
- * runtime deps: global `fetch` only.
+ * lifts the ceiling to 5000/h and reaches private repos. The only per-issue call is
+ * the sub-issue listing, and only for rows that advertise one. Zero runtime deps:
+ * global `fetch` only.
  */
 
 import { scrubControl } from "./progress.js";
@@ -256,10 +256,8 @@ export class GitHubClient {
   }
 
   /**
-   * Map each parent issue's number to its sub-issues' numbers, in GitHub's own order.
-   *
-   * Sequential and gated on `sub_issues_summary.total`: one extra request per parent,
-   * none at all on a flat repo, and no burst for the secondary rate limit to throttle.
+   * Parent issue number → its sub-issues' numbers, in GitHub's own order. Sequential and
+   * total-gated: one request per parent, none on a flat repo, no secondary-limit burst.
    *
    * @param {any[]} issues
    * @returns {Promise<Map<string, string[]>>}

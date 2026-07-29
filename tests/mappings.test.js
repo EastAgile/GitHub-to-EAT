@@ -249,9 +249,8 @@ test("--engine server renders the pre-#31928 issues block for every include subs
   }
 });
 
-// `--no-comments` / `--no-tasks` already reshape the server block (those lines are
-// engine-agnostic), so byte-identity there is asserted above only for the default;
-// what must hold for *every* case is that no sub-issue text reaches --engine server.
+// `--no-comments` / `--no-tasks` reshape the server block too (those lines are engine-
+// agnostic), so what must hold for every case is that no sub-issue text reaches server.
 test("no --include subset or customization leaks sub-issue text into --engine server", () => {
   let cases = 0;
   for (const selected of INCLUDE_SUBSETS) {
