@@ -83,13 +83,16 @@ export function matchesStates(issue, states) {
  * @returns {boolean}
  */
 export function matchesMilestones(issue, milestones) {
-  return !milestones || milestones.includes(issue.milestone?.title);
+  // `?.length`, not truthiness: an empty allowlist means "all" (as describeFilters
+  // renders it), never "match nothing" — that would silently import zero stories.
+  return !milestones?.length || milestones.includes(issue.milestone?.title);
 }
 
 /**
  * @typedef {object} Customization per-run mapping overrides (`--customize`)
  * @property {"all" | "open" | "closed"} states which GitHub issue states to import
- * @property {string[] | null} milestones exact `milestone.title` allowlist; null imports every issue
+ * @property {string[] | null} milestones exact `milestone.title` allowlist; null — or an
+ *   empty array, which normalizes to the same thing — imports every issue
  * @property {"infer" | "feature" | "bug" | "chore"} storyType "infer" uses {@link inferStoryType}
  * @property {boolean} comments import issue comments
  * @property {boolean} tasks import body checklists as tasks

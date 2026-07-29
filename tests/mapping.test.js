@@ -10,6 +10,7 @@ import {
   ISSUES_LEGEND,
   inferStoryType,
   mapRepo,
+  matchesMilestones,
   normalizeHexColor,
   parseChecklist,
   parseCustomization,
@@ -586,6 +587,24 @@ test("the milestone filter keeps exact milestone.title matches only; unmilestone
   assert.deepEqual(mapRepo(repo, custom({ milestones: ["v1"] })).stories, []);
   // null disables the filter entirely
   assert.equal(mapRepo(repo, custom({ milestones: null })).stories.length, 3);
+});
+
+test("an empty milestones allowlist imports every issue, exactly like null", () => {
+  const repo = {
+    issues: [
+      ghIssue({ number: 1, milestone: { title: "V1" } }),
+      ghIssue({ number: 2, milestone: { title: "V2" } }),
+      ghIssue({ number: 3 }), // no milestone
+    ],
+    comments: [],
+    labels: [],
+  };
+  assert.deepEqual(
+    mapRepo(repo, custom({ milestones: [] })).stories,
+    mapRepo(repo, custom({ milestones: null })).stories,
+  );
+  assert.equal(mapRepo(repo, custom({ milestones: [] })).stories.length, 3);
+  assert.equal(matchesMilestones(ghIssue({ number: 4 }), []), true);
 });
 
 test("a fixed storyType overrides inference on every mapped story", () => {

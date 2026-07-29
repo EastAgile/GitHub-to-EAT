@@ -225,7 +225,8 @@ A `Customization` object, defined next to the mapping profile in
   mapping; a dropped issue contributes no story, no labels, no comments.
 - `milestones` (`string[] | null`) — when set, keeps only issues whose
   `milestone.title` matches an entry exactly (case-sensitive); issues with no
-  milestone drop. `null` disables the filter.
+  milestone drop. `null` disables the filter, and an empty array normalizes to
+  the same thing — it imports every issue rather than matching none.
 - `storyType` (`"infer" | "feature" | "bug" | "chore"`) — `"infer"` keeps the
   label/title inference; a fixed value applies to every mapped story.
 - `comments: false` maps no comments; `tasks: false` converts no body
