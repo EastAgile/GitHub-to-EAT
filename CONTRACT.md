@@ -376,6 +376,15 @@ issue mapping so both engines classify the same repo identically:
 
 - **State** — open issue → `unstarted` story; closed → `accepted`, keeping the
   GitHub closed date (`completed_at`).
+- **Closed reason** — a closed issue's `state_reason` stays out of the state
+  (closed is closed) and rides a label instead, so a board filter can tell
+  closed-as-done from closed-as-wontfix: `not_planned` → a `not-planned` label,
+  `duplicate` → a `duplicate` label. The mapping is total — `completed`,
+  `reopened`, an absent reason, any reason GitHub adds later, and a
+  `state_reason` on an open row all add no label, leaving that output identical
+  to v3. Reason labels go through the label pipeline below (no hard-coded
+  color, case-insensitive dedup), so an issue already carrying a same-named
+  repo label keeps that label's casing and color and gains nothing.
 - **Type inference** (labels + title, bug checked first) — a label containing
   `bug`/`fix`/`defect`, or a title starting with `fix`/`bug` → `bug`; a label
   containing `chore`/`maintenance`/`devops`/`infra` → `chore`; else `feature`.
@@ -396,7 +405,9 @@ issue mapping so both engines classify the same repo identically:
 
 The CLI legend's `issues` lines render from this module's own table
 (re-exported through the `MAPPINGS` registry), so legend and mapper cannot
-drift; the server engine's legend output stays byte-identical.
+drift; the server engine's legend output stays byte-identical. The
+closed-reason line is the one exception — it renders only under
+`--engine direct`, because the server importer flattens every closed issue.
 
 ### Write surface (direct engine)
 

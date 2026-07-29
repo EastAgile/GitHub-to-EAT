@@ -10,10 +10,14 @@ const STATE_LINE =
 const LABELS_LINE = "labels → labels (with colors)";
 const TASKS_SUFFIX = "; issue-body checklists → story tasks";
 const COMMENTS_LINE = "comments → comments (body only)";
+// Direct-only: the server importer flattens every closed issue, so naming the
+// reason labels in its legend would promise output it does not produce.
+const CLOSED_REASON_LINE =
+  "closed as not planned / duplicate → accepted, plus a 'not-planned' / 'duplicate' label";
 
 /**
- * The issues legend shown by the CLI. Lives next to the functions that implement each line
- * and is re-exported through the MAPPINGS registry, so legend and mapper can't drift apart.
+ * The default (server-engine) issues legend. Lives next to the functions that implement each
+ * line and is re-exported through the MAPPINGS registry, so legend and mapper can't drift apart.
  */
 export const ISSUES_LEGEND = [STATE_LINE, `${LABELS_LINE}${TASKS_SUFFIX}`, COMMENTS_LINE];
 
@@ -22,15 +26,18 @@ export const ISSUES_LEGEND = [STATE_LINE, `${LABELS_LINE}${TASKS_SUFFIX}`, COMME
 export const stripControls = (/** @type {string} */ s) => s.replace(/\p{Cc}/gu, "");
 
 /**
- * The issues legend adjusted for a run's {@link Customization}: the checklist→tasks
- * fragment drops when `tasks` is off, the comments line drops when `comments` is off.
- * All-default answers reproduce {@link ISSUES_LEGEND} verbatim.
+ * The issues legend for a run: the direct engine adds the closed-reason line, and a
+ * {@link Customization} drops the lines its answers turn off (all-default keeps them all).
  *
- * @param {Customization} customization
- * @returns {string[]}
+ * @param {import("./engine.js").Engine} [engine]
+ * @param {Customization | null} [customization]
+ * @returns {string[]} the server engine's default reproduces {@link ISSUES_LEGEND} verbatim
  */
-export function customizedIssuesLegend({ comments, tasks }) {
-  const lines = [STATE_LINE, tasks ? `${LABELS_LINE}${TASKS_SUFFIX}` : LABELS_LINE];
+export function issuesLegend(engine = "server", customization = null) {
+  const { comments, tasks } = customization ?? DEFAULT_CUSTOMIZATION;
+  const lines = [STATE_LINE];
+  if (engine === "direct") lines.push(CLOSED_REASON_LINE);
+  lines.push(tasks ? `${LABELS_LINE}${TASKS_SUFFIX}` : LABELS_LINE);
   if (comments) lines.push(COMMENTS_LINE);
   return lines;
 }
@@ -323,6 +330,25 @@ function commentText(comment, sendDates) {
  * @property {string} [text_color_hex] contrast-picked when a background exists
  */
 
+/** The closed `state_reason` values that earn a label, by GitHub's spelling. */
+const CLOSED_REASON_LABELS = new Map([
+  ["not_planned", "not-planned"],
+  ["duplicate", "duplicate"],
+]);
+
+/**
+ * Total by design: an open row, `completed`, an absent reason and any reason GitHub
+ * adds later all fall through to no label, keeping that output identical to v3.
+ *
+ * @param {boolean} closed
+ * @param {unknown} stateReason
+ * @returns {string | null}
+ */
+function closedReasonLabel(closed, stateReason) {
+  if (!closed) return null;
+  return CLOSED_REASON_LABELS.get(String(stateReason ?? "").toLowerCase()) ?? null;
+}
+
 /**
  * @typedef {object} StoryOp one EAT story to create, with its sub-resources
  * @property {string} external_id the GitHub issue number, as a string
@@ -377,14 +403,20 @@ export function mapRepo(
 
     /** @type {string[]} */
     const names = [];
-    for (const label of issue.labels ?? []) {
-      const name = String(label.name ?? "").trim();
-      if (!name) continue;
-      names.push(name);
+    /** @type {Set<string>} names already on this story, lowercased like labelOps */
+    const seen = new Set();
+    /** @param {unknown} rawName @param {unknown} rawColor */
+    const addLabel = (rawName, rawColor) => {
+      const name = String(rawName ?? "").trim();
+      if (!name) return;
       const key = name.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        names.push(name);
+      }
       if (!labelOps.has(key)) {
         const color =
-          (label.color ? normalizeHexColor(String(label.color)) : null) ?? repoColors.get(key);
+          (rawColor ? normalizeHexColor(String(rawColor)) : null) ?? repoColors.get(key);
         labelOps.set(
           key,
           color
@@ -392,11 +424,16 @@ export function mapRepo(
             : { name },
         );
       }
-    }
+    };
+    for (const label of issue.labels ?? []) addLabel(label.name, label.color);
+
+    const closed = state === "closed";
+    // Closed is closed, so the state stays `accepted`; the label is what lets a
+    // board filter tell closed-as-done from closed-as-wontfix.
+    addLabel(closedReasonLabel(closed, issue.state_reason), null);
 
     const title = String(issue.title ?? "");
     const body = (issue.body ?? "").trim();
-    const closed = state === "closed";
     const story = {
       external_id: String(issue.number),
       name: title,

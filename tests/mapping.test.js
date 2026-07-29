@@ -311,6 +311,97 @@ test("a stray pull_request row in the input is dropped, not mapped", () => {
   assert.equal(plan.stories[0].external_id, "7");
 });
 
+// --- closed-reason labels (#31930) -------------------------------------------
+
+/** A closed issue with the given `state_reason`. */
+const closedWith = (/** @type {object} */ overrides) =>
+  ghIssue({ state: "closed", closed_at: "2026-02-03T04:05:06Z", ...overrides });
+
+for (const [reason, label] of /** @type {[string, string][]} */ ([
+  ["not_planned", "not-planned"],
+  ["duplicate", "duplicate"],
+])) {
+  test(`closed as ${reason} stays accepted and earns the '${label}' label`, () => {
+    const plan = mapRepo({
+      issues: [closedWith({ state_reason: reason })],
+      comments: [],
+      labels: [],
+    });
+    const s = plan.stories[0];
+    assert.equal(s.current_state, "accepted");
+    assert.equal(s.completed_at, "2026-02-03T04:05:06Z");
+    assert.deepEqual(s.labels, [label]);
+    assert.deepEqual(plan.labels, [{ name: label }]);
+  });
+}
+
+for (const reason of [undefined, null, "completed", "reopened", "some_future_reason"]) {
+  test(`a closed issue with state_reason ${JSON.stringify(reason)} maps byte-identical to v3`, () => {
+    const withReason = mapRepo({
+      issues: [closedWith({ state_reason: reason })],
+      comments: [],
+      labels: [],
+    });
+    const v3 = mapRepo({ issues: [closedWith({})], comments: [], labels: [] });
+    assert.deepEqual(withReason, v3);
+    assert.deepEqual(withReason.stories[0].labels, []);
+    assert.deepEqual(withReason.labels, []);
+  });
+}
+
+test("state_reason on an open issue is not a close reason and adds no label", () => {
+  const plan = mapRepo({
+    issues: [ghIssue({ state: "open", state_reason: "not_planned" })],
+    comments: [],
+    labels: [],
+  });
+  assert.equal(plan.stories[0].current_state, "unstarted");
+  assert.deepEqual(plan.stories[0].labels, []);
+  assert.deepEqual(plan.labels, []);
+});
+
+test("a reason label dedups case-insensitively against the issue's own repo label", () => {
+  const plan = mapRepo({
+    issues: [
+      closedWith({ state_reason: "duplicate", labels: [{ name: "Duplicate", color: "cfd3d7" }] }),
+    ],
+    comments: [],
+    labels: [],
+  });
+  assert.deepEqual(plan.stories[0].labels, ["Duplicate"]);
+  assert.deepEqual(plan.labels, [
+    { name: "Duplicate", background_color_hex: "#cfd3d7", text_color_hex: "#000000" },
+  ]);
+});
+
+test("a reason label takes the repo list's color for that name — none is hard-coded", () => {
+  const plan = mapRepo({
+    issues: [closedWith({ state_reason: "not_planned" })],
+    comments: [],
+    labels: [{ name: "Not-Planned", color: "ffffff" }],
+  });
+  assert.deepEqual(plan.stories[0].labels, ["not-planned"]);
+  assert.deepEqual(plan.labels, [
+    { name: "not-planned", background_color_hex: "#ffffff", text_color_hex: "#000000" },
+  ]);
+});
+
+test("one reason label is created once across issues, first-seen casing winning", () => {
+  const plan = mapRepo({
+    issues: [
+      closedWith({ number: 1, state_reason: "duplicate", labels: [{ name: "Duplicate" }] }),
+      closedWith({ number: 2, state_reason: "duplicate" }),
+    ],
+    comments: [],
+    labels: [],
+  });
+  assert.deepEqual(
+    plan.labels.map((l) => l.name),
+    ["Duplicate"],
+  );
+  assert.deepEqual(plan.stories[1].labels, ["duplicate"]);
+});
+
 // --- MAPPINGS registry integration (AC: legend renders from the same table) --
 
 test("MAPPINGS issues legend is the mapping module's own table, byte-identical", () => {

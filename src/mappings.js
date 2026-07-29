@@ -7,7 +7,7 @@
  * else from this table.
  */
 
-import { customizedIssuesLegend, describeCustomization, ISSUES_LEGEND } from "./mapping.js";
+import { describeCustomization, ISSUES_LEGEND, issuesLegend } from "./mapping.js";
 
 /**
  * @typedef {object} Mapping
@@ -100,10 +100,7 @@ export function renderLegend(selected, engine = "server", customization = null) 
   const lines = [`Import mapping (GitHub → East Agile Tracker)${engineTag}:`];
   for (const type of selected) {
     lines.push(`  ${type}:`);
-    const rows =
-      type === "issues" && customization
-        ? customizedIssuesLegend(customization)
-        : MAPPINGS[type].legend;
+    const rows = type === "issues" ? issuesLegend(engine, customization) : MAPPINGS[type].legend;
     for (const row of rows) {
       lines.push(`    - ${row}`);
     }

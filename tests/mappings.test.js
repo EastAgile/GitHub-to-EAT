@@ -99,6 +99,25 @@ test("tasks-off drops the checklist→tasks line, keeps the labels and comments 
   assert.match(legend, /comments → comments \(body only\)/);
 });
 
+// --- closed-reason labels in the legend (#31930) -----------------------------
+
+test("the direct legend documents the closed-reason labels; the server legend does not", () => {
+  assert.match(renderLegend(["issues"], "direct"), /not-planned.*duplicate/);
+  assert.doesNotMatch(renderLegend(["issues"], "server"), /not-planned/);
+  assert.equal(renderLegend(["issues"], "server"), renderLegend(["issues"]));
+});
+
+test("the closed-reason line survives every customization the direct legend allows", () => {
+  for (const customization of [
+    DEFAULT_CUSTOMIZATION,
+    { ...DEFAULT_CUSTOMIZATION, comments: false },
+    { ...DEFAULT_CUSTOMIZATION, tasks: false },
+  ]) {
+    assert.match(renderLegend(["issues"], "direct", customization), /not-planned/);
+    assert.doesNotMatch(renderLegend(["issues"], "server", customization), /not-planned/);
+  }
+});
+
 test("renderLegend strips terminal control chars from milestone titles", () => {
   const legend = renderLegend(["issues"], "direct", {
     ...DEFAULT_CUSTOMIZATION,
