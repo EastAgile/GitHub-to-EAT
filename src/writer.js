@@ -1,7 +1,6 @@
 /**
- * The direct engine's write stage. Epics go first (their backing label must exist before a
- * same-named GitHub label claims the name), then the remaining labels (the story payload's
- * own get-or-create would create them colorless), then stories oldest-first for board order.
+ * The direct engine's write stage. Epics first (their backing label must claim the name
+ * before a same-named GitHub label), then labels (else colorless), then stories oldest-first.
  */
 
 import { randomUUID } from "node:crypto";

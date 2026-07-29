@@ -103,9 +103,8 @@ export function milestoneEpicDescription(milestone) {
 export const EPIC_TITLE_LIMIT = 255;
 
 /**
- * A milestone's epic title — its trimmed title, cut to the column width — or "" when the
- * milestone names none. Cutting here, not at write time, keeps the epic and the label the
- * stories carry the same string.
+ * Cut to the column width here, not at write time, so the epic and the label its
+ * stories carry are always the same string. "" when the milestone names no title.
  *
  * @param {unknown} milestone
  * @returns {string}

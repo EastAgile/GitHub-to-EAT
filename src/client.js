@@ -334,9 +334,8 @@ export class EATClient {
   }
 
   /**
-   * List a project's epics (direct engine). The endpoint answers a bare array and does
-   * not paginate; anything else reads as "no epics", so a malformed body degrades into
-   * the create path's own 409 handling instead of crashing the run.
+   * The endpoint answers a bare array and does not paginate; anything else reads as "no
+   * epics", so a malformed body degrades into the create path's 409 handling, not a crash.
    *
    * @param {number} projectId
    * @returns {Promise<any[]>}
@@ -347,7 +346,6 @@ export class EATClient {
   }
 
   /**
-   * Create an epic and, with no `label_id`, its backing label in the same transaction.
    * Unlike the internal importer this does **not** get-or-create: a title matching an
    * existing epic *or* plain label raises {@link ConflictError} with `code: "conflict"`.
    *

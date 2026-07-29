@@ -118,9 +118,8 @@ function inScope(issues, { states, milestones }) {
 }
 
 /**
- * Without `--include milestones` a milestone is dropped entirely — where the server engine
- * would keep it as a `milestone:<title>` label. Say so once, with the count only: milestone
- * titles are author-controlled text, and this path never needs to render one.
+ * Without the flag a milestone is dropped entirely, where the server keeps a
+ * `milestone:<title>` label. The count only: titles are author-controlled text.
  *
  * @param {{ issues: any[] }} fetched
  * @param {import("./mapping.js").Customization} customization

@@ -526,9 +526,8 @@ test("a plan with no epics never touches the epic endpoints", async () => {
   }
 });
 
-// Production still answers `epic_title` only (`name`/`description` are newer aliases,
-// absent from the deployed tracker read 2026-07-29), and the server keys on
-// LOWER(TRIM(epic_title)) — so the scan must read that field, trimmed and folded.
+// Production still answers `epic_title` only (`name` is a newer alias, absent from the
+// tracker read 2026-07-29) and keys on LOWER(TRIM(epic_title)) — so the scan must too.
 test("the epic scan reads epic_title alone, trimmed, and folds case", async () => {
   const mock = await startMockServer();
   try {

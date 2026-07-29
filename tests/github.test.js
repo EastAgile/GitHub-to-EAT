@@ -991,9 +991,8 @@ test("the releases listing is page-bounded, so an endless rel=next cannot spin",
 
 // --- milestones (#31931) -----------------------------------------------------
 
-// Every issue row embeds the milestone the mapper reads (title, state, due_on), so
-// milestone→epic costs no request of its own — worth pinning, since the anonymous
-// budget is 60/h and a listing endpoint would be a silent regression.
+// Every issue row embeds title/state/due_on, so milestone→epic costs no request — worth
+// pinning: the anonymous budget is 60/h and a listing endpoint would be a silent regression.
 test("no --include selection makes fetchAll request the milestones listing", async () => {
   /** @type {string[]} */
   const paths = [];

@@ -688,11 +688,8 @@ function createLabel(state, projectId, body) {
 }
 
 /**
- * Get-or-create is NOT what the public endpoint does: it pre-checks the project's label
- * names and 409s on a hit, naming `Epic` when that label already backs one and `Label`
- * otherwise (handlers/epics.rs) — so a plain label of the same name blocks the epic.
- * Deviation: titles are trimmed before keying and storing; the real handler stores them
- * verbatim, which no caller of this mock sends.
+ * The public endpoint does NOT get-or-create: it 409s, naming `Epic` when the colliding
+ * label backs one and `Label` otherwise, so a plain label blocks the epic (handlers/epics.rs).
  *
  * @param {MockState} state
  * @param {number} projectId
