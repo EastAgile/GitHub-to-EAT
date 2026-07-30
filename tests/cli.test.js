@@ -1454,7 +1454,8 @@ test("on a terminal the confirm question survives a backspace edit", async () =>
 // AC6 — the no-flags output is the byte-for-byte text this story inherited; only
 // the direct engine gained a line (#31930's closed-reason labels).
 const CLOSED_REASON_LINE =
-  "    - closed as not planned / duplicate → accepted, plus a 'not-planned' / 'duplicate' label\n";
+  "    - closed as not planned / duplicate → rejected (a chore → accepted, having no " +
+  "rejected state), plus a 'not-planned' / 'duplicate' label\n";
 
 /** @param {string} [reasonLine] */
 const goldenTail = (reasonLine = "") =>
