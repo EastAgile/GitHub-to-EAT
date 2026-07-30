@@ -112,7 +112,11 @@ must contain `issues` — the other types only add to an issue import:
   its own.
 - `milestones` — GitHub milestones become epics; every story whose issue is in
   the milestone carries the epic's label, and the milestone's state and due date
-  ride in the epic's description. Works on both engines.
+  ride in the epic's description. Works on both engines. **Add it from the
+  start:** an import never updates a story it already wrote, so an issue imported
+  without this flag can never join an epic later. Adding the flag to an
+  already-imported project groups only the issues that run imports itself, and
+  says so — to group the older ones, delete their stories in EAT and re-run.
 - `releases` — GitHub Releases become release-type stories (tag → title,
   notes → description, publish date kept). Draft releases are imported too,
   landing in the backlog rather than being skipped — but GitHub only lists

@@ -5,7 +5,7 @@
 
 import { randomUUID } from "node:crypto";
 import { AuthError, ConflictError, EATError, EATTimeout, NotFoundError } from "./client.js";
-import { stripControls } from "./mapping.js";
+import { epicTitleKey, stripControls } from "./mapping.js";
 import { runWithProgress } from "./progress.js";
 
 /**
@@ -53,7 +53,21 @@ import { runWithProgress } from "./progress.js";
  */
 function epicKey(row) {
   const title = typeof row?.epic_title === "string" ? row.epic_title : row?.name;
-  return typeof title === "string" ? title.trim().toLowerCase() : "";
+  return typeof title === "string" ? epicTitleKey(title) : "";
+}
+
+/**
+ * Which kind of row the server says holds the name, from the 409 body it already sent
+ * (`Epic '<t>' …` / `Label '<t>' …`). null when the wording is not one this knows —
+ * an older server, or a proxy's own body — and the listing has to arbitrate instead.
+ *
+ * @param {string | undefined} detail the conflict's `error` field
+ * @returns {"epic" | "label" | null}
+ */
+function conflictHolder(detail) {
+  if (typeof detail !== "string") return null;
+  if (detail.startsWith("Epic '")) return "epic";
+  return detail.startsWith("Label '") ? "label" : null;
 }
 
 /**
@@ -142,7 +156,7 @@ export async function writePlan(client, projectId, plan, options = {}) {
         // get half, and the 409 below is the concurrent-writer safety net.
         let existing = await scan(projectId);
         for (const [i, epic] of epics.entries()) {
-          const key = epic.title.toLowerCase();
+          const key = epicTitleKey(epic.title);
           if (existing.has(key)) {
             result.epicsExisting += 1;
             continue;
@@ -156,21 +170,31 @@ export async function writePlan(client, projectId, plan, options = {}) {
               ),
             );
             result.epicsCreated += 1;
-            existing.add(key);
           } catch (err) {
             if (!(err instanceof ConflictError) || err.code !== "conflict") throw err;
-            // Either another run created it, or a plain label of that name holds the
-            // name and no epic can ever take it — only a re-read tells the two apart.
-            existing = await scan(projectId);
-            if (existing.has(key)) {
+            // Another run created it, or a plain label holds the name forever. The 409 body
+            // says which; the re-read is the tiebreaker for wording it does not recognise.
+            const holder = conflictHolder(err.detail);
+            if (holder === "epic") {
               result.epicsExisting += 1;
               continue;
             }
+            if (holder === null) {
+              existing = await scan(projectId);
+              if (existing.has(key)) {
+                result.epicsExisting += 1;
+                continue;
+              }
+            }
             result.epicsBlocked += 1;
             stream?.write(
-              `warning: epic '${stripControls(epic.title)}' was not created — a label of that ` +
-                "name already exists in this project; its stories still carry the label, so " +
-                "they stay grouped, but no epic row was made.\n",
+              `warning: epic '${stripControls(epic.title)}' was not created — ${
+                holder === "label"
+                  ? "a label of that name already exists in this project"
+                  : "the server refused the name as taken and no epic of that name is in the " +
+                    "project, so a plain label most likely holds it"
+              }; its stories still carry the label, so they stay grouped, but no epic row ` +
+                "was made.\n",
             );
           }
         }

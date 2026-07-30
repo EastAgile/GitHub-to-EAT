@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { AuthError, EATClient, EATError } from "../src/client.js";
+import { AuthError, ConflictError, EATClient, EATError } from "../src/client.js";
 import { startMockServer } from "../src/mockserver.js";
 import { writePlan } from "../src/writer.js";
 import { capture } from "./helpers.js";
@@ -422,7 +422,7 @@ test("an epic the project already has is reused, not re-created", async () => {
   }
 });
 
-test("a 409 from a racing writer re-reads the listing and counts the epic as existing", async () => {
+test("a racing 409 is settled by the body's own Epic marker, with no second read", async () => {
   const mock = await startMockServer();
   try {
     const client = new EATClient(mock.baseUrl, "ea_token");
@@ -445,13 +445,77 @@ test("a 409 from a racing writer re-reads the listing and counts the epic as exi
       epicPlan([{ title: "V1", description: null }], ["V1"]),
       { stream: out },
     );
-    assert.equal(scans, 2);
+    // The server already answered `Epic 'V1' …`, so a second listing read adds nothing.
+    assert.equal(scans, 1);
     assert.equal(result.epicsCreated, 0);
     assert.equal(result.epicsExisting, 1);
+    assert.equal(result.epicsBlocked, 0);
     assert.ok(!out.buf.includes("warning:"), out.buf);
   } finally {
     await mock.close();
   }
+});
+
+/**
+ * One epic against a stub whose create always 409s with `detail`, and whose second
+ * listing read answers `rescan`.
+ *
+ * @param {string | undefined} detail the conflict's `error` field
+ * @param {any[]} rescan
+ */
+async function conflictingEpicWrite(detail, rescan) {
+  const err = new ConflictError(
+    `conflict on /projects/91/epics: ${JSON.stringify({ code: "conflict", error: detail })}`,
+  );
+  err.status = 409;
+  err.code = "conflict";
+  if (detail !== undefined) err.detail = detail;
+
+  let scans = 0;
+  const out = capture();
+  const result = await writePlan(
+    {
+      listEpics: async () => (scans++ === 0 ? [] : rescan),
+      createEpic: async () => {
+        throw err;
+      },
+      createLabel: async () => ({}),
+      createStory: async () => ({ story_id: 1 }),
+      createTask: async () => ({}),
+      createComment: async () => ({}),
+    },
+    91,
+    { labels: [], stories: [], epics: [{ title: "V1", description: null }] },
+    { stream: out },
+  );
+  return { result, buf: out.buf, scans };
+}
+
+test("a Label 409 is trusted without a re-read and warns in the definite voice", async () => {
+  // The listing would say the epic exists; the server's own answer outranks it.
+  const { result, buf, scans } = await conflictingEpicWrite(
+    "Label 'V1' already exists in this project",
+    [{ epic_title: "V1" }],
+  );
+  assert.equal(scans, 1);
+  assert.equal(result.epicsBlocked, 1);
+  assert.equal(result.epicsExisting, 0);
+  assert.match(buf, /a label of that name already exists in this project/);
+});
+
+// Only a body naming neither kind leaves the listing to arbitrate — and then the
+// warning must not assert a cause nothing has established.
+test("an unrecognised 409 body falls back to the re-read, then hedges the warning", async () => {
+  const found = await conflictingEpicWrite(undefined, [{ epic_title: "V1" }]);
+  assert.equal(found.scans, 2);
+  assert.equal(found.result.epicsExisting, 1);
+  assert.ok(!found.buf.includes("warning:"), found.buf);
+
+  const missing = await conflictingEpicWrite("something a proxy wrote", []);
+  assert.equal(missing.scans, 2);
+  assert.equal(missing.result.epicsBlocked, 1);
+  assert.match(missing.buf, /most likely holds it/);
+  assert.ok(!missing.buf.includes("a label of that name already exists"), missing.buf);
 });
 
 test("a plain label blocking an epic warns loudly and leaves the story labelled", async () => {
@@ -541,6 +605,87 @@ test("the epic scan reads epic_title alone, trimmed, and folds case", async () =
     );
     assert.equal(result.epicsCreated, 0);
     assert.equal(result.epicsExisting, 1);
+    assert.deepEqual(
+      mock.state.requests.filter((r) => r === "POST /projects/91/epics"),
+      [],
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+// A server that publishes only the newer alias must still be read, or every epic POSTs,
+// 409s, re-reads to nothing and is reported blocked while it sits in the listing.
+test("the epic scan falls back to the name alias when epic_title is absent", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    mock.state.epics[91] = [{ epic_id: 1, label_id: 2, name: "V1" }];
+    const result = await writePlan(
+      client,
+      91,
+      epicPlan([{ title: "V1", description: null }], ["V1"]),
+      { stream: capture() },
+    );
+    assert.equal(result.epicsExisting, 1);
+    assert.equal(result.epicsCreated, 0);
+    assert.equal(result.epicsBlocked, 0);
+    assert.deepEqual(
+      mock.state.requests.filter((r) => r === "POST /projects/91/epics"),
+      [],
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+// `epic_title` is the field every version emits, so where the two disagree it decides —
+// otherwise a renamed alias would hide an epic the scan is meant to find.
+test("epic_title outranks a disagreeing name alias", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    mock.state.epics[91] = [{ epic_id: 1, label_id: 2, epic_title: "V1", name: "renamed" }];
+    const matched = await writePlan(
+      client,
+      91,
+      epicPlan([{ title: "V1", description: null }], ["V1"]),
+      { stream: capture() },
+    );
+    assert.equal(matched.epicsExisting, 1);
+    assert.equal(matched.epicsCreated, 0);
+
+    // The alias itself matches nothing, so an epic really called "renamed" is created.
+    const other = await writePlan(
+      client,
+      91,
+      epicPlan([{ title: "renamed", description: null }], ["renamed"]),
+      { stream: capture() },
+    );
+    assert.equal(other.epicsCreated, 1);
+    assert.equal(other.epicsExisting, 0);
+  } finally {
+    await mock.close();
+  }
+});
+
+// Both halves of the comparison must apply the server's own LOWER(TRIM(...)), not just
+// the listing half: a plan title with padding would otherwise POST, 409 and be reported
+// blocked while the epic sits in the listing.
+test("the plan-side epic key is trimmed and case-folded, like the listing key", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    mock.state.epics[91] = [{ epic_id: 1, label_id: 2, epic_title: "V1" }];
+    const result = await writePlan(
+      client,
+      91,
+      epicPlan([{ title: "  v1 ", description: null }], ["  v1 "]),
+      { stream: capture() },
+    );
+    assert.equal(result.epicsExisting, 1);
+    assert.equal(result.epicsCreated, 0);
+    assert.equal(result.epicsBlocked, 0);
     assert.deepEqual(
       mock.state.requests.filter((r) => r === "POST /projects/91/epics"),
       [],

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { EATClient, NotFoundError } from "../src/client.js";
+import { EPIC_TITLE_LIMIT, milestoneEpicTitle } from "../src/mapping.js";
 import { makeState, startMockServer } from "../src/mockserver.js";
 
 test("meta and project via the client", async () => {
@@ -864,6 +865,43 @@ test("a plain label of the same name blocks the epic with a Label conflict", asy
     assert.equal(body.code, "conflict");
     assert.equal(body.error, "Label 'v1' already exists in this project");
     assert.deepEqual(mock.state.epics[91] ?? [], []);
+  } finally {
+    await mock.close();
+  }
+});
+
+// Without this the mapper's truncation is never tested against a server that enforces
+// the column, so a regression that stopped truncating would pass and 400 in production.
+test("the epic create enforces both documented limits, in UTF-8 bytes", async () => {
+  const mock = await startMockServer(
+    makeState({ maxLengths: { name: EPIC_TITLE_LIMIT, description: 40 } }),
+  );
+  try {
+    const at = milestoneEpicTitle({ title: "v".repeat(EPIC_TITLE_LIMIT + 50) });
+    assert.equal(Buffer.byteLength(at, "utf8"), EPIC_TITLE_LIMIT);
+    assert.equal((await post(mock.baseUrl, "/projects/91/epics", { name: at })).status, 200);
+
+    const over = await post(mock.baseUrl, "/projects/91/epics", { name: `${at}x` });
+    assert.equal(over.status, 400);
+    assert.deepEqual((await over.json()).details, {
+      constraint: "too_long",
+      fields: ["name"],
+    });
+
+    // Bytes, not UTF-16 units: 128 × é is 256 bytes inside a 255-byte column.
+    const multibyte = await post(mock.baseUrl, "/projects/91/epics", { name: "é".repeat(128) });
+    assert.equal(multibyte.status, 400);
+    assert.equal(
+      (await post(mock.baseUrl, "/projects/91/epics", { name: "é".repeat(127) })).status,
+      200,
+    );
+
+    const longDesc = await post(mock.baseUrl, "/projects/91/epics", {
+      name: "bounded",
+      description: "d".repeat(41),
+    });
+    assert.equal(longDesc.status, 400);
+    assert.deepEqual((await longDesc.json()).details.fields, ["description"]);
   } finally {
     await mock.close();
   }

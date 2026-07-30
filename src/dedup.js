@@ -6,7 +6,7 @@
  * See CONTRACT.md "Marker dedup".
  */
 
-import { RELEASE_EXTERNAL_ID, releaseExternalId } from "./mapping.js";
+import { epicTitleKey, RELEASE_EXTERNAL_ID, releaseExternalId } from "./mapping.js";
 
 /**
  * A release renders the API resource: only `/releases/tag/{tag}` browses, the tag is not
@@ -73,6 +73,24 @@ export function markerExternalId(description, owner, repo) {
  */
 
 /**
+ * Every label name on one already-imported story row, keyed the way epics are. Both
+ * spellings are read for the same reason the epic scan reads two: `label_name` is what
+ * every server version emits, `name` is the newer alias.
+ *
+ * @param {any} row
+ * @returns {Set<string>}
+ */
+export function storyLabelKeys(row) {
+  const labels = Array.isArray(row?.labels) ? row.labels : [];
+  return new Set(
+    labels
+      .map((/** @type {any} */ l) => (typeof l === "string" ? l : (l?.label_name ?? l?.name)))
+      .filter((/** @type {unknown} */ n) => typeof n === "string")
+      .map(epicTitleKey),
+  );
+}
+
+/**
  * Cursor-walk the whole project and map each already-imported external id to
  * its story row. Rows carry `tasks_count`/`comment_count` so the caller can
  * spot stories an interrupted run left without their sub-resources.
@@ -81,18 +99,27 @@ export function markerExternalId(description, owner, repo) {
  * @param {number} projectId
  * @param {string} owner
  * @param {string} repo
- * @param {{ pageSize?: number }} [options]
+ * @param {{ pageSize?: number, withLabels?: boolean }} [options] `withLabels` adds the
+ *   label array an epic run needs to tell a grouped skipped story from an unlabelled one;
+ *   off, the request stays byte-identical to a run without the flag
  * @returns {Promise<Map<string, any>>}
  */
-export async function prescanImported(client, projectId, owner, repo, { pageSize = 200 } = {}) {
+export async function prescanImported(
+  client,
+  projectId,
+  owner,
+  repo,
+  { pageSize = 200, withLabels = false } = {},
+) {
   const imported = new Map();
+  const labels = withLabels ? ",labels" : "";
   /** @type {string | undefined} */
   let cursor;
   do {
     const page = await client.listStoryPage(projectId, {
       limit: pageSize,
       ...(cursor ? { cursor } : {}),
-      fields: "story_id,description,tasks_count,comment_count",
+      fields: `story_id,description,tasks_count,comment_count${labels}`,
     });
     for (const row of page.items ?? []) {
       const id = markerExternalId(row.description, owner, repo);
@@ -113,16 +140,18 @@ export async function prescanImported(client, projectId, owner, repo, { pageSize
  * @param {PrescanClient} client
  * @param {number} projectId
  * @param {string} [source]
- * @param {{ pageSize?: number }} [options]
+ * @param {{ pageSize?: number, withLabels?: boolean }} [options] `withLabels` as in
+ *   {@link prescanImported}
  * @returns {Promise<Map<string, any>>}
  */
 export async function prescanProvenance(
   client,
   projectId,
   source = "github",
-  { pageSize = 200 } = {},
+  { pageSize = 200, withLabels = false } = {},
 ) {
   const imported = new Map();
+  const labels = withLabels ? ",labels" : "";
   /** @type {string | undefined} */
   let cursor;
   do {
@@ -130,7 +159,7 @@ export async function prescanProvenance(
       importSource: source,
       limit: pageSize,
       ...(cursor ? { cursor } : {}),
-      fields: "story_id,import_external_id,tasks_count,comment_count",
+      fields: `story_id,import_external_id,tasks_count,comment_count${labels}`,
     });
     for (const row of page.items ?? []) {
       const id = row.import_external_id;
@@ -160,8 +189,10 @@ export function unionImported(...maps) {
 }
 
 /**
- * Drop already-imported stories from the plan, stamp the marker on survivors, and
- * prune labels no surviving story references. Returns a new plan; the input is untouched.
+ * Drop already-imported stories from the plan, stamp the marker on survivors, and prune
+ * the labels — and the epics — no surviving story references. Returns a new plan; the
+ * input is untouched. The caller compares the two plans to report what the pruning cost
+ * ({@link import("./direct.js")}'s epic warnings), so this stays a pure filter.
  *
  * @param {import("./writer.js").WritePlan} plan
  * @param {{ has(id: string): boolean }} importedIds Set or prescan Map
@@ -175,12 +206,10 @@ export function applyDedup(plan, importedIds, owner, repo) {
     ...op,
     description: withMarker(op.description, markerFor(owner, repo, op.external_id)),
   }));
-  const referenced = new Set(
-    survivors.flatMap((op) => op.labels.map((name) => name.toLowerCase())),
-  );
-  const labels = plan.labels.filter((label) => referenced.has(label.name.toLowerCase()));
+  const referenced = new Set(survivors.flatMap((op) => op.labels.map(epicTitleKey)));
+  const labels = plan.labels.filter((label) => referenced.has(epicTitleKey(label.name)));
   // An epic's join is its label, so an epic no survivor carries has nothing to group:
   // a fully-skipped re-run plans no epic work at all.
-  const epics = (plan.epics ?? []).filter((epic) => referenced.has(epic.title.toLowerCase()));
+  const epics = (plan.epics ?? []).filter((epic) => referenced.has(epicTitleKey(epic.title)));
   return { plan: { labels, stories, epics }, skipped: plan.stories.length - survivors.length };
 }

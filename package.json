@@ -30,7 +30,7 @@
   },
   "scripts": {
     "test": "node --test",
-    "lint": "biome check .",
+    "lint": "node scripts/check-conflict-markers.mjs && biome check .",
     "typecheck": "tsc --noEmit",
     "mockserver": "node src/mockserver.js"
   },

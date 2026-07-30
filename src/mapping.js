@@ -48,9 +48,9 @@ const SUB_ISSUES_LINE =
   `sub-issues → '${SUB_ISSUE_OF_PREFIX} #n' / '${SUB_ISSUES_PREFIX} #n, #n' in the ` +
   "description's last paragraph";
 
-// Milestone titles are untrusted remote data; strip terminal control chars
-// (ESC/C0/C1/DEL) before they reach the terminal, in the wizard and the legend alike.
-export const stripControls = (/** @type {string} */ s) => s.replace(/\p{Cc}/gu, "");
+// Milestone titles are untrusted remote data: Cc kills ESC/C0/C1/DEL, Cf kills the bidi
+// overrides that would reorder a warning line — at the cost of splitting ZWJ emoji.
+export const stripControls = (/** @type {string} */ s) => s.replace(/[\p{Cc}\p{Cf}]/gu, "");
 
 /**
  * The issues legend for a run, and the only place these lines are assembled. It describes the
@@ -103,15 +103,26 @@ export function milestoneEpicDescription(milestone) {
 export const EPIC_TITLE_LIMIT = 255;
 
 /**
+ * The server keys epics on `LOWER(TRIM(epic_title))`. Every key — plan side, listing
+ * side, dedup side — goes through here, so no two of them can drift apart.
+ *
+ * @param {string} title
+ * @returns {string}
+ */
+export const epicTitleKey = (title) => title.trim().toLowerCase();
+
+/**
  * Cut to the column width here, not at write time, so the epic and the label its
  * stories carry are always the same string. "" when the milestone names no title.
+ * Re-trimmed after the cut: the slice can land on a space the server then trims
+ * away, which would key the plan on a title no listing ever returns.
  *
  * @param {unknown} milestone
  * @returns {string}
  */
 export function milestoneEpicTitle(milestone) {
   const title = /** @type {{ title?: unknown } | null | undefined} */ (milestone)?.title;
-  return typeof title === "string" ? sliceBytes(title.trim(), EPIC_TITLE_LIMIT) : "";
+  return typeof title === "string" ? sliceBytes(title.trim(), EPIC_TITLE_LIMIT).trim() : "";
 }
 
 const MILESTONE_EPIC_LINE = "milestone → epic (an issue keeps its milestone as the epic's label)";
@@ -781,7 +792,7 @@ export function mapRepo(
     // title rides in `names` only — POST /epics creates that label itself.
     const epicTitle = epics ? milestoneEpicTitle(issue.milestone) : "";
     if (epicTitle) {
-      const key = epicTitle.toLowerCase();
+      const key = epicTitleKey(epicTitle);
       if (!epicOps.has(key)) {
         epicOps.set(key, {
           title: epicTitle,
@@ -842,6 +853,7 @@ export function mapRepo(
  * @property {number} storyDescription
  * @property {number} taskDescription
  * @property {number} commentText
+ * @property {number} epicDescription
  */
 
 /**
@@ -856,6 +868,8 @@ export const FALLBACK_LIMITS = {
   storyDescription: 16_000,
   taskDescription: 16_000,
   commentText: 16_000,
+  // Not a guess: `limits::EPIC_DESCRIPTION`, which openapi.json does not publish.
+  epicDescription: 100_000,
 };
 
 export const TRUNCATION_NOTICE =
@@ -948,6 +962,12 @@ export function clampPlan(plan, limits, { reserveDescription = () => 0, warn = (
     });
     return out;
   });
-  // Epic titles were cut to the column width at map time, so nothing here clamps them.
-  return { labels: plan.labels, stories, epics: plan.epics ?? [] };
+  // Epic titles were cut to the column width at map time; descriptions are clamped here
+  // so the epic stage cannot 400 before a single story is written.
+  const epics = (plan.epics ?? []).map((epic) =>
+    epic.description !== null && byteLen(epic.description) > limits.epicDescription
+      ? { ...epic, description: clampBlock(epic.description, limits.epicDescription) }
+      : epic,
+  );
+  return { labels: plan.labels, stories, epics };
 }

@@ -93,6 +93,21 @@ export function parseInclude(value) {
 }
 
 /**
+ * The `--include` value that adds `type` to a run's own selection, in registry order.
+ * Advice a run prints has to be followable verbatim without dropping a type it already had.
+ *
+ * @param {string[]} selected the run's current selection
+ * @param {string} type
+ * @returns {string}
+ */
+export function includeWith(selected, type) {
+  const wanted = new Set([...selected, type]);
+  return Object.keys(MAPPINGS)
+    .filter((name) => wanted.has(name))
+    .join(",");
+}
+
+/**
  * Render the GitHub → EAT mapping legend for a selection ("show the mirror").
  *
  * One block per selected type, from the registry or that entry's `render` where the lines

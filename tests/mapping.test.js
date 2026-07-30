@@ -23,6 +23,7 @@ import {
   parseCustomization,
   releaseExternalId,
   storyTypeFromIssueType,
+  stripControls,
   TRUNCATION_NOTICE,
 } from "../src/mapping.js";
 import { MAPPINGS, renderLegend } from "../src/mappings.js";
@@ -1171,6 +1172,39 @@ test("an invalid value is stripped of control characters before it is reported",
   );
 });
 
+// The epic warning is the first path that renders *remote* author-controlled text, so
+// bidi controls matter as much as C0: U+202E alone can visually reverse the warning line.
+test("stripControls removes format characters, not only control characters", () => {
+  const format = [
+    "\u202a", // LEFT-TO-RIGHT EMBEDDING
+    "\u202b",
+    "\u202c",
+    "\u202d",
+    "\u202e", // RIGHT-TO-LEFT OVERRIDE — reverses what follows it on screen
+    "\u2066", // the four isolates
+    "\u2067",
+    "\u2068",
+    "\u2069",
+    "\u200b", // ZERO WIDTH SPACE
+    "\u200c",
+    "\u200d",
+    "\u200e", // LEFT-TO-RIGHT MARK
+    "\u200f",
+    "\u00ad", // SOFT HYPHEN
+    "\ufeff", // ZERO WIDTH NO-BREAK SPACE
+  ];
+  for (const ch of format) {
+    const hex = ch.codePointAt(0)?.toString(16).toUpperCase();
+    assert.equal(stripControls(`a${ch}b`), "ab", `U+${hex} survived`);
+  }
+  // C0/C1/DEL still go, and printable text is untouched.
+  assert.equal(stripControls("a\u001b[2Jb\u007fc"), "a[2Jbc");
+  assert.equal(
+    stripControls("v1.0 \u2014 release \u2713 \u00e9"),
+    "v1.0 \u2014 release \u2713 \u00e9",
+  );
+});
+
 test("--milestones with no titles is an error, not an empty allowlist", () => {
   assert.throws(() => parseCustomization({ milestones: " , " }), /--milestones/);
 });
@@ -1861,12 +1895,90 @@ test("an over-long milestone title is cut to 255 bytes on both the epic and the 
   const plan = mapRepo(milestoneRepo({ title: "v".repeat(300) }), DEFAULT_CUSTOMIZATION, withEpics);
   assert.equal(plan.epics[0].title, "v".repeat(255));
   assert.deepEqual(plan.stories[0].labels, ["v".repeat(255)]);
-  // multi-byte titles are cut on a code-point boundary, never mid-character
-  const astral = `${"é".repeat(200)}x`;
+  // A 4-byte character straddling the boundary must not split into a lone surrogate:
+  // 63 emoji fill 252 bytes, so the 64th cannot fit inside 255.
+  const astral = "\u{1F600}".repeat(100);
   const cut = mapRepo(milestoneRepo({ title: astral }), DEFAULT_CUSTOMIZATION, withEpics).epics[0]
     .title;
-  assert.equal(cut, "é".repeat(127));
-  assert.ok(Buffer.byteLength(cut, "utf8") <= 255);
+  assert.equal(cut, "\u{1F600}".repeat(63));
+  assert.equal(Buffer.byteLength(cut, "utf8"), 252);
+  // A lone surrogate would encode to U+FFFD, so the round-trip would differ.
+  assert.equal(cut, Buffer.from(cut, "utf8").toString("utf8"));
+});
+
+// The slice runs after the trim, so a cut landing on a space leaves a title the server
+// stores one byte shorter — and every later run then misses it in the listing.
+test("a cut that lands on whitespace is trimmed again, so the stored title round-trips", () => {
+  const title = `${"a".repeat(254)} b`;
+  const plan = mapRepo(milestoneRepo({ title }), DEFAULT_CUSTOMIZATION, withEpics);
+  assert.equal(plan.epics[0].title, "a".repeat(254));
+  assert.deepEqual(plan.stories[0].labels, ["a".repeat(254)]);
+});
+
+// Trimming *before* the cut is what keeps padding from eating the budget: measure the
+// padded string and 5 real characters fall off the end, with no truncation warning.
+test("leading whitespace is trimmed before the cut, not counted against the 255 bytes", () => {
+  const title = `${" ".repeat(10)}${"a".repeat(250)}`;
+  const plan = mapRepo(milestoneRepo({ title }), DEFAULT_CUSTOMIZATION, withEpics);
+  assert.equal(plan.epics[0].title, "a".repeat(250));
+});
+
+// Every other plan text field is clamped, and this one is written before any story, so an
+// unbounded description would 400 the epic stage and kill the import before it starts.
+test("an over-long epic description is clamped like every other plan text field", () => {
+  const plan = clampPlan(
+    {
+      labels: [],
+      stories: [],
+      epics: [
+        { title: "V1", description: `GitHub milestone — State: ${"s".repeat(400)}` },
+        { title: "V2", description: null },
+      ],
+    },
+    { ...FALLBACK_LIMITS, epicDescription: 100 },
+  );
+  assert.ok(bytes(String(plan.epics[0].description)) <= 100);
+  assert.ok(String(plan.epics[0].description).endsWith(TRUNCATION_NOTICE));
+  assert.equal(plan.epics[1].description, null);
+  // Titles are cut at map time, so the clamp leaves them alone.
+  assert.equal(plan.epics[0].title, "V1");
+});
+
+test("an epic description inside the limit is passed through untouched", () => {
+  const epics = [{ title: "V1", description: "GitHub milestone — State: open" }];
+  const plan = clampPlan({ labels: [], stories: [], epics }, FALLBACK_LIMITS);
+  assert.deepEqual(plan.epics, epics);
+});
+
+// Bytes, not UTF-16 units — the limit the server enforces is `str::len()`.
+test("an epic description is clamped by bytes, so multi-byte text cannot slip past", () => {
+  const description = "é".repeat(200); // 400 bytes, 200 UTF-16 units
+  const plan = clampPlan(
+    { labels: [], stories: [], epics: [{ title: "V1", description }] },
+    {
+      ...FALLBACK_LIMITS,
+      epicDescription: 300,
+    },
+  );
+  assert.ok(bytes(String(plan.epics[0].description)) <= 300);
+  assert.notEqual(plan.epics[0].description, description);
+});
+
+// The fallback is `limits::EPIC_DESCRIPTION`, not a conservative guess like the text
+// fields: a smaller one would truncate notes the server would have accepted.
+test("the epic-description fallback is the server's documented 100,000 bytes", () => {
+  const description = "d".repeat(100_000);
+  const plan = clampPlan(
+    { labels: [], stories: [], epics: [{ title: "V1", description }] },
+    FALLBACK_LIMITS,
+  );
+  assert.equal(plan.epics[0].description, description);
+  const over = clampPlan(
+    { labels: [], stories: [], epics: [{ title: "V1", description: `${description}x` }] },
+    FALLBACK_LIMITS,
+  );
+  assert.ok(bytes(String(over.epics[0].description)) <= 100_000);
+  assert.ok(String(over.epics[0].description).endsWith(TRUNCATION_NOTICE));
 });
 
 test("filtered-out issues contribute no epic", () => {

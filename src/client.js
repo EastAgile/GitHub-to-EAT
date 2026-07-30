@@ -26,6 +26,13 @@ export class NotFoundError extends EATError {}
 export class ConflictError extends EATError {
   /** @type {string | undefined} the server's error `code` field */
   code;
+
+  /**
+   * @type {string | undefined} the server's human `error` field. For epics it names which
+   * kind of row holds the title (`Epic '…'` / `Label '…'`) — a discriminator no second
+   * read can supply as reliably.
+   */
+  detail;
 }
 
 /** The request exceeded its timeout. */
@@ -95,7 +102,9 @@ export class EATClient {
       const error = new ConflictError(`conflict on ${path}: ${text.slice(0, 200)}`);
       error.status = 409;
       try {
-        error.code = JSON.parse(text)?.code;
+        const body = JSON.parse(text);
+        error.code = body?.code;
+        if (typeof body?.error === "string") error.detail = body.error;
       } catch {}
       throw error;
     }
@@ -334,15 +343,27 @@ export class EATClient {
   }
 
   /**
-   * The endpoint answers a bare array and does not paginate; anything else reads as "no
-   * epics", so a malformed body degrades into the create path's 409 handling, not a crash.
+   * The endpoint answers a bare array (`handlers/epics.rs` selects a project's epics with
+   * no LIMIT and no cursor). Reading any other shape as "no epics" would make every epic
+   * POST, 409 and be reported blocked, so an unexpected body fails the run instead.
    *
    * @param {number} projectId
    * @returns {Promise<any[]>}
    */
   async listEpics(projectId) {
-    const data = await (await this.#request("GET", `/projects/${projectId}/epics`)).json();
-    return Array.isArray(data) ? data : [];
+    const path = `/projects/${projectId}/epics`;
+    const data = await (await this.#request("GET", path)).json();
+    if (!Array.isArray(data)) {
+      const error = new EATError(
+        `GET ${path} answered ${data === null ? "null" : typeof data}, not the documented ` +
+          "bare array of epics — refusing to read that as a project with no epics.",
+      );
+      // The real 200, so the writer's retry rule treats it as terminal: a body this
+      // wrong is a contract change, not a blip a second request would fix.
+      error.status = 200;
+      throw error;
+    }
+    return data;
   }
 
   /**

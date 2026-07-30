@@ -636,12 +636,21 @@ that label, so the label is the whole join:
   existing epic *or* an existing plain label is a `409 conflict`. So the writer
   lists `GET /projects/{id}/epics` first (a bare array, no pagination) and posts
   only the titles that listing does not already carry, matched on
-  `LOWER(TRIM(epic_title))` — the server's own key. A `409` on the create is not
-  swallowed: the listing is re-read, and the epic is counted as existing only if
-  it is now there (the concurrent-writer case). If it is not, a **plain label of
-  that name** is holding it and no epic can be made — the run warns, naming the
-  title, and continues: the stories still carry the label, so they stay grouped.
-  An `idempotency_conflict` 409 is never mistaken for either and still fails.
+  `LOWER(TRIM(epic_title))` — the server's own key, applied to both halves by one
+  function so a plan key can never drift from a listing key (the title is
+  re-trimmed after being cut to 255 bytes, since the cut can land on a space the
+  server would then trim away). A `409` on the create is not swallowed, and it is
+  **read, not guessed**: the body already names which kind of row holds the title.
+  `Epic '<t>' …` means another writer got there first → counted *existing*, with
+  no second read. `Label '<t>' …` means a plain label holds it and no epic can
+  ever be made → the run warns, naming the title, and continues: the stories
+  still carry the label, so they stay grouped. Only a 409 naming neither falls
+  back to re-reading the listing, and the warning it prints then hedges, because
+  nothing has established the cause. An `idempotency_conflict` 409 is never
+  mistaken for any of these and still fails. A `GET /epics` body that is **not** a
+  bare array is an error, not an empty project — reading an envelope as "no epics"
+  would POST every epic, 409 it, re-read nothing, and report every milestone
+  blocked, on every run.
 - **Epics are written before labels**, so the epic's backing label (auto-created
   by `POST /epics` with the server's deterministic colour) claims the name first
   and a same-named GitHub label folds into it as a `409 conflict` → *existing*.
@@ -649,15 +658,33 @@ that label, so the label is the whole join:
   a repo has both a milestone and a label of the same name, the label wears the
   epic's colour here, where the server's promotion path keeps GitHub's.
 - **Epics are not counted.** `ImportCounts` is `{stories, labels}` and the
-  server counts neither an epic nor its backing label; the direct engine matches
-  — the epic title never enters the plan's label set, so both the real run and
-  the `--dry-run` preview report the same label total with or without the flag.
+  server counts neither an epic nor its backing label; the direct engine matches —
+  the epic title never enters the plan's label set. A GitHub label that *shares* a
+  milestone's name is the one place the flag changes the reported total: because
+  epics are written first, `POST /epics` creates that name as the epic's backing
+  label, so the run's own `POST /labels` 409s into *existing* and the label total
+  is **lower by one per collision** than the same run without the flag. The
+  `--dry-run` preview subtracts the same collisions, so preview and run always
+  agree — a preview that reported the pre-flag total would misstate the run it
+  previews.
 - **A re-run creates neither a duplicate epic nor a duplicate label.** Epics are
   pruned to those a *surviving* story still carries, so a fully-skipped re-run
   plans no epic work at all and makes no epic request; a partially-new run finds
   the epic in the listing and reuses it. `epic_desc` is written **only on
   creation** on both engines, so a reused epic keeps its original note even if
   the milestone's state or due date has since changed — an import never updates.
+- **The pruning is announced, because it is not repairable.** An import never
+  re-labels a story already in EAT, so an issue imported *without* the flag can
+  never join an epic; adding `--include …,milestones` afterwards would otherwise
+  do nothing and say nothing. Under the flag the prescan therefore also reads each
+  already-imported story's `labels`, and the run warns in two shapes: one for
+  milestones whose every member is already imported unlabelled (the epic is not
+  created, and the only repair named is deleting those stories and re-running),
+  and one for an epic that *is* created but holds fewer than its members (naming
+  how many are missing). A member the prescan shows already wearing the label was
+  grouped by an earlier flagged run, so it is silent — a healthy re-run prints
+  neither warning. `epicDescription` is clamped like every other plan text field,
+  since the epic stage runs before the first story write.
 - **Without the flag the direct engine imports the milestone as nothing.** This
   is a deliberate divergence: with `include_milestones` off the *server* reverses
   its own mapping and pushes a synthetic `milestone:<title>` label instead
@@ -665,12 +692,16 @@ that label, so the label is the whole join:
   byte-identical to what it produced before this rule existed — synthesising
   labels by default would silently change every existing direct-engine board.
   So the loss is announced instead: a run whose in-scope issues carry milestones
-  prints one `note:` naming the count and `--include issues,milestones`. The
-  count only — milestone titles are author-controlled text, and this path never
-  renders one.
+  prints one `note:` naming the count and the `--include` value that adds
+  `milestones` **to that run's own selection** (so advice followed verbatim never
+  drops a type the run already had), and says plainly that a later run groups only
+  the issues it imports itself. The count only — milestone titles are
+  author-controlled text, and this path never renders one.
 - The mock server mirrors both epic endpoints, the 409-on-duplicate behaviour
-  (epic *and* plain-label collisions alike), and the backing-label auto-create,
-  so the get-or-create path is exercised against a server that really refuses.
+  (epic *and* plain-label collisions alike), the backing-label auto-create, and
+  both documented length limits, so the get-or-create path — and the title
+  truncation that exists to stay inside `name` ≤ 255 bytes — is exercised against
+  a server that really refuses.
 
 ### Releases → release stories (direct engine)
 
@@ -888,7 +919,8 @@ and both are prescanned, in union.
   `GET /openapi.json` (the `import_source` property on the project-scoped
   `POST …/stories` schema); on a server that advertises it the prescan reads
   provenance back via the `GET /stories?import_source=github` list filter
-  (`fields=story_id,import_external_id,tasks_count,comment_count`). Because the
+  (`fields=story_id,import_external_id,tasks_count,comment_count`, plus `labels`
+  under `--include …,milestones`, which is the only rule that reads them). Because the
   server-side importer writes the same pair, cross-engine dedup is now
   **symmetric**: a direct-written story is skipped by a later server import and
   vice versa.

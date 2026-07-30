@@ -254,7 +254,9 @@ function openapiDoc(state) {
 
 /**
  * The real server's `too_long` rejection (observed 2026-07-17), or null when
- * the value fits (or no limit is configured).
+ * the value fits (or no limit is configured). Measured in UTF-8 bytes, like the
+ * `validate_length` it mirrors — Rust's `str::len()` — so the clamps that hold
+ * on ASCII are not silently let through on multi-byte text.
  *
  * @param {MockState} state
  * @param {"name" | "description" | "task_desc" | "comment_text"} field
@@ -263,7 +265,7 @@ function openapiDoc(state) {
  */
 function tooLong(state, field, value) {
   const max = (state.maxLengths ?? {})[field];
-  if (!max || value.length <= max) return null;
+  if (!max || Buffer.byteLength(value, "utf8") <= max) return null;
   return {
     status: 400,
     payload: {
@@ -713,6 +715,11 @@ function createEpic(state, projectId, body) {
       },
     };
   }
+  // `limits::EPIC_NAME` / `EPIC_DESCRIPTION`, validated before the conflict lookup like
+  // every other create — the reason the mapper truncates the title at all.
+  const overLong =
+    tooLong(state, "name", title) ?? tooLong(state, "description", String(body.description ?? ""));
+  if (overLong) return overLong;
   state.epics[projectId] ??= [];
   state.labels[projectId] ??= [];
   const key = title.toLowerCase();

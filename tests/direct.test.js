@@ -618,6 +618,8 @@ test("an unfiltered run that maps no story stays silent", async () => {
   }
 });
 
+// Asserted as the whole expected buffer, not as an absence: the earlier `!includes("warning:")`
+// stopped noticing any *new* milestone line the run might print.
 test("every milestone title matching keeps the run silent", async () => {
   const mock = await startMockServer();
   try {
@@ -629,7 +631,15 @@ test("every milestone title matching keeps the run silent", async () => {
       customization: customization({ milestones: ["v1.0", "v2.0"] }),
       github: { fetchAll: async () => milestonedRepo() },
     });
-    assert.ok(!stream.buf.includes("warning:"), stream.buf);
+    assert.equal(
+      stream.buf,
+      "fetching o/r from GitHub...\n" +
+        "note: 2 issue(s) carry a GitHub milestone this run does not import — pass --include " +
+        "issues,milestones to import each milestone as an epic. That groups only the issues " +
+        "the run itself imports; a story already in EAT is never re-labelled.\n" +
+        "scanning project 91 for already-imported stories...\n" +
+        "creating 2 stories...\n",
+    );
   } finally {
     await mock.close();
   }
@@ -1612,6 +1622,280 @@ test("the leaving-behind note ignores pull requests and honours --milestones", a
   } finally {
     await mock.close();
   }
+});
+
+/** @param {number} n @param {any} milestone @param {any} [extra] */
+function milestonedIssue(n, milestone, extra = {}) {
+  return {
+    number: n,
+    title: `issue ${n}`,
+    body: "",
+    state: "open",
+    created_at: `2024-01-${String(n).padStart(2, "0")}T00:00:00Z`,
+    labels: [],
+    milestone,
+    ...extra,
+  };
+}
+
+// The slice runs after the trim, so a 255-byte prefix can end in a space the server
+// then trims away — keying the plan on a title no listing will ever return.
+test("a 255-byte milestone title ending in whitespace is reused, never reported blocked", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const milestone = { title: `${"a".repeat(254)} b`, state: "open" };
+    /** @param {any[]} issues */
+    const run = async (issues) => {
+      const out = capture();
+      await runDirect(client, 91, "o", "r", {
+        included: ["issues", "milestones"],
+        stream: out,
+        github: { fetchAll: async () => ({ issues, comments: [], labels: [] }) },
+      });
+      return out.buf;
+    };
+
+    const first = await run([milestonedIssue(1, milestone)]);
+    assert.ok(!first.includes("warning: epic"), first);
+    assert.equal(mock.state.epics[91].length, 1);
+    const stored = mock.state.epics[91][0].epic_title;
+    assert.equal(Buffer.byteLength(stored, "utf8"), 254);
+
+    // Run 2 adds a new issue in the same milestone, so the epic is planned again and
+    // must be found in the listing — not POSTed, 409'd and mis-reported as blocked.
+    // (The over-long-title warning is expected on both runs and is not the subject.)
+    const second = await run([milestonedIssue(1, milestone), milestonedIssue(2, milestone)]);
+    assert.ok(!second.includes("warning: epic"), second);
+    assert.equal(mock.state.epics[91].length, 1);
+    const [, joined] = mock.state.stories[91];
+    assert.deepEqual(
+      joined.labels.map((/** @type {any} */ l) => l.label_name),
+      [stored],
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+// Re-running with the flag cannot repair an existing import: an import never updates,
+// so the already-imported stories keep no milestone label and can join no epic.
+test("adding --include milestones to a fully-imported project says so instead of nothing", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const milestone = { title: "V1", state: "open", due_on: "2024-12-01T00:00:00Z" };
+    const issues = [milestonedIssue(1, milestone), milestonedIssue(2, milestone)];
+    /** @param {string[]} included */
+    const run = async (included) => {
+      const out = capture();
+      await runDirect(client, 91, "o", "r", {
+        included,
+        stream: out,
+        github: { fetchAll: async () => ({ issues, comments: [], labels: [] }) },
+      });
+      return out.buf;
+    };
+
+    await run(["issues"]);
+    const retry = await run(["issues", "milestones"]);
+    assert.match(retry, /warning: 1 milestone\(s\) map to an epic this run does not create/);
+    assert.match(retry, /an import never re-labels a story already in EAT/);
+    assert.match(retry, /--include issues,milestones/);
+    // The pruning itself is deliberate: an epic no surviving story carries would be empty.
+    assert.deepEqual(mock.state.epics[91] ?? [], []);
+    assert.deepEqual(
+      mock.state.requests.filter((r) => r.includes("/epics")),
+      [],
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("an epic created without its already-imported members says the epic is partial", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const milestone = { title: "V1", state: "open" };
+    /** @param {string[]} included @param {any[]} issues */
+    const run = async (included, issues) => {
+      const out = capture();
+      await runDirect(client, 91, "o", "r", {
+        included,
+        stream: out,
+        github: { fetchAll: async () => ({ issues, comments: [], labels: [] }) },
+      });
+      return out.buf;
+    };
+
+    // Run 1 has no flag, so its two stories land unlabelled and can never join the epic.
+    await run(["issues"], [milestonedIssue(1, milestone), milestonedIssue(2, milestone)]);
+    const grown = await run(
+      ["issues", "milestones"],
+      [1, 2, 3].map((n) => milestonedIssue(n, milestone)),
+    );
+    assert.match(grown, /warning: 1 epic\(s\) this run creates are missing/);
+    assert.match(grown, /2 already-imported issue\(s\)/);
+    // The epic really does hold 1 of its 3 members, which is why it must be said.
+    assert.equal(mock.state.epics[91].length, 1);
+    const labelled = mock.state.stories[91].filter(
+      (/** @type {any} */ s) => (s.labels ?? []).length > 0,
+    );
+    assert.equal(labelled.length, 1);
+  } finally {
+    await mock.close();
+  }
+});
+
+// A story the earlier flagged run already labelled is in the epic; claiming otherwise
+// would put a warning on every healthy re-run of a milestoned project.
+test("members an earlier flagged run already labelled raise no partial warning", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const milestone = { title: "V1", state: "open" };
+    /** @param {any[]} issues */
+    const run = async (issues) => {
+      const out = capture();
+      await runDirect(client, 91, "o", "r", {
+        included: ["issues", "milestones"],
+        stream: out,
+        github: { fetchAll: async () => ({ issues, comments: [], labels: [] }) },
+      });
+      return out.buf;
+    };
+    await run([milestonedIssue(1, milestone), milestonedIssue(2, milestone)]);
+    const grown = await run([1, 2, 3].map((n) => milestonedIssue(n, milestone)));
+    assert.ok(!grown.includes("are missing"), grown);
+    // A fully-skipped re-run of the same project is silent for the same reason.
+    const again = await run([1, 2, 3].map((n) => milestonedIssue(n, milestone)));
+    assert.ok(!again.includes("does not create"), again);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a first-time run with every epic complete raises neither epic warning", async () => {
+  const mock = await startMockServer();
+  try {
+    const out = capture();
+    await runDirect(new EATClient(mock.baseUrl, "ea_token"), 91, "o", "r", {
+      included: ["issues", "milestones"],
+      stream: out,
+      github: { fetchAll: async () => epicRepo() },
+    });
+    assert.ok(!out.buf.includes("does not create"), out.buf);
+    assert.ok(!out.buf.includes("are missing"), out.buf);
+  } finally {
+    await mock.close();
+  }
+});
+
+// Advice followed verbatim must not drop a type the run already had.
+test("the leaving-behind note builds its --include from the run's own selection", async () => {
+  const mock = await startMockServer();
+  try {
+    const out = capture();
+    await runDirect(new EATClient(mock.baseUrl, "ea_token"), 91, "o", "r", {
+      included: ["issues", "releases"],
+      stream: out,
+      github: { fetchAll: async () => ({ ...epicRepo(), releases: [] }) },
+    });
+    assert.match(out.buf, /--include issues,milestones,releases/);
+    // ... and it must stop promising a repair a re-run cannot deliver.
+    assert.match(out.buf, /a story already in EAT is never re-labelled/);
+  } finally {
+    await mock.close();
+  }
+});
+
+// Every guard in warnTruncatedMilestones, one case each.
+test("the truncation warning fires on exactly the titles that are cut", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    /** @param {any} milestone @param {any} [customization] */
+    const run = async (milestone, customization = DEFAULT_CUSTOMIZATION) => {
+      const out = capture();
+      await runDirect(client, 91, "o", "r", {
+        included: ["issues", "milestones"],
+        dryRun: true,
+        stream: out,
+        customization,
+        github: {
+          fetchAll: async () => ({
+            issues: [milestonedIssue(1, milestone)],
+            comments: [],
+            labels: [],
+          }),
+        },
+      });
+      return out.buf;
+    };
+    /** @param {string} buf */
+    const warned = (buf) => buf.includes("longer than 255 bytes");
+
+    // `>`, not `>=`: exactly the column width fits.
+    assert.ok(!warned(await run({ title: "a".repeat(255) })));
+    assert.ok(warned(await run({ title: "a".repeat(256) })));
+    // The byte check trims first, like the title itself.
+    assert.ok(!warned(await run({ title: `${" ".repeat(300)}short${" ".repeat(300)}` })));
+    // Bytes, not UTF-16 units: 200 × é is 400 bytes but only 200 units.
+    assert.ok(warned(await run({ title: "é".repeat(200) })));
+    // A non-string title is not coerced into a 255-byte-plus string.
+    assert.ok(!warned(await run({ title: { toString: () => "a".repeat(300) } })));
+    assert.ok(!warned(await run({ title: null })));
+    // The warning respects the run's filters, exactly like the note it replaces.
+    assert.ok(
+      !warned(
+        await run({ title: "a".repeat(300) }, { ...DEFAULT_CUSTOMIZATION, states: "closed" }),
+      ),
+    );
+    assert.ok(
+      !warned(
+        await run({ title: "a".repeat(300) }, { ...DEFAULT_CUSTOMIZATION, milestones: ["other"] }),
+      ),
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+// The epic's backing label claims the name first, so the flag *lowers* the created
+// label total; a preview that reported the pre-flag total would lie about its own run.
+test("a GitHub label sharing a milestone's name folds into the epic in run and preview alike", async () => {
+  const repo = () => ({
+    issues: [milestonedIssue(1, { title: "V1", state: "open" }, { labels: [{ name: "V1" }] })],
+    comments: [],
+    labels: [{ name: "V1", color: "ff0000" }],
+  });
+  /** @type {Record<string, number>} */
+  const totals = {};
+  for (const included of [["issues"], ["issues", "milestones"]]) {
+    for (const dryRun of [false, true]) {
+      const mock = await startMockServer();
+      try {
+        const outcome = await runDirect(new EATClient(mock.baseUrl, "ea_token"), 91, "o", "r", {
+          included,
+          dryRun,
+          stream: capture(),
+          github: { fetchAll: async () => repo() },
+        });
+        totals[`${included.join(",")}|${dryRun}`] = outcome.importedLabels;
+      } finally {
+        await mock.close();
+      }
+    }
+  }
+  assert.deepEqual(totals, {
+    "issues|false": 1,
+    "issues|true": 1,
+    // With the flag the epic's backing label takes the name, so POST /labels 409s
+    // into *existing* and nothing is counted — in the preview too.
+    "issues,milestones|false": 0,
+    "issues,milestones|true": 0,
+  });
 });
 
 // The release marker is 14 bytes longer than the issue marker for the same repo, so
