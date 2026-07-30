@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  CLOSED_REASON_LABELS,
   clampPlan,
   contrastTextColor,
   customizationFlagsGiven,
@@ -10,6 +11,7 @@ import {
   FALLBACK_LIMITS,
   ISSUES_LEGEND,
   inferStoryType,
+  issuesLegend,
   mapRepo,
   matchesMilestones,
   normalizeHexColor,
@@ -17,7 +19,7 @@ import {
   parseCustomization,
   TRUNCATION_NOTICE,
 } from "../src/mapping.js";
-import { MAPPINGS } from "../src/mappings.js";
+import { MAPPINGS, renderLegend } from "../src/mappings.js";
 
 // --- inferStoryType — mirrors the server's common.rs rules -------------------
 
@@ -215,6 +217,16 @@ test("label dedup is case-insensitive with first-seen casing, like the server", 
   );
 });
 
+test("duplicate names on one issue collapse case-insensitively, first spelling winning", () => {
+  const plan = mapRepo({
+    issues: [ghIssue({ labels: [{ name: "Bug" }, { name: "bug" }, { name: "BUG" }] })],
+    comments: [],
+    labels: [],
+  });
+  assert.deepEqual(plan.stories[0].labels, ["Bug"]);
+  assert.deepEqual(plan.labels, [{ name: "Bug" }]);
+});
+
 test("repo-list color fill matches label names case-insensitively", () => {
   const plan = mapRepo({
     issues: [ghIssue({ labels: [{ name: "Docs" }] })],
@@ -311,6 +323,175 @@ test("a stray pull_request row in the input is dropped, not mapped", () => {
   assert.equal(plan.stories[0].external_id, "7");
 });
 
+// --- closed-reason labels (#31930) -------------------------------------------
+
+/** A closed issue with the given `state_reason`. */
+const closedWith = (/** @type {object} */ overrides) =>
+  ghIssue({ state: "closed", closed_at: "2026-02-03T04:05:06Z", ...overrides });
+
+// Abandoned work, not delivered work. `accepted` carries `done_state = 1` and counts
+// toward velocity; `rejected` carries `0` and does not — so billing a wontfix as
+// accepted credits the team for work nobody did. This mirrors the tracker's own
+// cross-connector rule (agile-tracker `import/common.rs` `map_status`, story #29516,
+// where `wontfix` and `duplicate` both map to `rejected`).
+for (const [reason, label] of /** @type {[string, string][]} */ ([
+  ["not_planned", "not-planned"],
+  ["duplicate", "duplicate"],
+])) {
+  test(`closed as ${reason} maps to rejected and earns the '${label}' label`, () => {
+    const plan = mapRepo({
+      issues: [closedWith({ state_reason: reason })],
+      comments: [],
+      labels: [],
+    });
+    const s = plan.stories[0];
+    assert.equal(s.current_state, "rejected");
+    assert.equal(s.completed_at, "2026-02-03T04:05:06Z");
+    assert.deepEqual(s.labels, [label]);
+    assert.deepEqual(plan.labels, [{ name: label }]);
+  });
+}
+
+test("a bug closed as duplicate is rejected, like a feature", () => {
+  const plan = mapRepo({
+    issues: [closedWith({ state_reason: "duplicate", labels: [{ name: "bug" }] })],
+    comments: [],
+    labels: [],
+  });
+  assert.equal(plan.stories[0].story_type, "bug");
+  assert.equal(plan.stories[0].current_state, "rejected");
+});
+
+// `rejected` is not in a chore's state set (agile-tracker `handlers/stories.rs`
+// `valid_states_for_type`: chores are unstarted/started/accepted only), so a chore
+// keeps `accepted` and the label carries the reason on its own.
+test("a chore closed as not_planned stays accepted — chores have no rejected state", () => {
+  const plan = mapRepo({
+    issues: [closedWith({ state_reason: "not_planned", labels: [{ name: "chore" }] })],
+    comments: [],
+    labels: [],
+  });
+  const s = plan.stories[0];
+  assert.equal(s.story_type, "chore");
+  assert.equal(s.current_state, "accepted");
+  assert.ok(s.labels.includes("not-planned"), "the reason label still lands");
+});
+
+test("--story-type chore forces the accepted fallback on a would-be feature", () => {
+  const plan = mapRepo(
+    { issues: [closedWith({ state_reason: "not_planned" })], comments: [], labels: [] },
+    { ...DEFAULT_CUSTOMIZATION, storyType: "chore" },
+  );
+  assert.equal(plan.stories[0].story_type, "chore");
+  assert.equal(plan.stories[0].current_state, "accepted");
+});
+
+for (const reason of [undefined, null, "completed", "reopened", "some_future_reason"]) {
+  test(`state_reason ${JSON.stringify(reason)} earns no label, mapping as if it were absent`, () => {
+    const withReason = mapRepo({
+      issues: [closedWith({ state_reason: reason })],
+      comments: [],
+      labels: [],
+    });
+    const v3 = mapRepo({ issues: [closedWith({})], comments: [], labels: [] });
+    assert.deepEqual(withReason, v3);
+    assert.deepEqual(withReason.stories[0].labels, []);
+    assert.deepEqual(withReason.labels, []);
+  });
+}
+
+// Only GitHub's exact lowercase spelling maps: a cased or non-string reason is
+// not a reason GitHub sends, so it must not be coerced into one.
+for (const reason of ["NOT_PLANNED", " not_planned ", ["not_planned"], 7]) {
+  test(`state_reason ${JSON.stringify(reason)} is not GitHub's spelling and adds no label`, () => {
+    const plan = mapRepo({
+      issues: [closedWith({ state_reason: reason })],
+      comments: [],
+      labels: [],
+    });
+    assert.deepEqual(plan.stories[0].labels, []);
+    assert.deepEqual(plan.labels, []);
+  });
+}
+
+test("the closed-reason table is exactly the two reasons CONTRACT.md documents", () => {
+  assert.deepEqual(
+    [...CLOSED_REASON_LABELS],
+    [
+      ["not_planned", "not-planned"],
+      ["duplicate", "duplicate"],
+    ],
+  );
+});
+
+test("a reason label is our classification, so it never feeds story-type inference", () => {
+  CLOSED_REASON_LABELS.set("wontfix", "known-defect");
+  try {
+    const plan = mapRepo({
+      issues: [closedWith({ state_reason: "wontfix" })],
+      comments: [],
+      labels: [],
+    });
+    assert.deepEqual(plan.stories[0].labels, ["known-defect"]);
+    assert.equal(plan.stories[0].story_type, "feature");
+  } finally {
+    CLOSED_REASON_LABELS.delete("wontfix");
+  }
+});
+
+test("state_reason on an open issue is not a close reason and adds no label", () => {
+  const plan = mapRepo({
+    issues: [ghIssue({ state: "open", state_reason: "not_planned" })],
+    comments: [],
+    labels: [],
+  });
+  assert.equal(plan.stories[0].current_state, "unstarted");
+  assert.deepEqual(plan.stories[0].labels, []);
+  assert.deepEqual(plan.labels, []);
+});
+
+test("a reason label dedups case-insensitively against the issue's own repo label", () => {
+  const plan = mapRepo({
+    issues: [
+      closedWith({ state_reason: "duplicate", labels: [{ name: "Duplicate", color: "cfd3d7" }] }),
+    ],
+    comments: [],
+    labels: [],
+  });
+  assert.deepEqual(plan.stories[0].labels, ["Duplicate"]);
+  assert.deepEqual(plan.labels, [
+    { name: "Duplicate", background_color_hex: "#cfd3d7", text_color_hex: "#000000" },
+  ]);
+});
+
+test("a reason label takes the repo list's color for that name — none is hard-coded", () => {
+  const plan = mapRepo({
+    issues: [closedWith({ state_reason: "not_planned" })],
+    comments: [],
+    labels: [{ name: "Not-Planned", color: "ffffff" }],
+  });
+  assert.deepEqual(plan.stories[0].labels, ["not-planned"]);
+  assert.deepEqual(plan.labels, [
+    { name: "not-planned", background_color_hex: "#ffffff", text_color_hex: "#000000" },
+  ]);
+});
+
+test("one reason label is created once across issues, first-seen casing winning", () => {
+  const plan = mapRepo({
+    issues: [
+      closedWith({ number: 1, state_reason: "duplicate", labels: [{ name: "Duplicate" }] }),
+      closedWith({ number: 2, state_reason: "duplicate" }),
+    ],
+    comments: [],
+    labels: [],
+  });
+  assert.deepEqual(
+    plan.labels.map((l) => l.name),
+    ["Duplicate"],
+  );
+  assert.deepEqual(plan.stories[1].labels, ["duplicate"]);
+});
+
 // --- MAPPINGS registry integration (AC: legend renders from the same table) --
 
 test("MAPPINGS issues legend is the mapping module's own table, byte-identical", () => {
@@ -320,6 +501,14 @@ test("MAPPINGS issues legend is the mapping module's own table, byte-identical",
     "labels → labels (with colors); issue-body checklists → story tasks",
     "comments → comments (body only)",
   ]);
+});
+
+test("the registry entry is the renderer's own output, not a parallel copy of it", () => {
+  assert.deepEqual(ISSUES_LEGEND, issuesLegend());
+  assert.deepEqual(ISSUES_LEGEND, issuesLegend("server", DEFAULT_CUSTOMIZATION));
+  for (const row of MAPPINGS.issues.legend) {
+    assert.ok(renderLegend(["issues"], "server").includes(`    - ${row}`));
+  }
 });
 
 // --- clampPlan — server length limits -----------------------------------------

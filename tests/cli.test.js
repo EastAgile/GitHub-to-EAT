@@ -1451,10 +1451,17 @@ test("on a terminal the confirm question survives a backspace edit", async () =>
   );
 });
 
-// AC6 — the no-flags output is the byte-for-byte text this story inherited.
-const GOLDEN_TAIL =
+// AC6 — the no-flags output is the byte-for-byte text this story inherited; only
+// the direct engine gained a line (#31930's closed-reason labels).
+const CLOSED_REASON_LINE =
+  "    - closed as not planned / duplicate → rejected (a chore → accepted, having no " +
+  "rejected state), plus a 'not-planned' / 'duplicate' label\n";
+
+/** @param {string} [reasonLine] */
+const goldenTail = (reasonLine = "") =>
   "  issues:\n" +
   "    - open issue → story (unstarted); closed issue → story (accepted, keeps the closed date)\n" +
+  reasonLine +
   "    - labels → labels (with colors); issue-body checklists → story tasks\n" +
   "    - comments → comments (body only)\n" +
   "Imports append to the project; re-runs skip already-imported items; nothing is updated or deleted.\n" +
@@ -1462,12 +1469,13 @@ const GOLDEN_TAIL =
   "Imported 2 stories (1 labels), skipped 1 (already imported), 0 error(s).\n" +
   "Board: https://eat.example/projects/91\n";
 
-for (const [label, argv, header] of /** @type {[string, string[], string][]} */ ([
-  ["server", [], "Import mapping (GitHub → East Agile Tracker):\n"],
+for (const [label, argv, header, tail] of /** @type {[string, string[], string, string][]} */ ([
+  ["server", [], "Import mapping (GitHub → East Agile Tracker):\n", goldenTail()],
   [
     "direct",
     ["--engine", "direct"],
     "Import mapping (GitHub → East Agile Tracker) [engine: direct]:\n",
+    goldenTail(CLOSED_REASON_LINE),
   ],
 ])) {
   test(`no customization flags: the ${label} engine's output is byte-identical`, async () => {
@@ -1483,7 +1491,7 @@ for (const [label, argv, header] of /** @type {[string, string[], string][]} */ 
           runDirect: async () => outcome({ importedStories: 2, importedLabels: 1, skipped: 1 }),
         });
         assert.equal(code, 0);
-        assert.equal(out.buf, header + GOLDEN_TAIL);
+        assert.equal(out.buf, header + tail);
         assert.equal(err.buf, "");
       }),
     );

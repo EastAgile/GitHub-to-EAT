@@ -1,6 +1,7 @@
 /**
  * The direct engine's default mapping profile: GitHub issue JSON in → EAT write-op plan out (pure, no HTTP).
- * Mirrors the server importer's issue mapping (agile-tracker github.rs + common.rs) so both engines classify identically.
+ * Mirrors the server importer's issue mapping (agile-tracker github.rs + common.rs) so both engines classify
+ * identically, with one deliberate exception: the closed-reason labels below, which the server never produces.
  */
 
 // Composed so `--customize` can drop the tasks fragment / comments line without
@@ -10,27 +11,29 @@ const STATE_LINE =
 const LABELS_LINE = "labels → labels (with colors)";
 const TASKS_SUFFIX = "; issue-body checklists → story tasks";
 const COMMENTS_LINE = "comments → comments (body only)";
-
-/**
- * The issues legend shown by the CLI. Lives next to the functions that implement each line
- * and is re-exported through the MAPPINGS registry, so legend and mapper can't drift apart.
- */
-export const ISSUES_LEGEND = [STATE_LINE, `${LABELS_LINE}${TASKS_SUFFIX}`, COMMENTS_LINE];
+// Direct-only: the server importer flattens every closed issue, so naming the
+// reason labels in its legend would promise output it does not produce.
+const CLOSED_REASON_LINE =
+  "closed as not planned / duplicate → rejected (a chore → accepted, having no rejected " +
+  "state), plus a 'not-planned' / 'duplicate' label";
 
 // Milestone titles are untrusted remote data; strip terminal control chars
 // (ESC/C0/C1/DEL) before they reach the terminal, in the wizard and the legend alike.
 export const stripControls = (/** @type {string} */ s) => s.replace(/\p{Cc}/gu, "");
 
 /**
- * The issues legend adjusted for a run's {@link Customization}: the checklist→tasks
- * fragment drops when `tasks` is off, the comments line drops when `comments` is off.
- * All-default answers reproduce {@link ISSUES_LEGEND} verbatim.
+ * The issues legend for a run, and the only place these lines are assembled. It describes the
+ * mapping, not the selection, so only `comments`/`tasks` — never `states` — can drop a line.
  *
- * @param {Customization} customization
+ * @param {import("./engine.js").Engine} [engine]
+ * @param {Customization | null} [customization]
  * @returns {string[]}
  */
-export function customizedIssuesLegend({ comments, tasks }) {
-  const lines = [STATE_LINE, tasks ? `${LABELS_LINE}${TASKS_SUFFIX}` : LABELS_LINE];
+export function issuesLegend(engine = "server", customization = null) {
+  const { comments, tasks } = customization ?? DEFAULT_CUSTOMIZATION;
+  const lines = [STATE_LINE];
+  if (engine === "direct") lines.push(CLOSED_REASON_LINE);
+  lines.push(tasks ? `${LABELS_LINE}${TASKS_SUFFIX}` : LABELS_LINE);
   if (comments) lines.push(COMMENTS_LINE);
   return lines;
 }
@@ -121,6 +124,12 @@ export const DEFAULT_CUSTOMIZATION = {
   comments: true,
   tasks: true,
 };
+
+/**
+ * The default (server-engine) issues legend the MAPPINGS registry re-exports — the renderer's
+ * own output, not a second copy of it, so the registry entry can never describe a dead path.
+ */
+export const ISSUES_LEGEND = issuesLegend();
 
 /** @type {Customization["states"][]} */
 const STATES = ["all", "open", "closed"];
@@ -323,13 +332,39 @@ function commentText(comment, sendDates) {
  * @property {string} [text_color_hex] contrast-picked when a background exists
  */
 
+/** The closed `state_reason` values that earn a label, by GitHub's spelling. */
+export const CLOSED_REASON_LABELS = new Map([
+  ["not_planned", "not-planned"],
+  ["duplicate", "duplicate"],
+]);
+
+/**
+ * Only GitHub's exact lowercase spellings map — an open row, `completed`, an absent or
+ * non-string reason and any reason GitHub adds later all leave that output identical to v3.
+ *
+ * @param {boolean} closed
+ * @param {unknown} stateReason
+ * @returns {string | null}
+ */
+function closedReasonLabel(closed, stateReason) {
+  if (!closed || typeof stateReason !== "string") return null;
+  return CLOSED_REASON_LABELS.get(stateReason) ?? null;
+}
+
+/**
+ * Story types whose state set includes `rejected` — the server's `valid_states_for_type`
+ * (`handlers/stories.rs`) gives a chore only unstarted/started/accepted, so a chore
+ * closed as wontfix has nowhere to land and keeps `accepted`.
+ */
+const REJECTABLE_TYPES = new Set(["feature", "bug"]);
+
 /**
  * @typedef {object} StoryOp one EAT story to create, with its sub-resources
  * @property {string} external_id the GitHub issue number, as a string
  * @property {string} name EAT's create-body title field
  * @property {string | null} description issue body, trimmed
  * @property {"bug" | "chore" | "feature"} story_type
- * @property {"unstarted" | "accepted"} current_state
+ * @property {"unstarted" | "accepted" | "rejected"} current_state
  * @property {string | null} created_at
  * @property {string | null} completed_at the GitHub closed date, kept
  * @property {string[]} labels label names on this story
@@ -377,14 +412,20 @@ export function mapRepo(
 
     /** @type {string[]} */
     const names = [];
-    for (const label of issue.labels ?? []) {
-      const name = String(label.name ?? "").trim();
-      if (!name) continue;
-      names.push(name);
+    /** @type {Set<string>} names already on this story, lowercased like labelOps */
+    const seen = new Set();
+    /** @param {unknown} rawName @param {unknown} rawColor */
+    const addLabel = (rawName, rawColor) => {
+      const name = String(rawName ?? "").trim();
+      if (!name) return;
       const key = name.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        names.push(name);
+      }
       if (!labelOps.has(key)) {
         const color =
-          (label.color ? normalizeHexColor(String(label.color)) : null) ?? repoColors.get(key);
+          (rawColor ? normalizeHexColor(String(rawColor)) : null) ?? repoColors.get(key);
         labelOps.set(
           key,
           color
@@ -392,20 +433,31 @@ export function mapRepo(
             : { name },
         );
       }
-    }
+    };
+    for (const label of issue.labels ?? []) addLabel(label.name, label.color);
 
     const title = String(issue.title ?? "");
-    const body = (issue.body ?? "").trim();
+    // Inferred before the reason label joins `names`: the type comes from the author's
+    // own labels, never from a label this mapper invented.
+    const storyType =
+      customization.storyType === "infer" ? inferStoryType(names, title) : customization.storyType;
+
     const closed = state === "closed";
+    // Abandoned work must stay out of velocity: `accepted` is a done state, `rejected`
+    // is not, so billing a wontfix as accepted credits work nobody did.
+    const abandoned = closedReasonLabel(closed, issue.state_reason);
+    addLabel(abandoned, null);
+    const closedState = abandoned && REJECTABLE_TYPES.has(storyType) ? "rejected" : "accepted";
+
+    const body = (issue.body ?? "").trim();
     const story = {
       external_id: String(issue.number),
       name: title,
       description: body || null,
-      story_type:
-        customization.storyType === "infer"
-          ? inferStoryType(names, title)
-          : customization.storyType,
-      current_state: /** @type {"unstarted" | "accepted"} */ (closed ? "accepted" : "unstarted"),
+      story_type: storyType,
+      current_state: /** @type {"unstarted" | "accepted" | "rejected"} */ (
+        closed ? closedState : "unstarted"
+      ),
       created_at: issue.created_at ?? null,
       completed_at: (closed ? issue.closed_at : null) ?? null,
       labels: names,
