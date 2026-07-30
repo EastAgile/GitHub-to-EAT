@@ -412,24 +412,33 @@ deliberate exceptions, the closed-reason labels, the org issue type and the
 sub-issue cross-links below, which only the direct engine produces:
 
 - **State** — open issue → `unstarted` story; closed → `accepted`, keeping the
-  GitHub closed date (`completed_at`).
-- **Closed reason** (**direct engine only** — the server importer flattens every
-  closed issue and emits no such label) — a closed issue's `state_reason` stays
-  out of the state (closed is closed) and rides a label instead, so a board
-  filter can tell closed-as-done from closed-as-wontfix: `not_planned` → a
-  `not-planned` label, `duplicate` → a `duplicate` label, matched on GitHub's
-  exact lowercase spelling. The mapping is total — `completed`, `reopened`, an
-  absent or non-string reason, a differently-cased one, any reason GitHub adds
-  later, and a `state_reason` on an open row all add no label, leaving that
-  output identical to v3. Reason labels go through the label pipeline below (no
+  GitHub closed date (`completed_at`) — except for the abandoned closed reasons
+  below, which land `rejected`.
+- **Closed reason** (**direct engine only** — the server importer never reads
+  `state_reason` and flattens every closed issue to `accepted`) — a closed
+  issue's reason decides both the state and a label. `not_planned` and
+  `duplicate` are *abandoned* work, not delivered work: they land `rejected`
+  (keeping the closed date) and earn a `not-planned` / `duplicate` label, so a
+  board filter can still tell closed-as-done from closed-as-wontfix. This
+  follows the tracker's own cross-connector rule — `import/common.rs`'s
+  `map_status` maps `wontfix` and `duplicate` to `rejected` for every other
+  source (story #29516), and `rejected` is seeded `done_state = 0` where
+  `accepted` is `1`, so accepting a wontfix would credit the team's velocity
+  with work nobody did. **A chore is the exception**: the server's
+  `valid_states_for_type` gives chores only `unstarted`/`started`/`accepted`, so
+  a chore closed as `not_planned` stays `accepted` and carries the label alone.
+  Matching is on GitHub's exact lowercase spelling. The mapping is total —
+  `completed`, `reopened`, an absent or non-string reason, a differently-cased
+  one, any reason GitHub adds later, and a `state_reason` on an open row all add
+  no label and leave the state `accepted`. Reason labels go through the label pipeline below (no
   hard-coded color, case-insensitive dedup), so an issue already carrying a
   same-named repo label keeps that label's casing and color and gains nothing.
   The label is this mapper's own classification, not the author's, so it is
   added *after* type inference has read the issue's labels and can never change
-  a story's type. Only issues imported after this landed carry reason labels —
-  an import appends and never updates, and "Marker dedup" below skips stories
-  already imported, so existing boards keep no reason labels and no re-label
-  pass exists to add them.
+  a story's type. Only issues imported after this landed carry a reason label or
+  the `rejected` state — an import appends and never updates, and "Marker dedup"
+  below skips stories already imported, so on an existing board every closed
+  issue keeps the `accepted` it was given and no repair pass exists.
 - **Issue type** (**direct engine only** — the server importer's issue struct has
   no `type` field, so serde drops it and the server always infers) — GitHub
   organizations can define issue types; every REST issue row from an org repo
