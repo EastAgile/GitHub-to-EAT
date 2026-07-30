@@ -1454,7 +1454,8 @@ test("on a terminal the confirm question survives a backspace edit", async () =>
 // AC6 — the no-flags output is the byte-for-byte text this story inherited; only the
 // direct engine gained lines (#31930's closed-reason labels, #31927's issue types).
 const CLOSED_REASON_LINE =
-  "    - closed as not planned / duplicate → accepted, plus a 'not-planned' / 'duplicate' label\n";
+  "    - closed as not planned / duplicate → rejected (a chore → accepted, having no " +
+  "rejected state), plus a 'not-planned' / 'duplicate' label\n";
 const ISSUE_TYPE_LINE =
   "    - issue type Bug → bug; Feature / Enhancement / Task → feature; Chore → chore; " +
   "otherwise labels + title decide\n";

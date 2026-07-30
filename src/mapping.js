@@ -15,7 +15,8 @@ const COMMENTS_LINE = "comments → comments (body only)";
 // Direct-only: the server importer flattens every closed issue, so naming the
 // reason labels in its legend would promise output it does not produce.
 const CLOSED_REASON_LINE =
-  "closed as not planned / duplicate → accepted, plus a 'not-planned' / 'duplicate' label";
+  "closed as not planned / duplicate → rejected (a chore → accepted, having no rejected " +
+  "state), plus a 'not-planned' / 'duplicate' label";
 /**
  * Direct-only for the same reason: the server's issue struct has no `type` field. Built from
  * {@link ISSUE_TYPE_STORY_TYPES} (a function, so the table can stay beside its lookup) so a
@@ -412,12 +413,19 @@ function closedReasonLabel(closed, stateReason) {
 }
 
 /**
+ * Story types whose state set includes `rejected` — the server's `valid_states_for_type`
+ * (`handlers/stories.rs`) gives a chore only unstarted/started/accepted, so a chore
+ * closed as wontfix has nowhere to land and keeps `accepted`.
+ */
+const REJECTABLE_TYPES = new Set(["feature", "bug"]);
+
+/**
  * @typedef {object} StoryOp one EAT story to create, with its sub-resources
  * @property {string} external_id the GitHub issue number, as a string
  * @property {string} name EAT's create-body title field
  * @property {string | null} description issue body, trimmed
  * @property {"bug" | "chore" | "feature"} story_type
- * @property {"unstarted" | "accepted"} current_state
+ * @property {"unstarted" | "accepted" | "rejected"} current_state
  * @property {string | null} created_at
  * @property {string | null} completed_at the GitHub closed date, kept
  * @property {string[]} labels label names on this story
@@ -498,9 +506,11 @@ export function mapRepo(
         : customization.storyType;
 
     const closed = state === "closed";
-    // Closed is closed, so the state stays `accepted`; the label is what lets a
-    // board filter tell closed-as-done from closed-as-wontfix.
-    addLabel(closedReasonLabel(closed, issue.state_reason), null);
+    // Abandoned work must stay out of velocity: `accepted` is a done state, `rejected`
+    // is not, so billing a wontfix as accepted credits work nobody did.
+    const abandoned = closedReasonLabel(closed, issue.state_reason);
+    addLabel(abandoned, null);
+    const closedState = abandoned && REJECTABLE_TYPES.has(storyType) ? "rejected" : "accepted";
 
     const body = (issue.body ?? "").trim();
     const story = {
@@ -508,7 +518,9 @@ export function mapRepo(
       name: title,
       description: body || null,
       story_type: storyType,
-      current_state: /** @type {"unstarted" | "accepted"} */ (closed ? "accepted" : "unstarted"),
+      current_state: /** @type {"unstarted" | "accepted" | "rejected"} */ (
+        closed ? closedState : "unstarted"
+      ),
       created_at: issue.created_at ?? null,
       completed_at: (closed ? issue.closed_at : null) ?? null,
       labels: names,

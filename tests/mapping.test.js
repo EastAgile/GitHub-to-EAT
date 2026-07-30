@@ -331,21 +331,79 @@ test("a stray pull_request row in the input is dropped, not mapped", () => {
 const closedWith = (/** @type {object} */ overrides) =>
   ghIssue({ state: "closed", closed_at: "2026-02-03T04:05:06Z", ...overrides });
 
+// Abandoned work, not delivered work. `accepted` carries `done_state = 1` and counts
+// toward velocity; `rejected` carries `0` and does not — so billing a wontfix as
+// accepted credits the team for work nobody did. This mirrors the tracker's own
+// cross-connector rule (agile-tracker `import/common.rs` `map_status`, story #29516,
+// where `wontfix` and `duplicate` both map to `rejected`).
 for (const [reason, label] of /** @type {[string, string][]} */ ([
   ["not_planned", "not-planned"],
   ["duplicate", "duplicate"],
 ])) {
-  test(`closed as ${reason} stays accepted and earns the '${label}' label`, () => {
+  test(`closed as ${reason} maps to rejected and earns the '${label}' label`, () => {
     const plan = mapRepo({
       issues: [closedWith({ state_reason: reason })],
       comments: [],
       labels: [],
     });
     const s = plan.stories[0];
-    assert.equal(s.current_state, "accepted");
+    assert.equal(s.current_state, "rejected");
     assert.equal(s.completed_at, "2026-02-03T04:05:06Z");
     assert.deepEqual(s.labels, [label]);
     assert.deepEqual(plan.labels, [{ name: label }]);
+  });
+}
+
+test("a bug closed as duplicate is rejected, like a feature", () => {
+  const plan = mapRepo({
+    issues: [closedWith({ state_reason: "duplicate", labels: [{ name: "bug" }] })],
+    comments: [],
+    labels: [],
+  });
+  assert.equal(plan.stories[0].story_type, "bug");
+  assert.equal(plan.stories[0].current_state, "rejected");
+});
+
+// `rejected` is not in a chore's state set (agile-tracker `handlers/stories.rs`
+// `valid_states_for_type`: chores are unstarted/started/accepted only), so a chore
+// keeps `accepted` and the label carries the reason on its own.
+test("a chore closed as not_planned stays accepted — chores have no rejected state", () => {
+  const plan = mapRepo({
+    issues: [closedWith({ state_reason: "not_planned", labels: [{ name: "chore" }] })],
+    comments: [],
+    labels: [],
+  });
+  const s = plan.stories[0];
+  assert.equal(s.story_type, "chore");
+  assert.equal(s.current_state, "accepted");
+  assert.ok(s.labels.includes("not-planned"), "the reason label still lands");
+});
+
+test("--story-type chore forces the accepted fallback on a would-be feature", () => {
+  const plan = mapRepo(
+    { issues: [closedWith({ state_reason: "not_planned" })], comments: [], labels: [] },
+    { ...DEFAULT_CUSTOMIZATION, storyType: "chore" },
+  );
+  assert.equal(plan.stories[0].story_type, "chore");
+  assert.equal(plan.stories[0].current_state, "accepted");
+});
+
+// The org's issue type now decides the type, so it also decides whether an abandoned
+// close can reject at all — the two rules meet here and nowhere else.
+for (const [typeName, storyType, state] of /** @type {[string, string, string][]} */ ([
+  ["Task", "feature", "rejected"],
+  ["Bug", "bug", "rejected"],
+  ["Chore", "chore", "accepted"],
+])) {
+  test(`an issue typed ${typeName} closed as not_planned is ${storyType} and lands ${state}`, () => {
+    const plan = mapRepo({
+      issues: [closedWith({ state_reason: "not_planned", type: { name: typeName } })],
+      comments: [],
+      labels: [],
+    });
+    assert.equal(plan.stories[0].story_type, storyType);
+    assert.equal(plan.stories[0].current_state, state);
+    assert.ok(plan.stories[0].labels.includes("not-planned"));
   });
 }
 
