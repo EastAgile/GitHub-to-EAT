@@ -1,9 +1,9 @@
 /**
  * The direct engine's default mapping profile: GitHub issue JSON in → EAT write-op plan out (pure, no HTTP).
  * Mirrors the server importer's issue mapping (agile-tracker github.rs + common.rs) so both engines classify
- * identically, with three deliberate exceptions the server never produces: the closed-reason labels, the
- * org issue-type field (the server's `GhIssue` has no `type`, so serde drops it), and the sub-issue
- * cross-link block.
+ * identically, with three deliberate exceptions the server never produces: the closed-reason state and
+ * labels, the org issue-type field (the server's `GhIssue` has no `type`, so serde drops it), and the
+ * sub-issue cross-link block.
  */
 
 // Composed so `--customize` can drop the tasks fragment / comments line without

@@ -436,8 +436,20 @@ falling back to the `x-ratelimit-reset` time); 401 → token rejected.
 The direct engine maps fetched GitHub JSON to an EAT write-op plan client-side
 (`src/mapping.js` — pure functions, no HTTP), mirroring the server importer's
 issue mapping so both engines classify the same repo identically — with three
-deliberate exceptions, the closed-reason labels, the org issue type and the
-sub-issue cross-links below, which only the direct engine produces:
+deliberate exceptions, the closed-reason state and labels, the org issue type
+and the sub-issue cross-links below, which only the direct engine produces.
+
+Each exception exists because the server's `GhIssue` never deserializes the
+field (or, for sub-issues, never requests it), not because the two engines
+disagree about the mapping. Each is tracked for the server side, after which
+the exception list should shrink to nothing: tracker
+[#33135](https://eastagiletracker.com/projects/5/stories/33135) (closed
+reason), [#33136](https://eastagiletracker.com/projects/5/stories/33136)
+(issue type), [#33137](https://eastagiletracker.com/projects/5/stories/33137)
+(sub-issues). Everything below that is *not* on that list is mirrored, and
+`tests/parity.test.js` holds each mirrored path to the expectations the
+server's own Rust unit tests assert, so the claim fails a gate rather than
+drifting in prose.
 
 - **State** — open issue → `unstarted` story; closed → `accepted`, keeping the
   GitHub closed date (`completed_at`) — except for the abandoned closed reasons
