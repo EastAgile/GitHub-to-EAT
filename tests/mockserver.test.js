@@ -8,8 +8,26 @@ test("meta and project via the client", async () => {
   const mock = await startMockServer();
   try {
     const client = new EATClient(mock.baseUrl, "ea_token");
-    assert.ok("story_types" in (await client.getMeta()));
+    const meta = await client.getMeta();
+    assert.ok("auth" in meta && "transitions" in meta);
+    assert.equal("story_types" in meta, false);
     assert.equal((await client.getProject(91)).project_title, "Mock Project");
+  } finally {
+    await mock.close();
+  }
+});
+
+// The create advertises `estimate` (a scale label, probed 2026-07-29), so the mock has to
+// round-trip it — otherwise "the writer never sends it" is proved against a mock that
+// could not have stored it either way.
+test("the story create round-trips an estimate, and omits it when unsent", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const withEstimate = await client.createStory(91, { name: "sized", estimate: "3" }, "k1");
+    assert.equal(withEstimate.estimate, "3");
+    const without = await client.createStory(91, { name: "unsized" }, "k2");
+    assert.equal("estimate" in without, false);
   } finally {
     await mock.close();
   }

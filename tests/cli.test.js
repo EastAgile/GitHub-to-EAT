@@ -1296,7 +1296,7 @@ test("a flag-driven run renders the Customized: block, and composes with --dry-r
   assert.equal(run.code, 0);
   assert.ok(run.stdout.includes("Customized:"));
   assert.ok(run.stdout.includes("issue states: open only"));
-  assert.ok(run.stdout.includes("story type: all bug"));
+  assert.ok(run.stdout.includes("story type: all issues bug"));
   assert.ok(run.stdout.includes("comments: not imported"));
   assert.ok(run.stdout.includes("Dry run plan for o/r into project 91"));
   assert.ok(run.stdout.includes("would import 1 stories"));

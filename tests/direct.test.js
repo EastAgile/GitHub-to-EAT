@@ -970,10 +970,13 @@ test("the releases fetch is asked for only when --include names it", async () =>
       stream: capture(),
       github,
     });
+    // No `included` at all: the default must select nothing, so a caller that never
+    // opts in cannot touch /releases — the request count of a default run is fixed.
+    await runDirect(client, 91, "o", "r", { dryRun: true, stream: capture(), github });
   } finally {
     await mock.close();
   }
-  assert.deepEqual(calls, [{ releases: false }, { releases: true }]);
+  assert.deepEqual(calls, [{ releases: false }, { releases: true }, { releases: false }]);
 });
 
 test("releases import as release stories carrying the server importer's provenance key", async () => {
@@ -1008,8 +1011,9 @@ test("releases import as release stories carrying the server importer's provenan
     // `release` stories never bear points, so no estimate is ever sent.
     assert.equal(draft.estimate, undefined);
     assert.equal(published.estimate, undefined);
-    // Every type written is one the server advertises on GET /meta.
-    for (const row of rows) assert.ok(mock.state.meta.story_types.includes(row.story_type));
+    // `release` is a seeded, globally-scoped story type — GET /story_types lists it
+    // with allow_points:false, and /meta's workflow graph has a `release` entry.
+    for (const row of rows) assert.ok(row.story_type in mock.state.meta.transitions);
   } finally {
     await mock.close();
   }
@@ -1169,7 +1173,8 @@ test("a filter that matches no issue does not claim 'nothing to import' when rel
   } finally {
     await mock.close();
   }
-  assert.match(withReleases.buf, /no issues to import; the run still imports 2 release\(s\)/);
+  // "up to": the count is pre-prescan, so a re-run may already hold some of them.
+  assert.match(withReleases.buf, /no issues to import; the run would import up to 2 release\(s\)/);
   assert.doesNotMatch(withReleases.buf, /nothing to import/);
   // The issues-only wording is unchanged.
   assert.match(issuesOnly.buf, /nothing to import\./);
@@ -1198,7 +1203,7 @@ test("a run whose releases are all unmappable is back to 'nothing to import'", a
     await mock.close();
   }
   assert.match(stream.buf, /nothing to import\./);
-  assert.doesNotMatch(stream.buf, /the run still imports/);
+  assert.doesNotMatch(stream.buf, /the run would import up to/);
 });
 
 test("a clamp warning names a release as a release, not as an issue", async () => {
@@ -1221,4 +1226,44 @@ test("a clamp warning names a release as a release, not as an issue", async () =
   }
   assert.match(stream.buf, /warning: release #100: description truncated/);
   assert.doesNotMatch(stream.buf, /issue #release-100/);
+});
+
+// The release marker is 14 bytes longer than the issue marker for the same repo, so
+// runDirect must reserve the *per-op* one. Reserving the issue form would clear
+// clampPlan and still 400 `too_long` on the real write, which the clamp guarantee
+// says is impossible — hence non-dry-run, against a limit-publishing server.
+test("a release's over-long notes are clamped against its own marker, end to end", async () => {
+  const limit = 400;
+  const mock = await startMockServer(makeState({ maxLengths: { description: limit } }));
+  const stream = capture();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const [published] = releaseRows();
+    published.body = "x".repeat(limit * 2);
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues", "releases"],
+      stream,
+      github: {
+        fetchAll: async () => ({ issues: [], comments: [], labels: [], releases: [published] }),
+      },
+    });
+    assert.deepEqual(result.errors, []);
+    assert.equal(result.importedStories, 1);
+
+    const [row] = mock.state.stories[91];
+    assert.equal(row.story_type, "release");
+    const marker = markerFor("o", "r", "release-100");
+    assert.ok(
+      row.description.endsWith(marker),
+      `marker survived, got ${row.description.slice(-80)}`,
+    );
+    assert.ok(
+      Buffer.byteLength(row.description, "utf8") <= limit,
+      `within the server limit, got ${Buffer.byteLength(row.description, "utf8")}`,
+    );
+    // The shorter issue marker would have fit too; only the release form proves the wiring.
+    assert.ok(marker.length > markerFor("o", "r", "100").length);
+  } finally {
+    await mock.close();
+  }
 });

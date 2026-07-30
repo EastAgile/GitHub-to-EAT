@@ -15,6 +15,7 @@ import {
   clampPlan,
   DEFAULT_CUSTOMIZATION,
   describeFilters,
+  describeOp,
   FALLBACK_LIMITS,
   hasMilestoneFilter,
   ISSUE_TYPE_NAMES,
@@ -77,7 +78,8 @@ function warnFiltersMatchNothing({ issues, releases }, customization, stream) {
     stream?.write(
       `warning: no fetched issue matches this run's filters (${filters.join("; ")}) — ` +
         (stillImports
-          ? `no issues to import; the run still imports ${stillImports} release(s).\n`
+          ? // "up to": this runs before the prescan, so some of those may already be imported.
+            `no issues to import; the run would import up to ${stillImports} release(s).\n`
           : "nothing to import.\n"),
     );
   }
@@ -139,7 +141,7 @@ function warnUnrecognisedIssueTypes({ issues }, customization, stream) {
  * @param {number} projectId
  * @param {string} owner
  * @param {string} repo
- * @param {{ token?: string, included: string[], dryRun?: boolean,
+ * @param {{ token?: string, included?: string[], dryRun?: boolean,
  *   stream?: import("./progress.js").OutStream, runId?: string,
  *   customization?: import("./mapping.js").Customization,
  *   customize?: (fetched: { issues: any[], comments: any[], labels: any[] })
@@ -221,7 +223,7 @@ export async function runDirect(client, projectId, owner, repo, options) {
     const commentCount = Number(row.comment_count ?? 0);
     if (tasksCount < op.tasks.length || commentCount < op.comments.length) {
       stream?.write(
-        `warning: issue #${op.external_id} has fewer tasks/comments in EAT than on GitHub ` +
+        `warning: ${describeOp(op.external_id)} has fewer tasks/comments in EAT than on GitHub ` +
           `(tasks ${tasksCount}/${op.tasks.length}, comments ${commentCount}/${op.comments.length}) — ` +
           "an earlier run may have been interrupted, or the issue changed since import; " +
           "it stays skipped — delete that story in EAT and re-run to repair.\n",

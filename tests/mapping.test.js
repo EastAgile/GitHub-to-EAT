@@ -21,6 +21,7 @@ import {
   normalizeHexColor,
   parseChecklist,
   parseCustomization,
+  releaseExternalId,
   storyTypeFromIssueType,
   TRUNCATION_NOTICE,
 } from "../src/mapping.js";
@@ -1434,6 +1435,13 @@ test("the story title is the tag, never the release's own name", () => {
   assert.equal(untitled.name, "v2.0.0");
 });
 
+// github.rs:885 is `title: release.tag_name` — no trim — and git refnames forbid
+// whitespace anyway, so trimming here would be the only cross-engine title drift.
+test("the tag is the title byte-for-byte, untrimmed like the server", () => {
+  const [op] = mapRepo(releaseRepo(releaseRow({ tag_name: "  v2.0.0  " }))).stories;
+  assert.equal(op.name, "  v2.0.0  ");
+});
+
 // github.rs:877-882 sends drafts to the backlog; it never skips them.
 test("a draft release imports to the backlog rather than being skipped", () => {
   const [op] = mapRepo(releaseRepo(releaseRow({ draft: true, tag_name: "v2.1.0-draft" }))).stories;
@@ -1448,6 +1456,72 @@ test("a published:false release with no publish date is a backlog story too", ()
   const [op] = mapRepo(releaseRepo(releaseRow({ published_at: null }))).stories;
   assert.equal(op.current_state, "unstarted");
   assert.equal(op.completed_at, null);
+});
+
+// github.rs:869-876 runs both dates through parse_source_datetime, which yields None on
+// anything it cannot read — so "published" means the date is real. The direct engine has a
+// second, stricter bound the importer does not: it *forwards* the value into
+// `POST /stories`, whose created_at/completed_at are `Option<DateTime<Utc>>` and so
+// deserialize RFC3339 only. Anything else is a 400 that aborts the whole run.
+// `Date.parse` cannot be the test here: it reads "0", "-1", "12345" and "2026" as years.
+const UNSENDABLE_DATES = [
+  "",
+  "   ",
+  0,
+  false,
+  "not-a-date",
+  12345,
+  {},
+  [],
+  "0",
+  "-1",
+  "12345",
+  "2026",
+  "Jul 8 2026",
+  "2026-07-08", // date-only: kept by the importer's rung 6, rejected by the create
+  "2026-07-08 11:59:40", // naive, no offset
+  "2026-07-08T11:59:40", // no zone designator
+  "2026-13-45T00:00:00Z", // syntactically RFC3339, not a real instant
+  "2026-02-30T00:00:00Z", // Date.parse rolls this into March; chrono refuses it
+  " 2026-07-08T11:59:40Z", // padded: chrono does not trim, so this is not sendable either
+  "2026-07-08T11:59:40Z ",
+  "on 2026-07-08T11:59:40Z", // anchors: a timestamp inside prose is not a timestamp
+  "2026-07-08T11:59:40Z or so",
+  "2026-07-08 11:59:40Z", // space separator: Date.parse takes it, RFC3339 needs the T
+  "2026-07-08T25:00:00Z", // in-shape but out-of-range time components — the day check
+  "2026-07-08T12:60:00Z", // only covers Y/M/D, so these rest on the parse check
+  "2026-07-08T11:59:61Z",
+  ["2026-07-08T11:59:40Z"], // String()s to a valid stamp; forwarding the array is a 400
+];
+
+test("a published_at the create would reject is unpublished, not an unsendable date", () => {
+  for (const published_at of UNSENDABLE_DATES) {
+    const [op] = mapRepo(releaseRepo(releaseRow({ published_at }))).stories;
+    assert.equal(op.current_state, "unstarted", `published_at ${JSON.stringify(published_at)}`);
+    assert.equal(op.completed_at, null, `published_at ${JSON.stringify(published_at)}`);
+  }
+});
+
+test("a created_at the create would reject is dropped, not forwarded to the write", () => {
+  for (const created_at of UNSENDABLE_DATES) {
+    const [op] = mapRepo(releaseRepo(releaseRow({ created_at }))).stories;
+    assert.equal(op.created_at, null, `created_at ${JSON.stringify(created_at)}`);
+  }
+});
+
+test("every RFC3339 form GitHub emits is kept verbatim, offset and all", () => {
+  for (const date of [
+    "2026-07-08T11:59:40Z",
+    "2026-07-08T11:59:40+07:00",
+    "2026-07-08T11:59:40-05:30",
+    "2026-07-08T11:59:40.123Z",
+    "2028-02-29T00:00:00Z", // a real leap day must survive the calendar-day check
+  ]) {
+    const [op] = mapRepo(releaseRepo(releaseRow({ created_at: date, published_at: date }))).stories;
+    assert.equal(op.created_at, date, date);
+    assert.equal(op.completed_at, date, date);
+    assert.equal(op.current_state, "accepted", date);
+  }
 });
 
 test("empty or whitespace-only release notes map to a null description", () => {
@@ -1492,7 +1566,20 @@ test("the issue-state and milestone filters leave releases alone", () => {
 
 test("mappableRelease rejects rows that could not be written or deduped", () => {
   assert.equal(mappableRelease(releaseRow()), true);
-  for (const id of [0, -1, 1.5, "100", null, undefined]) {
+  assert.equal(mappableRelease(releaseRow({ id: Number.MAX_SAFE_INTEGER })), true);
+  for (const id of [
+    0,
+    -1,
+    1.5,
+    "100",
+    null,
+    undefined,
+    1e21,
+    Number.MAX_SAFE_INTEGER + 1,
+    Number.MAX_SAFE_INTEGER + 2,
+    Number.MAX_VALUE,
+    Number.POSITIVE_INFINITY,
+  ]) {
     assert.equal(mappableRelease(releaseRow({ id })), false, `id ${JSON.stringify(id)}`);
   }
   for (const tag_name of ["", "   ", null, undefined, 42]) {
@@ -1503,6 +1590,29 @@ test("mappableRelease rejects rows that could not be written or deduped", () => 
     );
   }
   assert.equal(mappableRelease(null), false);
+});
+
+// The two ways an unsafe id breaks the machinery, pinned so the guard can't relax
+// back to Number.isInteger: at 1e21 String() goes exponential, and past 2^53 two
+// GitHub ids collapse onto one JS number — one external_id, one Idempotency-Key.
+test("an unsafe id is rejected because it cannot key a release", () => {
+  assert.equal(releaseExternalId(1e21), "release-1e+21");
+  assert.equal(markerExternalId(markerFor("o", "r", "release-1e+21"), "o", "r"), null);
+  assert.equal(describeOp("release-1e+21"), "issue #release-1e+21");
+
+  assert.equal(
+    releaseExternalId(Number.MAX_SAFE_INTEGER + 1),
+    releaseExternalId(Number.MAX_SAFE_INTEGER + 2),
+  );
+});
+
+test("every id mappableRelease admits round-trips through its marker", () => {
+  for (const id of [1, 100, 2 ** 31, Number.MAX_SAFE_INTEGER]) {
+    const key = releaseExternalId(id);
+    assert.equal(mappableRelease(releaseRow({ id })), true, `id ${id}`);
+    assert.equal(markerExternalId(markerFor("o", "r", key), "o", "r"), key, `id ${id}`);
+    assert.equal(describeOp(key), `release #${id}`);
+  }
 });
 
 test("an unmappable release is dropped from the plan, not written half-formed", () => {

@@ -70,7 +70,7 @@ test("renderLegend names every non-default choice in a Customized block", () => 
   assert.match(legend, /^Customized:$/m);
   assert.match(legend, /- issue states: closed only/);
   assert.match(legend, /- milestones: v1\.0, v2\.0/);
-  assert.match(legend, /- story type: all bug/);
+  assert.match(legend, /- story type: all issues bug/);
   assert.match(legend, /- comments: not imported/);
   assert.match(legend, /- tasks: not imported/);
 });
@@ -180,7 +180,7 @@ test("a fixed --story-type drops the issue-type line but keeps the closed-reason
     });
     assert.doesNotMatch(legend, /issue type/);
     assert.match(legend, /closed as not planned/);
-    assert.match(legend, new RegExp(`- story type: all ${storyType}`));
+    assert.match(legend, new RegExp(`- story type: all issues ${storyType}`));
   }
 });
 

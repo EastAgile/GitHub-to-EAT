@@ -223,6 +223,27 @@ test("a release-shaped marker mid-body is not a marker", () => {
   assert.equal(markerExternalId(quoted, "o", "r"), null);
 });
 
+// Both regexes are anchored at both ends. Without `$` a description whose last line
+// merely *starts* with a marker false-skips that row forever; without `^` a last
+// line that quotes one mid-sentence does the same. The mid-body tests above never
+// reach either anchor — the last-line slice already rejects those.
+test("a marker line with a suffix or a prefix is not a marker, in either form", () => {
+  for (const externalId of ["7", "release-7"]) {
+    const marker = markerFor("o", "r", externalId);
+    for (const line of [
+      `${marker} (see the changelog)`,
+      `${marker}.`,
+      `see ${marker}`,
+      `> ${marker}`,
+    ]) {
+      assert.equal(markerExternalId(line, "o", "r"), null, line);
+      assert.equal(markerExternalId(`notes\n\n${line}`, "o", "r"), null, line);
+    }
+    // The bare line still reads, so the assertions above pin the anchors, not the parse.
+    assert.equal(markerExternalId(marker, "o", "r"), externalId);
+  }
+});
+
 test("applyDedup stamps release markers and skips already-imported releases", () => {
   const plan = /** @type {import("../src/writer.js").WritePlan} */ ({
     labels: [],

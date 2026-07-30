@@ -988,3 +988,10 @@ test("the releases listing is page-bounded, so an endless rel=next cannot spin",
   );
   assert.equal(pages, MAX_RELEASE_PAGES);
 });
+
+// The mechanism above is pinned against the constant; the documented *value* is
+// the server importer's own `MAX_PAGES` (github.rs:76), so drift would start
+// refusing repos the server accepts.
+test("the release page cap is the server importer's MAX_PAGES", () => {
+  assert.equal(MAX_RELEASE_PAGES, 200);
+});
