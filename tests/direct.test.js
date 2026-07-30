@@ -515,6 +515,25 @@ test("the milestone warning names only the unmatched titles, and imports the mat
   }
 });
 
+test("an empty milestone allowlist imports every issue and warns about nothing", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const stream = capture();
+    const outcome = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream,
+      customization: customization({ milestones: [] }),
+      github: { fetchAll: async () => milestonedRepo() },
+    });
+    assert.equal(outcome.importedStories, 2);
+    assert.equal(mock.state.stories[91].length, 2);
+    assert.ok(!/warning:/.test(stream.buf), stream.buf);
+  } finally {
+    await mock.close();
+  }
+});
+
 /** fetchAll-shaped stub: "v1.0" sits on an open issue, "v2.0" only on a closed one. */
 function mixedStateRepo() {
   return {
