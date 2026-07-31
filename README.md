@@ -152,6 +152,17 @@ github-to-eat --project 147 --repo octocat/hello-world \
 `\,` inside a title is a literal comma — `--milestones 'v1.0\, beta'` selects the
 single milestone named `v1.0, beta`.
 
+`--story-type infer` — the default — reads the org's own **issue type** first.
+GitHub lets an organization define issue types, and every issue from an org repo
+carries one: `Bug` → bug, `Feature` / `Enhancement` / `Task` → feature, `Chore` →
+chore. `Task` counts as a feature because GitHub seeds every new org with exactly
+Bug / Feature / Task, making `Task` the bucket for ordinary product work. The match
+is case-insensitive but **exact**, so a type named `Bug Report` does not classify.
+Anything unrecognised — and personal-account repos, which carry no type at all —
+falls back to the labels-and-title guess, and the run warns once with a count of the
+issues whose type it did not know. Passing a type explicitly (`--story-type bug`)
+overrides both.
+
 The choices are echoed in a `Customized:` block under the legend, so the plan is
 visible before anything is written — and under `--dry-run`, which writes nothing.
 A milestone title no matching issue carries is called out with a warning rather
