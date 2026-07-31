@@ -73,7 +73,8 @@ import { parseArgs } from "node:util";
  * @property {{ name?: number, description?: number, task_desc?: number,
  *   comment_text?: number }} maxLengths per-field write limits — when set,
  *   over-long values are rejected `400 too_long` and the limits are published
- *   as `maxLength` in /openapi.json (default: none, like today's real server)
+ *   as `maxLength` in /openapi.json (default: none, so the fallback path stays covered —
+ *   production does publish them)
  * @property {Array<{ project_id: number, body: any, idempotency_key: string | null }>} imports
  * @property {Record<string, { bodyHash: string, status: number, payload: any }>} idempotency
  *   stored first responses per Idempotency-Key — drives replay/409
@@ -91,7 +92,30 @@ export function makeState(overrides = {}) {
     projects: { 91: { project_id: 91, project_title: "Mock Project" } },
     stories: {},
     labels: {},
-    meta: { story_types: ["feature", "bug", "chore", "release"] },
+    // Mirrors the real /meta (probed 2026-07-29): `auth` + `hint` + `transitions`, and no
+    // story-type list — `transitions` is the only place the response names the types at all.
+    meta: {
+      auth: { kind: "AgentKey", key_id: 1, agent_id: 1, project_id: null },
+      hint: { id: "discovery", text: "Full API spec: GET /api/v1/openapi.json." },
+      transitions: {
+        feature: {
+          unstarted: ["started"],
+          started: ["finished"],
+          finished: ["delivered"],
+          delivered: ["accepted", "rejected"],
+          rejected: [],
+        },
+        bug: {
+          unstarted: ["started"],
+          started: ["finished"],
+          finished: ["delivered"],
+          delivered: ["accepted", "rejected"],
+          rejected: [],
+        },
+        chore: { unstarted: ["started"], started: ["accepted"] },
+        release: { unstarted: ["accepted"] },
+      },
+    },
     importResult: null,
     fixture: { issues: 3, prs: 2, milestones: 1, releases: 1, labels: 0, assignees: [] },
     importedIds: {},
@@ -202,7 +226,12 @@ function openapiDoc(state) {
           description: ml.description,
           ...(state.provenance ? { import_source: undefined, import_external_id: undefined } : {}),
         },
-        state.backdating ? { created_at: dateTime, completed_at: dateTime } : {},
+        {
+          // A scale *label*, not a number (probed 2026-07-29). Advertised because the writer
+          // must be seen never to send it; a numeric type here would invite the wrong guess.
+          estimate: { type: ["string", "null"] },
+          ...(state.backdating ? { created_at: dateTime, completed_at: dateTime } : {}),
+        },
       ),
       "/api/v1/projects/{project_id}/stories/{story_id}/tasks": post({
         description: ml.task_desc,
@@ -717,6 +746,8 @@ function createStory(state, projectId, body) {
     description: body.description ?? null,
     story_type: body.story_type ?? "feature",
     current_state: body.current_state ?? "unstarted",
+    // Echoed only when sent, so a test can still prove the writer never sends it.
+    ...(body.estimate != null ? { estimate: body.estimate } : {}),
     icebox: body.icebox ?? false,
     ...(state.provenance
       ? {

@@ -179,11 +179,13 @@ v3 adds a second import engine selectable with `--engine server|direct`
 
 ### v3 scope
 
-- **Issues only.** `--engine direct` composes with `--include`, but v3 supports
-  `issues` only; `prs`, `milestones`, and `releases` exit with a usage error
-  ("not supported by the direct engine yet") — those land in v4.
+- **Issues and releases.** `--engine direct` composes with `--include`; it
+  supports `issues` (always imported) and `releases`. `prs` and `milestones`
+  exit with a usage error ("not supported by the direct engine yet"). The
+  message names the supported set straight from the engine module's own list,
+  so it cannot go on advertising a narrower scope than the engine has.
 - **Staged build.** This epic ships across several stories; the pipeline is
-  now wired end-to-end. `--engine direct` performs real imports (issues only),
+  now wired end-to-end. `--engine direct` performs real imports,
   prompting for confirmation exactly like the server engine. `--dry-run` runs
   the same fetch → map → prescan stages and stops before the write, rendering
   the same would-import / would-skip plan block as the server dry-run path.
@@ -369,7 +371,6 @@ with `Link`-header pagination:
   (which still run concurrently), so a wide hierarchy cannot burst into GitHub's
   secondary rate limit. The stage runs before the wizard, so it cannot know
   `--states` / `--milestones` and is deliberately filter-blind.
-
   **This stage degrades; it never fails the run.** It is optional, un-budgeted
   and runs last, with the issues, comments and labels already fetched — so
   neither a `404` (issue deleted or transferred mid-fetch) nor a rate limit that
@@ -384,6 +385,28 @@ with `Link`-header pagination:
   the run, like any other page, and a rate limit on any *other* endpoint stays
   fatal. Only rows whose `number` is a positive integer are kept, and a listing
   that names its own parent, or the same sub-issue twice, is deduplicated.
+
+- `GET /repos/{owner}/{repo}/releases` — the repo's releases, requested **only**
+  under `--include …,releases`. Without that flag the endpoint is never touched,
+  so a default run's request count is unchanged. It runs *concurrently* with the
+  three list endpoints above, inside the same `Promise.all`, and follows `Link`
+  up to 200 pages — the server importer's own cap (`github.rs` `MAX_PAGES`), so
+  no repo the server accepts is refused here; a chain past that is refused as a
+  broken server.
+
+  **This stage does not degrade — a releases-listing failure is fatal**, exactly
+  like the three list endpoints above and unlike the sub-issue stage. Only
+  `#fetchSubIssues` carries the degrade wrapper. A `404` (a GHES without the
+  endpoint), a rate limit, a non-array 200 body, or the 200-page refusal all
+  propagate and kill the whole import, issues included. Budget accordingly: a
+  release-heavy repo can spend up to 200 requests on a *fatal* endpoint, against
+  an anonymous allowance of 60/hour — pass `--token` for release-heavy repos.
+
+  **Drafts are listed only for a token with push access.** GitHub returns draft
+  releases from this endpoint to no one else, so on the headline case — a public
+  repo read anonymously or with a read-only token — no draft is visible, the
+  draft mapping below is unreachable, and the CLI cannot tell that any draft was
+  omitted (an invisible draft is indistinguishable from a repo with none).
 
 `owner` and `repo` are URL-encoded into the request path, so metacharacters in
 `--repo` yield a well-formed request (and a clear repo-not-found error), never
@@ -558,6 +581,86 @@ that run; the `Customized:` block names the override instead). `--story-type
 infer` is the default, so it keeps the line. No override turns the sub-issue
 rule off, so its line renders for every `--engine direct` run.
 
+### Releases → release stories (direct engine)
+
+`--include …,releases` adds one `release`-type story per GitHub release,
+mirroring the server importer's `release_to_record` (agile-tracker
+`github.rs`) so both engines classify a repo's releases identically:
+
+- **Title — the tag, never the release's own name.** `tag_name` → the story
+  name, byte-for-byte and **untrimmed**, because the server's own mapping is a
+  bare `title: release.tag_name`. GitHub releases also carry a human `name`
+  ("2026-07-08, Version 26.5.0"); the server importer's release struct has no
+  `name` member at all, so it is never read, and the direct engine does not read
+  it either. Using either would give the two engines different titles for the
+  same release.
+- **Notes** — `body`, trimmed; empty or whitespace-only notes store no
+  description (NULL), like an empty issue body.
+- **State** — a **published** release (`draft` is not true **and**
+  `published_at` is a real **RFC3339** instant) → `accepted` with
+  `completed_at = published_at`, so the shared date rule buckets it into the
+  matching historical iteration like a closed issue. Anything else — a
+  **draft**, a row with no `published_at`, or one whose `published_at` is not a
+  sendable timestamp — → `unstarted`, in the backlog. A readable date, not mere
+  presence, is the test on both sides: the server runs the field through
+  `parse_source_datetime`, which yields "no date" on anything it cannot read,
+  and forwarding such a value instead would be a `400` that aborts the run.
+  The direct engine is bounded *more* tightly than the importer here, and has to
+  be: it does not parse the date, it forwards the string into `POST /stories`,
+  whose `created_at` / `completed_at` are `Option<DateTime<Utc>>` and therefore
+  deserialize **RFC3339 only**. So the handful of shapes the importer's lower
+  rungs still accept — a bare `2026-07-08`, a naive `2026-07-08 11:59:40`,
+  `Jul 8 2026` — are dropped here rather than sent, and a syntactically valid
+  but impossible instant (`2026-02-30T00:00:00Z`, which JS silently rolls into
+  March) is dropped too. GitHub's API only ever emits RFC3339, so no real
+  release loses its date to this; the bound exists so a proxy or a mock cannot
+  turn one odd row into a failed import.
+  **Drafts are imported, not skipped** — that is the server's mapping, and
+  skipping them would make a re-import with the flag on produce different rows
+  per engine — but see the listing note above: **drafts reach either engine only
+  when the token has push access**, so on a public repo read anonymously this
+  branch never runs.
+- **`created_at`** — the release's own `created_at` on both branches, under the
+  same RFC3339 rule as `published_at` (unsendable → no date), and subject to the
+  backdating feature-detect under "Fidelity limitations".
+- **No estimate, ever.** The `release` story type is seeded with
+  `allow_points = false`, so no `estimate` is sent on the create.
+- **No prerelease axis.** The server never deserializes `prerelease`, so a
+  prerelease is an ordinary release here too; published-or-draft is the only
+  distinction either engine draws.
+- **Identity** — `external_id` is `release-<id>`, where `<id>` is the GitHub
+  Release object's own numeric id (not the tag, not an index). See "Marker
+  dedup" below for why it is namespaced.
+- **The issue customization does not reach releases.** `--states` and
+  `--milestones` select *issues*; `--story-type` sets the type of every
+  imported *issue*, and `release` is the type that defines a release story, so
+  none of them alters, filters, or retypes a release. `--no-comments` /
+  `--no-tasks` have nothing to act on: a release story is created with no tasks
+  and no comments. Consequently a run whose filters match no issue but which
+  still imports releases says so — the "nothing to import" warning becomes "no
+  issues to import; the run would import up to N release(s)". "Up to": that
+  count is taken before the prescan, so a re-run may already hold some of them.
+- **A release that cannot be written is reported, not dropped in silence.** A
+  row whose `id` is not a positive **safe** integer has no usable re-import key,
+  and a row with a blank `tag_name` has no story name (a `400 validation_failed`
+  that would abort the whole run rather than lose one row). Both are left out of
+  the plan and counted in one stderr warning naming both causes. The safe-integer
+  bound is what makes the key trustworthy: past 2^53 two distinct GitHub release
+  ids round to one JS number — one `external_id` **and** one `Idempotency-Key`,
+  so the second create would replay the first and lose a release while the
+  imported count still said two — and from 1e21 the id renders in exponential
+  notation (`release-1e+21`), which the marker regex cannot read back, so every
+  re-run would duplicate that row on a provenance-off server. Real GitHub
+  payloads carry none of these shapes; the guard exists so a proxy or a mock
+  cannot make a release vanish quietly.
+- **Legend** — the `releases` block is rendered by the same registry entry the
+  server engine uses, so `--engine server` prints exactly the line it always
+  has. `--engine direct` adds one line for the draft rule (which, per the
+  listing note, only a push-access token can actually exercise). As with issues,
+  no customization drops a release line, because none of them switches the rule
+  off. `--story-type` reads "all issues &lt;type&gt;" in the `Customized:` block,
+  not "all": the override retypes issues and never touches a release.
+
 ### Write surface (direct engine)
 
 The writer stage targets this EAT API surface, all under
@@ -575,14 +678,38 @@ real server 2026-07-16 and mirrored by `src/mockserver.js`):
   `400 invalid_parameter`.
 - **`POST /stories`** — body requires `name` (the read-side field is `title`;
   missing → `400 validation_failed`); optional `description`, `story_type`,
-  `current_state`, `icebox`, and `labels` as bare strings or
+  `current_state`, `estimate`, `icebox`, `created_at`, `completed_at`,
+  `import_source`, `import_external_id`, and `labels` as bare strings or
   `{ "name": "..." }` objects — the server attaches by name, get-or-creating
   with default colors (unlike `POST /labels`, the story payload never 409s on
   an existing name), and embeds the full label objects in the response.
   `current_state: "accepted"` is accepted at create time for an unestimated
   feature (verified 2026-07-16) — no estimate guard, so no
-  create-then-transition fallback is needed. 200 → the full story object
-  (`story_id`, `title`, `current_state`, `labels`, …).
+  create-then-transition fallback is needed. The four backdating / provenance
+  fields are owner-gated (see "Marker dedup" and "Fidelity limitations"); the
+  create body has **no** `scheduled_at` — that column is importer-only, so the
+  direct engine cannot reproduce the planned date the server importer seeds on
+  a draft release. 200 → the full story object (`story_id`, `title`,
+  `current_state`, `labels`, …). `estimate` is on the create schema
+  (`CreateStory`, read from `GET /openapi.json` 2026-07-29) — typed
+  `["string", "null"]`, a scale *label* ("3", "½") resolved within the project's
+  own effort scale, not a number — but the writer never sends it: no story type
+  it creates is estimated, and `bug`/`chore`/`release` are seeded
+  `allow_points = false`.
+- **Story types are seeded, global reference data, so `release` needs no guard.**
+  `GET /story_types` (public and unscoped — it answers unauthenticated; read
+  2026-07-29) returns exactly `feature` (`allow_points: true`), `bug`, `chore`
+  and `release`, the latter three `allow_points: false`. The list is global, not
+  per-project, so the `release` type a release story needs is not something an
+  instance or a project can be missing. `GET /meta` carries `auth`, `hint` and a
+  `transitions` graph with one entry per type (`release: { unstarted:
+  ["accepted"] }` — the only legal release transition, matching the server's own
+  `valid_states_for_type`, which is what makes `current_state: "accepted"` legal
+  on a release create); it publishes **no** `story_types` list, so there is
+  nothing on that response for the writer to pre-check a type against. The direct
+  engine therefore sends `story_type: "release"` and `current_state: "accepted"`
+  unguarded: the type list and the legal-state table are both compiled into the
+  server, not per-instance configuration.
 - **`POST /stories/{id}/tasks`** — body `{ "description": "...",
   "complete": bool }` (`task_desc` is an accepted request alias; empty →
   `400 invalid_parameter`, "task_desc is required") → 200
@@ -616,18 +743,22 @@ before writing:
   into a lone surrogate.
 - **Limit source** — the field's `maxLength` in `GET /openapi.json` when
   published (aliased request fields share storage, so the smallest alias
-  limit wins). Today's servers publish none, so **fallback defaults**
-  apply: story name 255; story description, task description, and comment
-  text 16,000 bytes each — chosen between the longest comment a real server
-  accepted (13,101) and one it rejected (46,411). Tune the fallbacks (or ask
-  the EAT team to publish `maxLength`) if a server still rejects.
+  limit wins). Production now publishes them (read 2026-07-29: story name 255,
+  story description 20,000, task description 255, comment text 20,000), so a
+  current server's own numbers win. The **fallback defaults** apply only to a
+  server that publishes none: story name 255; story description, task
+  description, and comment text 16,000 bytes each — chosen between the longest
+  comment a real server accepted (13,101) and one it rejected (46,411). Tune
+  the fallbacks if such a server still rejects.
 - **Clamp shape** — block text is cut and suffixed with a visible notice
   (`[truncated by github-to-eat: …]`), total within the limit; names are cut
   with a trailing ellipsis whose own 3 bytes come out of the budget. Story
   descriptions reserve room for the dedup marker line before clamping, so the
-  marker always survives intact. Each clamp warns on stderr naming the issue
-  and field
-  (`warning: issue #64: comment 1 truncated to 16000 bytes (server limit)`).
+  marker always survives intact. Each clamp warns on stderr naming the source
+  row and field
+  (`warning: issue #64: comment 1 truncated to 16000 bytes (server limit)`; a
+  release names itself `release #100`, off the numeric half of its key, rather
+  than reading `issue #release-100`).
 - **Guarantee** — because the clamp measures the server's own unit, a clamped
   plan cannot produce a `too_long` 400; one over-long GitHub issue can never
   abort the run.
@@ -643,7 +774,8 @@ and both are prescanned, in union.
 
 - **Provenance pair (primary)** — every story create carries
   `import_source: "github"` and `import_external_id: "{n}"` (the GitHub issue
-  number as a string — the same key the server-side GitHub importer writes).
+  number as a string, or `release-<id>` for a release — the same keys the
+  server-side GitHub importer writes; see "Namespaced ids" below).
   EAT owner-gates the pair and rejects a lone field, so the two are built from
   one object and always sent together. Feature-detected from
   `GET /openapi.json` (the `import_source` property on the project-scoped
@@ -660,8 +792,24 @@ and both are prescanned, in union.
     break interop. The consequence: within one project, two GitHub repos whose
     issue numbers collide (repo-A #7 and repo-B #7) dedup against each other —
     the second is false-skipped. See the one-repo-per-project constraint below.
+  - **Namespaced ids.** An issue and a PR are keyed by the bare decimal number;
+    a **release** is keyed `release-<id>` off the GitHub Release object's own
+    numeric id. The prefix is the server importer's, and deliberate: release
+    ids and issue numbers are separate id spaces, so an unprefixed release id
+    could collide with an issue number in the same dedup key. Matching the
+    server's exact spelling is what makes cross-engine dedup work for releases
+    — a release the server importer wrote is skipped by a later direct run, and
+    a release the direct engine wrote is skipped by a later server import.
 - **Marker (fallback)** — every story it writes also ends its description with a
-  stable marker line: `Imported from https://github.com/{owner}/{repo}/issues/{n}`.
+  stable marker line: `Imported from https://github.com/{owner}/{repo}/issues/{n}`
+  for an issue, and
+  `Imported from https://api.github.com/repos/{owner}/{repo}/releases/{id}` for a
+  release. The release form points at the API resource rather than a
+  `github.com` path because only `/releases/tag/{tag}` browses and the tag is
+  not recoverable from the numeric key, while `github.com/{owner}/{repo}/releases/{id}`
+  404s (both checked 2026-07-29). The two forms are distinct enough that neither
+  can parse as the other, and the issue form is byte-identical to what earlier
+  versions wrote, so no existing row's dedup changes.
   The marker prescan always runs **alongside** the provenance prescan (their
   results are unioned), so rows written by an older marker-only CLI run (no pair
   on the server row) are still skipped. When the server does not advertise the
@@ -701,8 +849,9 @@ and both are prescanned, in union.
 - **Timestamps** — feature-detected from `GET /openapi.json`: when the story
   create advertises `created_at` (the probe gates all three backdated fields,
   which shipped together), the direct writer sends `created_at` on **every**
-  story create, `completed_at` (GitHub's `closed_at`) on accepted (closed-issue)
-  creates only — open issues omit it entirely — and `created_at` on every
+  story create, `completed_at` on accepted creates only — GitHub's `closed_at`
+  for a closed issue, a release's `published_at` for a published release; open
+  issues and draft releases omit it entirely — and `created_at` on every
   comment create. All are owner-gated server-side; the CLI's agent key
   qualifies. Against a server that does **not** advertise the field (older
   server, or `/openapi.json` missing/unparseable) every payload stays
@@ -733,4 +882,14 @@ and both are prescanned, in union.
 - **One repo per project** — the shared key is repo-blind (`external_id` is the
   bare issue number, matching the server importer), so a project holding issues
   from two GitHub repos can false-skip where their issue numbers collide. Keep
-  one GitHub repo per EAT project.
+  one GitHub repo per EAT project. Releases are keyed off GitHub's global
+  release ids, which do not collide across repos, so only the issue half of the
+  key carries this hazard.
+- **A draft release loses its planned date.** The server importer seeds a draft
+  release's `scheduled_at` from the release's `created_at`, which places it in
+  the iteration grid. `scheduled_at` is not on the public `POST /stories` body
+  (it is importer-only), so the direct engine imports the draft to the backlog
+  with its `created_at` and no planned date. Everything else about the row —
+  title, notes, type, state, external id — matches the server importer, so the
+  two engines still dedup each other's releases. Raising `scheduled_at` on the
+  public create is the EAT-side ask that would close the gap.

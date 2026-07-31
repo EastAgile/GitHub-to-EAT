@@ -1296,7 +1296,7 @@ test("a flag-driven run renders the Customized: block, and composes with --dry-r
   assert.equal(run.code, 0);
   assert.ok(run.stdout.includes("Customized:"));
   assert.ok(run.stdout.includes("issue states: open only"));
-  assert.ok(run.stdout.includes("story type: all bug"));
+  assert.ok(run.stdout.includes("story type: all issues bug"));
   assert.ok(run.stdout.includes("comments: not imported"));
   assert.ok(run.stdout.includes("Dry run plan for o/r into project 91"));
   assert.ok(run.stdout.includes("would import 1 stories"));
@@ -1504,3 +1504,55 @@ for (const [label, argv, header, tail] of /** @type {[string, string[], string, 
     );
   });
 }
+
+// --- --include releases on the direct engine (#31932) ------------------------
+
+test("--engine direct --include issues,releases runs and renders the direct release lines", async () => {
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      const out = capture();
+      const err = capture();
+      /** @type {any} */
+      let seen = null;
+      const code = await main(
+        [
+          "--project",
+          "91",
+          "--repo",
+          "o/r",
+          "--engine",
+          "direct",
+          "--include",
+          "issues,releases",
+          "-y",
+        ],
+        {
+          stdout: out,
+          stderr: err,
+          preflight: async () => preflightResult(),
+          runDirect: async (_client, _project, _owner, _repo, opts) => {
+            seen = opts;
+            return outcome({ importedStories: 3 });
+          },
+        },
+      );
+      assert.equal(code, 0);
+      assert.ok(!err.buf.includes("not supported by the direct engine yet"), err.buf);
+      assert.deepEqual(seen.included, ["issues", "releases"]);
+      assert.ok(out.buf.includes("  releases:"));
+      assert.ok(out.buf.includes("    - release → release-type story"));
+      assert.ok(out.buf.includes("    - draft release → story in the backlog (unstarted)"));
+    }),
+  );
+});
+
+test("--include issues,prs is still a usage error on the direct engine", async () => {
+  const err = capture();
+  const code = await main(
+    ["--project", "91", "--repo", "o/r", "--engine", "direct", "--include", "issues,prs"],
+    { stdout: capture(), stderr: err },
+  );
+  assert.equal(code, 2);
+  assert.ok(err.buf.includes("prs not supported by the direct engine yet"));
+  assert.ok(!err.buf.includes("releases not supported"));
+});

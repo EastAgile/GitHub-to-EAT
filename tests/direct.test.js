@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { AuthError, EATClient } from "../src/client.js";
 import { markerFor } from "../src/dedup.js";
 import { runDirect } from "../src/direct.js";
-import { DEFAULT_CUSTOMIZATION } from "../src/mapping.js";
+import { DEFAULT_CUSTOMIZATION, FALLBACK_LIMITS } from "../src/mapping.js";
 import { makeState, startMockServer } from "../src/mockserver.js";
 import { capture } from "./helpers.js";
 
@@ -916,4 +916,354 @@ test("a sub-issue warning is flushed after the progress line, never glued to the
     stream.buf.slice(0, warningAt).endsWith("\n"),
     "the warning starts on its own line, not glued to the spinner's open \\r line",
   );
+});
+
+// --- releases (#31932) -------------------------------------------------------
+
+/** One published release + one draft, shaped like the live REST rows. */
+function releaseRows() {
+  return [
+    {
+      id: 100,
+      tag_name: "v2.0.0",
+      name: "the human title, which is never the story title",
+      body: " shipped \n",
+      draft: false,
+      prerelease: false,
+      created_at: "2026-07-08T11:46:45Z",
+      published_at: "2026-07-08T11:59:40Z",
+      html_url: "https://github.com/o/r/releases/tag/v2.0.0",
+    },
+    {
+      id: 101,
+      tag_name: "v2.1.0-draft",
+      body: null,
+      draft: true,
+      created_at: "2026-07-20T00:00:00Z",
+      published_at: null,
+    },
+  ];
+}
+
+test("the releases fetch is asked for only when --include names it", async () => {
+  /** @type {any[]} */
+  const calls = [];
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const github = {
+      /** @param {any} [options] */
+      fetchAll: async (options) => {
+        calls.push(options);
+        return { ...fetchedRepo(), releases: [] };
+      },
+    };
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      dryRun: true,
+      stream: capture(),
+      github,
+    });
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues", "releases"],
+      dryRun: true,
+      stream: capture(),
+      github,
+    });
+    // No `included` at all: the default must select nothing, so a caller that never
+    // opts in cannot touch /releases — the request count of a default run is fixed.
+    await runDirect(client, 91, "o", "r", { dryRun: true, stream: capture(), github });
+  } finally {
+    await mock.close();
+  }
+  assert.deepEqual(calls, [{ releases: false }, { releases: true }, { releases: false }]);
+});
+
+test("releases import as release stories carrying the server importer's provenance key", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const outcome = await runDirect(client, 91, "o", "r", {
+      included: ["issues", "releases"],
+      stream: capture(),
+      github: { fetchAll: async () => ({ ...fetchedRepo(), releases: releaseRows() }) },
+    });
+    assert.equal(outcome.importedStories, 4);
+
+    const rows = mock.state.stories[91];
+    const published = rows.find((r) => r.import_external_id === "release-100");
+    assert.ok(published, `wrote release-100, got ${rows.map((r) => r.import_external_id)}`);
+    assert.equal(published.import_source, "github");
+    assert.equal(published.title, "v2.0.0");
+    assert.equal(published.story_type, "release");
+    assert.equal(published.current_state, "accepted");
+    assert.equal(published.completed_at, "2026-07-08T11:59:40Z");
+    assert.equal(published.created, "2026-07-08T11:46:45Z");
+    assert.ok(published.description.startsWith("shipped\n\n"));
+    assert.ok(published.description.endsWith(markerFor("o", "r", "release-100")));
+
+    const draft = rows.find((r) => r.import_external_id === "release-101");
+    assert.ok(draft, "the draft imports too, rather than being skipped");
+    assert.equal(draft.current_state, "unstarted");
+    assert.equal(draft.completed_at, undefined);
+    assert.equal(draft.created, "2026-07-20T00:00:00Z");
+    assert.equal(draft.description, markerFor("o", "r", "release-101"));
+    // `release` stories never bear points, so no estimate is ever sent.
+    assert.equal(draft.estimate, undefined);
+    assert.equal(published.estimate, undefined);
+    // `release` is a seeded, globally-scoped story type — GET /story_types lists it
+    // with allow_points:false, and /meta's workflow graph has a `release` entry.
+    for (const row of rows) assert.ok(row.story_type in mock.state.meta.transitions);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a release story the server importer already wrote is skipped, not duplicated", async () => {
+  const mock = await startMockServer();
+  try {
+    // Exactly the row agile-tracker's github.rs writes: namespaced id, no marker line.
+    mock.state.stories[91] = [
+      {
+        story_id: 999,
+        project_id: 91,
+        title: "v2.0.0",
+        description: "shipped",
+        story_type: "release",
+        current_state: "accepted",
+        import_source: "github",
+        import_external_id: "release-100",
+        labels: [],
+        tasks: [],
+        tasks_count: 0,
+        comments: [],
+        comment_count: 0,
+      },
+    ];
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const outcome = await runDirect(client, 91, "o", "r", {
+      included: ["issues", "releases"],
+      stream: capture(),
+      github: {
+        fetchAll: async () => ({ issues: [], comments: [], labels: [], releases: releaseRows() }),
+      },
+    });
+    assert.equal(outcome.skipped, 1);
+    assert.equal(outcome.importedStories, 1);
+    assert.deepEqual(
+      mock.state.stories[91].map((r) => r.import_external_id),
+      ["release-100", "release-101"],
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("without server provenance, the release marker alone dedups a re-run", async () => {
+  const mock = await startMockServer(makeState({ provenance: false }));
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const options = {
+      included: ["issues", "releases"],
+      stream: capture(),
+      github: {
+        fetchAll: async () => ({ issues: [], comments: [], labels: [], releases: releaseRows() }),
+      },
+    };
+    const first = await runDirect(client, 91, "o", "r", options);
+    assert.equal(first.importedStories, 2);
+    // No pair was sent, so only the description marker can carry the key.
+    assert.equal(mock.state.stories[91][0].import_external_id, undefined);
+    assert.equal(
+      mock.state.stories[91][0].description,
+      "shipped\n\nImported from https://api.github.com/repos/o/r/releases/100",
+    );
+
+    const rerun = await runDirect(client, 91, "o", "r", options);
+    assert.equal(rerun.importedStories, 0);
+    assert.equal(rerun.skipped, 2);
+    assert.equal(mock.state.stories[91].length, 2);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a release with no usable id or tag warns rather than vanishing", async () => {
+  const mock = await startMockServer();
+  const stream = capture();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const outcome = await runDirect(client, 91, "o", "r", {
+      included: ["issues", "releases"],
+      dryRun: true,
+      stream,
+      github: {
+        fetchAll: async () => ({
+          issues: [],
+          comments: [],
+          labels: [],
+          releases: [{ id: 0, tag_name: "v1" }, { id: 5, tag_name: "  " }, releaseRows()[0]],
+        }),
+      },
+    });
+    assert.equal(outcome.importedStories, 1);
+  } finally {
+    await mock.close();
+  }
+  assert.match(
+    stream.buf,
+    /warning: 2 fetched release\(s\) carry no positive numeric id or no tag name/,
+  );
+  assert.match(stream.buf, /are not imported/);
+});
+
+test("no unusable-release warning when every fetched release maps", async () => {
+  const mock = await startMockServer();
+  const stream = capture();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues", "releases"],
+      dryRun: true,
+      stream,
+      github: { fetchAll: async () => ({ ...fetchedRepo(), releases: releaseRows() }) },
+    });
+  } finally {
+    await mock.close();
+  }
+  assert.doesNotMatch(stream.buf, /release\(s\)/);
+});
+
+test("a filter that matches no issue does not claim 'nothing to import' when releases will", async () => {
+  const mock = await startMockServer();
+  const withReleases = capture();
+  const issuesOnly = capture();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const customization = { ...DEFAULT_CUSTOMIZATION, states: /** @type {const} */ ("closed") };
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues", "releases"],
+      dryRun: true,
+      stream: withReleases,
+      customization,
+      github: {
+        fetchAll: async () => ({
+          issues: [{ number: 7, title: "open", state: "open", labels: [] }],
+          comments: [],
+          labels: [],
+          // The unmappable one must not be counted as something the run imports.
+          releases: [...releaseRows(), { id: 0, tag_name: "v9" }],
+        }),
+      },
+    });
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      dryRun: true,
+      stream: issuesOnly,
+      customization,
+      github: {
+        fetchAll: async () => ({
+          issues: [{ number: 7, title: "open", state: "open", labels: [] }],
+          comments: [],
+          labels: [],
+          releases: [],
+        }),
+      },
+    });
+  } finally {
+    await mock.close();
+  }
+  // "up to": the count is pre-prescan, so a re-run may already hold some of them.
+  assert.match(withReleases.buf, /no issues to import; the run would import up to 2 release\(s\)/);
+  assert.doesNotMatch(withReleases.buf, /nothing to import/);
+  // The issues-only wording is unchanged.
+  assert.match(issuesOnly.buf, /nothing to import\./);
+});
+
+test("a run whose releases are all unmappable is back to 'nothing to import'", async () => {
+  const mock = await startMockServer();
+  const stream = capture();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues", "releases"],
+      dryRun: true,
+      stream,
+      customization: { ...DEFAULT_CUSTOMIZATION, states: /** @type {const} */ ("closed") },
+      github: {
+        fetchAll: async () => ({
+          issues: [{ number: 7, title: "open", state: "open", labels: [] }],
+          comments: [],
+          labels: [],
+          releases: [{ id: 0, tag_name: "v9" }],
+        }),
+      },
+    });
+  } finally {
+    await mock.close();
+  }
+  assert.match(stream.buf, /nothing to import\./);
+  assert.doesNotMatch(stream.buf, /the run would import up to/);
+});
+
+test("a clamp warning names a release as a release, not as an issue", async () => {
+  const mock = await startMockServer();
+  const stream = capture();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const [published] = releaseRows();
+    published.body = "x".repeat(FALLBACK_LIMITS.storyDescription + 50);
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues", "releases"],
+      dryRun: true,
+      stream,
+      github: {
+        fetchAll: async () => ({ issues: [], comments: [], labels: [], releases: [published] }),
+      },
+    });
+  } finally {
+    await mock.close();
+  }
+  assert.match(stream.buf, /warning: release #100: description truncated/);
+  assert.doesNotMatch(stream.buf, /issue #release-100/);
+});
+
+// The release marker is 14 bytes longer than the issue marker for the same repo, so
+// runDirect must reserve the *per-op* one. Reserving the issue form would clear
+// clampPlan and still 400 `too_long` on the real write, which the clamp guarantee
+// says is impossible — hence non-dry-run, against a limit-publishing server.
+test("a release's over-long notes are clamped against its own marker, end to end", async () => {
+  const limit = 400;
+  const mock = await startMockServer(makeState({ maxLengths: { description: limit } }));
+  const stream = capture();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const [published] = releaseRows();
+    published.body = "x".repeat(limit * 2);
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues", "releases"],
+      stream,
+      github: {
+        fetchAll: async () => ({ issues: [], comments: [], labels: [], releases: [published] }),
+      },
+    });
+    assert.deepEqual(result.errors, []);
+    assert.equal(result.importedStories, 1);
+
+    const [row] = mock.state.stories[91];
+    assert.equal(row.story_type, "release");
+    const marker = markerFor("o", "r", "release-100");
+    assert.ok(
+      row.description.endsWith(marker),
+      `marker survived, got ${row.description.slice(-80)}`,
+    );
+    assert.ok(
+      Buffer.byteLength(row.description, "utf8") <= limit,
+      `within the server limit, got ${Buffer.byteLength(row.description, "utf8")}`,
+    );
+    // The shorter issue marker would have fit too; only the release form proves the wiring.
+    assert.ok(marker.length > markerFor("o", "r", "100").length);
+  } finally {
+    await mock.close();
+  }
 });

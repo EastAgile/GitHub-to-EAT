@@ -9,16 +9,19 @@ import {
   customizationFlagsGiven,
   DEFAULT_CUSTOMIZATION,
   describeFilters,
+  describeOp,
   FALLBACK_LIMITS,
   ISSUE_TYPE_STORY_TYPES,
   ISSUES_LEGEND,
   inferStoryType,
   issuesLegend,
+  mappableRelease,
   mapRepo,
   matchesMilestones,
   normalizeHexColor,
   parseChecklist,
   parseCustomization,
+  releaseExternalId,
   storyTypeFromIssueType,
   TRUNCATION_NOTICE,
 } from "../src/mapping.js";
@@ -1384,4 +1387,320 @@ test("the marker reservation is charged on top of the preserved cross-link block
   assert.ok(Buffer.byteLength(stamped, "utf8") <= FALLBACK_LIMITS.storyDescription);
   assert.ok(stamped.includes("\n\nSub-issues: #12, #14\n\n"));
   assert.equal(markerExternalId(stamped, "o", "r"), "7");
+});
+
+// --- releases → release stories (#31932) -------------------------------------
+
+/** One published GitHub release, shaped like the live REST row (probed 2026-07-29). */
+function releaseRow(overrides = {}) {
+  return {
+    id: 100,
+    tag_name: "v2.0.0",
+    name: "2026-07-08, Version 2.0.0 (Current)",
+    body: "  the notes  ",
+    draft: false,
+    prerelease: false,
+    created_at: "2026-07-08T11:46:45Z",
+    published_at: "2026-07-08T11:59:40Z",
+    html_url: "https://github.com/o/r/releases/tag/v2.0.0",
+    ...overrides,
+  };
+}
+
+/** A fetched-repo stub carrying only releases. @param {...any} releases */
+function releaseRepo(...releases) {
+  return { issues: [], comments: [], labels: [], releases };
+}
+
+test("a published release maps to an accepted release story keyed release-<id>", () => {
+  const [op] = mapRepo(releaseRepo(releaseRow())).stories;
+  assert.equal(op.external_id, "release-100");
+  assert.equal(op.name, "v2.0.0");
+  assert.equal(op.description, "the notes");
+  assert.equal(op.story_type, "release");
+  assert.equal(op.current_state, "accepted");
+  assert.equal(op.created_at, "2026-07-08T11:46:45Z");
+  assert.equal(op.completed_at, "2026-07-08T11:59:40Z");
+  assert.deepEqual(op.labels, []);
+  assert.deepEqual(op.tasks, []);
+  assert.deepEqual(op.comments, []);
+});
+
+// The server importer's GhRelease has no `name` member at all (github.rs:223-239),
+// so the release's human title is never the story title — the tag is.
+test("the story title is the tag, never the release's own name", () => {
+  const [op] = mapRepo(releaseRepo(releaseRow({ name: "Shiny title" }))).stories;
+  assert.equal(op.name, "v2.0.0");
+  const [untitled] = mapRepo(releaseRepo(releaseRow({ name: null }))).stories;
+  assert.equal(untitled.name, "v2.0.0");
+});
+
+// github.rs:885 is `title: release.tag_name` — no trim — and git refnames forbid
+// whitespace anyway, so trimming here would be the only cross-engine title drift.
+test("the tag is the title byte-for-byte, untrimmed like the server", () => {
+  const [op] = mapRepo(releaseRepo(releaseRow({ tag_name: "  v2.0.0  " }))).stories;
+  assert.equal(op.name, "  v2.0.0  ");
+});
+
+// github.rs:877-882 sends drafts to the backlog; it never skips them.
+test("a draft release imports to the backlog rather than being skipped", () => {
+  const [op] = mapRepo(releaseRepo(releaseRow({ draft: true, tag_name: "v2.1.0-draft" }))).stories;
+  assert.equal(op.external_id, "release-100");
+  assert.equal(op.name, "v2.1.0-draft");
+  assert.equal(op.current_state, "unstarted");
+  assert.equal(op.completed_at, null);
+  assert.equal(op.created_at, "2026-07-08T11:46:45Z");
+});
+
+test("a published:false release with no publish date is a backlog story too", () => {
+  const [op] = mapRepo(releaseRepo(releaseRow({ published_at: null }))).stories;
+  assert.equal(op.current_state, "unstarted");
+  assert.equal(op.completed_at, null);
+});
+
+// github.rs:869-876 runs both dates through parse_source_datetime, which yields None on
+// anything it cannot read — so "published" means the date is real. The direct engine has a
+// second, stricter bound the importer does not: it *forwards* the value into
+// `POST /stories`, whose created_at/completed_at are `Option<DateTime<Utc>>` and so
+// deserialize RFC3339 only. Anything else is a 400 that aborts the whole run.
+// `Date.parse` cannot be the test here: it reads "0", "-1", "12345" and "2026" as years.
+const UNSENDABLE_DATES = [
+  "",
+  "   ",
+  0,
+  false,
+  "not-a-date",
+  12345,
+  {},
+  [],
+  "0",
+  "-1",
+  "12345",
+  "2026",
+  "Jul 8 2026",
+  "2026-07-08", // date-only: kept by the importer's rung 6, rejected by the create
+  "2026-07-08 11:59:40", // naive, no offset
+  "2026-07-08T11:59:40", // no zone designator
+  "2026-13-45T00:00:00Z", // syntactically RFC3339, not a real instant
+  "2026-02-30T00:00:00Z", // Date.parse rolls this into March; chrono refuses it
+  " 2026-07-08T11:59:40Z", // padded: chrono does not trim, so this is not sendable either
+  "2026-07-08T11:59:40Z ",
+  "on 2026-07-08T11:59:40Z", // anchors: a timestamp inside prose is not a timestamp
+  "2026-07-08T11:59:40Z or so",
+  "2026-07-08 11:59:40Z", // space separator: Date.parse takes it, RFC3339 needs the T
+  "2026-07-08T25:00:00Z", // in-shape but out-of-range time components — the day check
+  "2026-07-08T12:60:00Z", // only covers Y/M/D, so these rest on the parse check
+  "2026-07-08T11:59:61Z",
+  ["2026-07-08T11:59:40Z"], // String()s to a valid stamp; forwarding the array is a 400
+];
+
+test("a published_at the create would reject is unpublished, not an unsendable date", () => {
+  for (const published_at of UNSENDABLE_DATES) {
+    const [op] = mapRepo(releaseRepo(releaseRow({ published_at }))).stories;
+    assert.equal(op.current_state, "unstarted", `published_at ${JSON.stringify(published_at)}`);
+    assert.equal(op.completed_at, null, `published_at ${JSON.stringify(published_at)}`);
+  }
+});
+
+test("a created_at the create would reject is dropped, not forwarded to the write", () => {
+  for (const created_at of UNSENDABLE_DATES) {
+    const [op] = mapRepo(releaseRepo(releaseRow({ created_at }))).stories;
+    assert.equal(op.created_at, null, `created_at ${JSON.stringify(created_at)}`);
+  }
+});
+
+test("every RFC3339 form GitHub emits is kept verbatim, offset and all", () => {
+  for (const date of [
+    "2026-07-08T11:59:40Z",
+    "2026-07-08T11:59:40+07:00",
+    "2026-07-08T11:59:40-05:30",
+    "2026-07-08T11:59:40.123Z",
+    "2028-02-29T00:00:00Z", // a real leap day must survive the calendar-day check
+  ]) {
+    const [op] = mapRepo(releaseRepo(releaseRow({ created_at: date, published_at: date }))).stories;
+    assert.equal(op.created_at, date, date);
+    assert.equal(op.completed_at, date, date);
+    assert.equal(op.current_state, "accepted", date);
+  }
+});
+
+test("empty or whitespace-only release notes map to a null description", () => {
+  for (const body of ["", "   \n  ", null, undefined]) {
+    const [op] = mapRepo(releaseRepo(releaseRow({ body }))).stories;
+    assert.equal(op.description, null, `body ${JSON.stringify(body)}`);
+  }
+});
+
+// The server never deserializes `prerelease`, so published-or-draft is the only axis.
+test("a prerelease is an ordinary release", () => {
+  const [op] = mapRepo(releaseRepo(releaseRow({ prerelease: true }))).stories;
+  assert.equal(op.current_state, "accepted");
+  assert.equal(op.story_type, "release");
+});
+
+test("no releases key, or an empty one, maps no release stories", () => {
+  assert.deepEqual(mapRepo({ issues: [], comments: [], labels: [] }).stories, []);
+  assert.deepEqual(mapRepo(releaseRepo()).stories, []);
+});
+
+test("--story-type does not retype releases; the type is what makes them releases", () => {
+  for (const storyType of ["feature", "bug", "chore"]) {
+    const plan = mapRepo(releaseRepo(releaseRow()), {
+      ...DEFAULT_CUSTOMIZATION,
+      storyType: /** @type {any} */ (storyType),
+    });
+    assert.equal(plan.stories[0].story_type, "release");
+  }
+});
+
+test("the issue-state and milestone filters leave releases alone", () => {
+  for (const states of ["open", "closed"]) {
+    const plan = mapRepo(releaseRepo(releaseRow()), {
+      ...DEFAULT_CUSTOMIZATION,
+      states: /** @type {any} */ (states),
+      milestones: ["nothing matches this"],
+    });
+    assert.equal(plan.stories.length, 1);
+  }
+});
+
+test("mappableRelease rejects rows that could not be written or deduped", () => {
+  assert.equal(mappableRelease(releaseRow()), true);
+  assert.equal(mappableRelease(releaseRow({ id: Number.MAX_SAFE_INTEGER })), true);
+  for (const id of [
+    0,
+    -1,
+    1.5,
+    "100",
+    null,
+    undefined,
+    1e21,
+    Number.MAX_SAFE_INTEGER + 1,
+    Number.MAX_SAFE_INTEGER + 2,
+    Number.MAX_VALUE,
+    Number.POSITIVE_INFINITY,
+  ]) {
+    assert.equal(mappableRelease(releaseRow({ id })), false, `id ${JSON.stringify(id)}`);
+  }
+  for (const tag_name of ["", "   ", null, undefined, 42]) {
+    assert.equal(
+      mappableRelease(releaseRow({ tag_name })),
+      false,
+      `tag ${JSON.stringify(tag_name)}`,
+    );
+  }
+  assert.equal(mappableRelease(null), false);
+});
+
+// The two ways an unsafe id breaks the machinery, pinned so the guard can't relax
+// back to Number.isInteger: at 1e21 String() goes exponential, and past 2^53 two
+// GitHub ids collapse onto one JS number — one external_id, one Idempotency-Key.
+test("an unsafe id is rejected because it cannot key a release", () => {
+  assert.equal(releaseExternalId(1e21), "release-1e+21");
+  assert.equal(markerExternalId(markerFor("o", "r", "release-1e+21"), "o", "r"), null);
+  assert.equal(describeOp("release-1e+21"), "issue #release-1e+21");
+
+  assert.equal(
+    releaseExternalId(Number.MAX_SAFE_INTEGER + 1),
+    releaseExternalId(Number.MAX_SAFE_INTEGER + 2),
+  );
+});
+
+test("every id mappableRelease admits round-trips through its marker", () => {
+  for (const id of [1, 100, 2 ** 31, Number.MAX_SAFE_INTEGER]) {
+    const key = releaseExternalId(id);
+    assert.equal(mappableRelease(releaseRow({ id })), true, `id ${id}`);
+    assert.equal(markerExternalId(markerFor("o", "r", key), "o", "r"), key, `id ${id}`);
+    assert.equal(describeOp(key), `release #${id}`);
+  }
+});
+
+test("an unmappable release is dropped from the plan, not written half-formed", () => {
+  const plan = mapRepo(
+    releaseRepo(releaseRow({ id: 0 }), releaseRow({ tag_name: "" }), releaseRow()),
+  );
+  assert.deepEqual(
+    plan.stories.map((s) => s.external_id),
+    ["release-100"],
+  );
+});
+
+test("a release with no html_url or dates still maps", () => {
+  const [op] = mapRepo(
+    releaseRepo({ id: 7, tag_name: "v1", draft: false, published_at: null }),
+  ).stories;
+  assert.equal(op.external_id, "release-7");
+  assert.equal(op.created_at, null);
+  assert.equal(op.completed_at, null);
+  assert.equal(op.description, null);
+});
+
+test("releases and issues share one plan, each keeping its own id space", () => {
+  const plan = mapRepo({
+    issues: [{ number: 100, title: "issue one hundred", state: "open", labels: [] }],
+    comments: [],
+    labels: [],
+    releases: [releaseRow()],
+  });
+  assert.deepEqual(plan.stories.map((s) => s.external_id).sort(), ["100", "release-100"]);
+});
+
+test("a releases value that is not an array is ignored, not thrown on", () => {
+  for (const releases of [/** @type {any} */ ({}), "v1", 7, null, undefined]) {
+    assert.deepEqual(
+      mapRepo({ issues: [], comments: [], labels: [], releases }).stories,
+      [],
+      `releases ${JSON.stringify(releases)}`,
+    );
+  }
+});
+
+test("the clamp warning names an issue an issue and a release a release", () => {
+  /** @type {string[]} */
+  const warnings = [];
+  const plan = mapRepo({
+    issues: [
+      {
+        number: 64,
+        title: "long",
+        body: "x".repeat(FALLBACK_LIMITS.storyDescription + 10),
+        state: "open",
+        labels: [],
+      },
+    ],
+    comments: [],
+    labels: [],
+    releases: [releaseRow({ body: "y".repeat(FALLBACK_LIMITS.storyDescription + 10) })],
+  });
+  clampPlan(plan, FALLBACK_LIMITS, { warn: (m) => warnings.push(m) });
+  assert.deepEqual(warnings.sort(), [
+    `warning: issue #64: description truncated to ${FALLBACK_LIMITS.storyDescription} bytes (server limit)\n`,
+    `warning: release #100: description truncated to ${FALLBACK_LIMITS.storyDescription} bytes (server limit)\n`,
+  ]);
+});
+
+test("describeOp reads the numeric half of a release key, and issues unchanged", () => {
+  assert.equal(describeOp("64"), "issue #64");
+  assert.equal(describeOp("release-100"), "release #100");
+  // Anything that is not exactly the namespaced form stays an issue reference.
+  assert.equal(describeOp("release-"), "issue #release-");
+  assert.equal(describeOp("xrelease-1"), "issue #xrelease-1");
+  assert.equal(describeOp("release-1x"), "issue #release-1x");
+});
+
+test("a release's clamped description still fits once its marker is stamped", () => {
+  const marker = markerFor("o", "r", "release-100");
+  const plan = mapRepo(
+    releaseRepo(releaseRow({ body: "n".repeat(FALLBACK_LIMITS.storyDescription + 500) })),
+  );
+  const clamped = clampPlan(plan, FALLBACK_LIMITS, {
+    reserveDescription: (op) => Buffer.byteLength(markerFor("o", "r", op.external_id), "utf8") + 2,
+  });
+  const stamped = withMarker(clamped.stories[0].description, marker);
+  assert.ok(
+    Buffer.byteLength(stamped, "utf8") <= FALLBACK_LIMITS.storyDescription,
+    `stamped description fits, got ${Buffer.byteLength(stamped, "utf8")} bytes`,
+  );
+  assert.equal(markerExternalId(stamped, "o", "r"), "release-100");
+  assert.ok(stamped.includes(TRUNCATION_NOTICE));
 });

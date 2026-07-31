@@ -17,11 +17,8 @@ export const ENGINES = ["server", "direct"];
 /** @type {Engine} */
 export const DEFAULT_ENGINE = "server";
 
-/**
- * Import types the direct engine supports today. V3 is issues-only; PRs,
- * milestones, and releases land in V4.
- */
-export const DIRECT_SUPPORTED_INCLUDES = ["issues"];
+/** Import types the direct engine supports today; PRs and milestones are still to come. */
+export const DIRECT_SUPPORTED_INCLUDES = ["issues", "releases"];
 
 /**
  * Validate an `--engine` value against {@link ENGINES}.
@@ -39,9 +36,8 @@ export function parseEngine(value) {
 /**
  * Reject an `--include` selection the direct engine can't do yet.
  *
- * The server engine handles every type; the direct engine is issues-only until
- * V4. Throws an `Error` naming the unsupported types. The message names no flag:
- * its caller prefixes whichever flag the member typed to select the engine.
+ * The scope it names comes from {@link DIRECT_SUPPORTED_INCLUDES}, so the message cannot
+ * outlive it; it names no flag, because the caller prefixes whichever one the member typed.
  *
  * @param {string[]} included types from {@link import("./mappings.js").parseInclude}
  */
@@ -49,7 +45,7 @@ export function assertDirectSupportsIncludes(included) {
   const unsupported = included.filter((type) => !DIRECT_SUPPORTED_INCLUDES.includes(type));
   if (unsupported.length) {
     throw new Error(
-      `the direct engine imports issues only (V3); ` +
+      `the direct engine imports ${DIRECT_SUPPORTED_INCLUDES.join(" + ")}; ` +
         `${unsupported.join(", ")} not supported by the direct engine yet`,
     );
   }

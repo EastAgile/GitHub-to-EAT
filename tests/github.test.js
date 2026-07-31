@@ -6,6 +6,7 @@ import {
   GitHubAuthError,
   GitHubClient,
   GitHubError,
+  MAX_RELEASE_PAGES,
   RateLimitError,
   RepoNotFoundError,
 } from "../src/github.js";
@@ -893,4 +894,104 @@ test("a client built without a warn sink still reports a failed listing, on stde
   }
   assert.equal(written.length, 1);
   assert.match(written[0], /#7/);
+});
+
+// --- releases (#31932) -------------------------------------------------------
+
+test("fetchAll makes no releases request unless asked, and reports an empty list", async () => {
+  /** @type {string[]} */
+  const paths = [];
+  await withGitHub(
+    (req, res) => {
+      paths.push(new URL(req.url ?? "", "http://x").pathname);
+      json(res, 200, []);
+    },
+    async (base) => {
+      const fetched = await new GitHubClient("o", "r", { apiBase: base }).fetchAll();
+      assert.deepEqual(fetched.releases, []);
+    },
+  );
+  assert.ok(!paths.includes("/repos/o/r/releases"), `no releases fetch, got ${paths.join(", ")}`);
+  assert.equal(paths.length, 3);
+});
+
+test("fetchAll({ releases: true }) lists the repo's releases with per_page=100", async () => {
+  /** @type {URL | undefined} */
+  let url;
+  await withGitHub(
+    (req, res) => {
+      const parsed = new URL(req.url ?? "", "http://x");
+      if (parsed.pathname === "/repos/o/r/releases") {
+        url = parsed;
+        return json(res, 200, [{ id: 100, tag_name: "v2.0.0", draft: false }]);
+      }
+      json(res, 200, []);
+    },
+    async (base) => {
+      const fetched = await new GitHubClient("o", "r", { apiBase: base }).fetchAll({
+        releases: true,
+      });
+      assert.deepEqual(fetched.releases, [{ id: 100, tag_name: "v2.0.0", draft: false }]);
+    },
+  );
+  assert.equal(url?.pathname, "/repos/o/r/releases");
+  assert.equal(url?.searchParams.get("per_page"), "100");
+});
+
+test("the releases listing follows its Link rel=next across pages", async () => {
+  let base = "";
+  await withGitHub(
+    (req, res) => {
+      const parsed = new URL(req.url ?? "", "http://x");
+      if (parsed.pathname !== "/repos/o/r/releases") return json(res, 200, []);
+      if (parsed.searchParams.get("page") === "2") return json(res, 200, [{ id: 2 }]);
+      json(res, 200, [{ id: 1 }], {
+        Link: `<${base}/repos/o/r/releases?per_page=100&page=2>; rel="next"`,
+      });
+    },
+    async (started) => {
+      base = started;
+      const fetched = await new GitHubClient("o", "r", { apiBase: base }).fetchAll({
+        releases: true,
+      });
+      assert.deepEqual(
+        fetched.releases.map((r) => r.id),
+        [1, 2],
+      );
+    },
+  );
+});
+
+test("the releases listing is page-bounded, so an endless rel=next cannot spin", async () => {
+  let pages = 0;
+  let base = "";
+  await withGitHub(
+    (req, res) => {
+      const parsed = new URL(req.url ?? "", "http://x");
+      if (parsed.pathname !== "/repos/o/r/releases") return json(res, 200, []);
+      pages += 1;
+      json(res, 200, [{ id: pages }], {
+        link: `<${base}/repos/o/r/releases?per_page=100&page=${pages + 1}>; rel="next"`,
+      });
+    },
+    async (started) => {
+      base = started;
+      await assert.rejects(
+        new GitHubClient("o", "r", { apiBase: base }).fetchAll({ releases: true }),
+        (err) => {
+          assert.ok(err instanceof GitHubError);
+          assert.match(err.message, /\/releases past \d+ pages/);
+          return true;
+        },
+      );
+    },
+  );
+  assert.equal(pages, MAX_RELEASE_PAGES);
+});
+
+// The mechanism above is pinned against the constant; the documented *value* is
+// the server importer's own `MAX_PAGES` (github.rs:76), so drift would start
+// refusing repos the server accepts.
+test("the release page cap is the server importer's MAX_PAGES", () => {
+  assert.equal(MAX_RELEASE_PAGES, 200);
 });
