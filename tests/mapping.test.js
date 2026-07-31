@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { markerExternalId, markerFor, withMarker } from "../src/dedup.js";
 import {
   CLOSED_REASON_LABELS,
   clampPlan,
@@ -1177,4 +1178,210 @@ test("customizationFlagsGiven names only the customization flags that were passe
     "--states",
     "--no-tasks",
   ]);
+});
+
+// --- sub-issue cross-links (#31928) ------------------------------------------
+
+/** A fetched repo (fetchAll's shape) whose #7 parents #12 and #14. */
+function subIssueRepo() {
+  return {
+    issues: [
+      { number: 7, title: "parent", body: "the parent body", state: "open", labels: [] },
+      { number: 12, title: "child one", body: "first child", state: "open", labels: [] },
+      { number: 14, title: "child two", body: "", state: "open", labels: [] },
+    ],
+    comments: [],
+    labels: [],
+    subIssues: new Map([["7", ["12", "14"]]]),
+  };
+}
+
+/** @param {{ stories: import("../src/mapping.js").StoryOp[] }} plan @param {string} id */
+function storyFor(plan, id) {
+  const op = plan.stories.find((s) => s.external_id === id);
+  assert.ok(op, `plan has a story for #${id}`);
+  return op;
+}
+
+test("mapRepo ends a parent's description with its sub-issue numbers", () => {
+  const plan = mapRepo(subIssueRepo());
+  assert.equal(storyFor(plan, "7").description, "the parent body\n\nSub-issues: #12, #14");
+});
+
+test("mapRepo ends each child's description with its parent's number", () => {
+  const plan = mapRepo(subIssueRepo());
+  assert.equal(storyFor(plan, "12").description, "first child\n\nSub-issue of #7");
+  // An empty body leaves the cross-link block as the whole description.
+  assert.equal(storyFor(plan, "14").description, "Sub-issue of #7");
+});
+
+test("an issue in no sub-issue relation keeps its description the body alone", () => {
+  const repo = subIssueRepo();
+  repo.issues.push({ number: 20, title: "flat", body: "plain", state: "open", labels: [] });
+  assert.equal(storyFor(mapRepo(repo), "20").description, "plain");
+});
+
+test("a row that is both a parent and a child names its parent first, then its children", () => {
+  const repo = subIssueRepo();
+  repo.subIssues = new Map([
+    ["7", ["12"]],
+    ["12", ["14"]],
+  ]);
+  assert.equal(
+    storyFor(mapRepo(repo), "12").description,
+    "first child\n\nSub-issue of #7\nSub-issues: #14",
+  );
+});
+
+test("cross-links name sub-issues the run's filters excluded, so the text ignores the selection", () => {
+  const repo = subIssueRepo();
+  repo.issues[1].state = "closed";
+  const plan = mapRepo(repo, { ...DEFAULT_CUSTOMIZATION, states: "open" });
+  assert.deepEqual(
+    plan.stories.map((s) => s.external_id),
+    ["7", "14"],
+  );
+  assert.equal(storyFor(plan, "7").description, "the parent body\n\nSub-issues: #12, #14");
+});
+
+test("a child reported under two parents names only the first, never two parent lines", () => {
+  const repo = subIssueRepo();
+  repo.subIssues = new Map([
+    ["7", ["12"]],
+    ["14", ["12"]],
+  ]);
+  const plan = mapRepo(repo);
+  assert.equal(storyFor(plan, "12").description, "first child\n\nSub-issue of #7");
+  // The losing parent must drop the claim too, or the two directions contradict.
+  assert.equal(storyFor(plan, "7").description, "the parent body\n\nSub-issues: #12");
+  assert.equal(storyFor(plan, "14").description, null);
+});
+
+test("a self-referencing sub-issue entry is dropped from both directions", () => {
+  const repo = subIssueRepo();
+  repo.subIssues = new Map([["7", ["7", "12"]]]);
+  assert.equal(storyFor(mapRepo(repo), "7").description, "the parent body\n\nSub-issues: #12");
+});
+
+test("a repeated sub-issue number is rendered once", () => {
+  const repo = subIssueRepo();
+  repo.subIssues = new Map([["7", ["12", "12", "14"]]]);
+  assert.equal(storyFor(mapRepo(repo), "7").description, "the parent body\n\nSub-issues: #12, #14");
+});
+
+test("only digit-string sub-issue entries render, so no remote text reaches a description", () => {
+  const esc = String.fromCharCode(27);
+  const repo = subIssueRepo();
+  repo.subIssues = /** @type {any} */ (
+    new Map([["7", ["12", `1${esc}[2J`, 14, null, "", "  ", "#9"]]])
+  );
+  const description = String(storyFor(mapRepo(repo), "7").description);
+  assert.equal(description, "the parent body\n\nSub-issues: #12");
+  assert.ok(!description.includes(esc));
+});
+
+test("a repo fetched without a subIssues map maps byte-identically to before the feature", () => {
+  const { subIssues: _dropped, ...withoutMap } = subIssueRepo();
+  const bare = mapRepo(withoutMap);
+  assert.equal(storyFor(bare, "7").description, "the parent body");
+  assert.equal(storyFor(bare, "12").description, "first child");
+  assert.equal(storyFor(bare, "14").description, null);
+});
+
+test("the dedup marker still parses as the last line once a cross-link block precedes it", () => {
+  for (const op of mapRepo(subIssueRepo()).stories) {
+    const stamped = withMarker(op.description, markerFor("o", "r", op.external_id));
+    assert.equal(markerExternalId(stamped, "o", "r"), op.external_id);
+  }
+});
+
+test("a parent key that is not a digit string is dropped, so no remote text reaches a child", () => {
+  const esc = String.fromCharCode(27);
+  const repo = subIssueRepo();
+  repo.subIssues = /** @type {any} */ (
+    new Map(
+      /** @type {any[]} */ ([
+        [`1${esc}[2J`, ["12"]],
+        ["#9", ["14"]],
+        [7, ["14"]],
+      ]),
+    )
+  );
+  const plan = mapRepo(repo);
+  assert.equal(storyFor(plan, "12").description, "first child");
+  assert.equal(storyFor(plan, "14").description, null);
+  assert.ok(!JSON.stringify(plan).includes(esc));
+});
+
+test("a sub-issue value that is not an array is dropped rather than iterated per character", () => {
+  const repo = subIssueRepo();
+  repo.subIssues = /** @type {any} */ (
+    new Map([
+      ["7", "12"],
+      ["14", null],
+    ])
+  );
+  const plan = mapRepo(repo);
+  assert.equal(storyFor(plan, "7").description, "the parent body");
+  assert.equal(storyFor(plan, "14").description, null);
+});
+
+test("a subIssues value that is not a Map is ignored, not thrown on", () => {
+  const repo = subIssueRepo();
+  // A JSON round-trip turns a Map into {}; everything downstream is defensive.
+  repo.subIssues = /** @type {any} */ (JSON.parse(JSON.stringify(new Map([["7", ["12"]]]))));
+  assert.equal(storyFor(mapRepo(repo), "7").description, "the parent body");
+  repo.subIssues = /** @type {any} */ ("7,12");
+  assert.equal(storyFor(mapRepo(repo), "7").description, "the parent body");
+});
+
+test("a parent whose whole listing is dropped renders no dangling 'Sub-issues:' label", () => {
+  const repo = subIssueRepo();
+  repo.subIssues = /** @type {any} */ (new Map([["7", ["7", "#9", null]]]));
+  const description = String(storyFor(mapRepo(repo), "7").description);
+  assert.equal(description, "the parent body");
+  assert.ok(!description.includes("Sub-issues:"));
+});
+
+test("clampPlan cuts the body around the cross-link block, never the block itself", () => {
+  const repo = subIssueRepo();
+  repo.issues[0].body = "x".repeat(FALLBACK_LIMITS.storyDescription + 50);
+  /** @type {string[]} */
+  const warnings = [];
+  const clamped = clampPlan(mapRepo(repo), FALLBACK_LIMITS, { warn: (m) => warnings.push(m) });
+  const description = String(storyFor(clamped, "7").description);
+
+  assert.ok(
+    description.endsWith("\n\nSub-issues: #12, #14"),
+    `block survives the clamp, got: ${JSON.stringify(description.slice(-60))}`,
+  );
+  assert.ok(Buffer.byteLength(description, "utf8") <= FALLBACK_LIMITS.storyDescription);
+  assert.ok(description.includes("[truncated by github-to-eat"), "the body still says it was cut");
+  assert.equal(warnings.length, 1);
+  // The children keep their half of the relation, so both directions still agree.
+  assert.equal(storyFor(clamped, "12").description, "first child\n\nSub-issue of #7");
+});
+
+test("a cross-link block bigger than the whole limit is clamped, not left over the limit", () => {
+  const repo = subIssueRepo();
+  repo.subIssues = new Map([["7", Array.from({ length: 40 }, (_, i) => String(i + 100))]]);
+  const limits = { ...FALLBACK_LIMITS, storyDescription: 60 };
+  const clamped = clampPlan(mapRepo(repo), limits, {});
+  for (const op of clamped.stories) {
+    const bytes = Buffer.byteLength(op.description ?? "", "utf8");
+    assert.ok(bytes <= 60, `#${op.external_id} stays inside the limit, got ${bytes} bytes`);
+  }
+});
+
+test("the marker reservation is charged on top of the preserved cross-link block", () => {
+  const repo = subIssueRepo();
+  repo.issues[0].body = "x".repeat(FALLBACK_LIMITS.storyDescription + 50);
+  const marker = markerFor("o", "r", "7");
+  const clamped = clampPlan(mapRepo(repo), FALLBACK_LIMITS, {
+    reserveDescription: () => Buffer.byteLength(marker, "utf8") + 2,
+  });
+  const stamped = withMarker(storyFor(clamped, "7").description, marker);
+  assert.ok(Buffer.byteLength(stamped, "utf8") <= FALLBACK_LIMITS.storyDescription);
+  assert.ok(stamped.includes("\n\nSub-issues: #12, #14\n\n"));
+  assert.equal(markerExternalId(stamped, "o", "r"), "7");
 });
