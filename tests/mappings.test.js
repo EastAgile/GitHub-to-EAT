@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { DEFAULT_CUSTOMIZATION } from "../src/mapping.js";
+import { DEFAULT_CUSTOMIZATION, ISSUE_TYPE_STORY_TYPES } from "../src/mapping.js";
 import { MAPPINGS, parseInclude, renderLegend, requestFlags } from "../src/mappings.js";
 
 test("issues is a known type with no request field", () => {
@@ -135,6 +135,53 @@ test("the state line and the closed-reason line agree: --states open keeps both"
   assert.match(openOnly, /closed issue → story \(accepted/);
   assert.match(openOnly, /closed as not planned \/ duplicate/);
   assert.match(openOnly, /- issue states: open only/);
+});
+
+// --- org-defined issue types in the legend (#31927) --------------------------
+
+test("the direct legend documents the issue-type rule; the server legend does not", () => {
+  assert.match(renderLegend(["issues"], "direct"), /- issue type Bug → bug;/);
+  assert.doesNotMatch(renderLegend(["issues"], "server"), /issue type/);
+  assert.equal(renderLegend(["issues"], "server"), renderLegend(["issues"]));
+});
+
+// The line is built from the table, so a sixth entry cannot leave it stale.
+test("every name the issue-type table classifies is named in the direct legend", () => {
+  const line = renderLegend(["issues"], "direct")
+    .split("\n")
+    .find((l) => l.includes("issue type"));
+  assert.ok(line, "the direct legend has an issue-type line");
+  for (const [name, storyType] of ISSUE_TYPE_STORY_TYPES) {
+    assert.match(line, new RegExp(`${name}[^;]*→ ${storyType}`, "i"));
+  }
+});
+
+test("the issue-type line survives every customization field but the story-type override", () => {
+  for (const customization of [
+    DEFAULT_CUSTOMIZATION,
+    ...["all", "open", "closed"].map((states) => ({ ...DEFAULT_CUSTOMIZATION, states })),
+    ...[null, [], ["v1.0"]].map((milestones) => ({ ...DEFAULT_CUSTOMIZATION, milestones })),
+    { ...DEFAULT_CUSTOMIZATION, comments: false },
+    { ...DEFAULT_CUSTOMIZATION, tasks: false },
+  ]) {
+    const c = /** @type {import("../src/mapping.js").Customization} */ (customization);
+    assert.match(renderLegend(["issues"], "direct", c), /issue type Bug/);
+    assert.doesNotMatch(renderLegend(["issues"], "server", c), /issue type/);
+  }
+});
+
+// `--story-type` is a mapping override, not a selection filter: it disables the rule
+// for the whole run, so the legend would otherwise contradict its own Customized: block.
+test("a fixed --story-type drops the issue-type line but keeps the closed-reason line", () => {
+  for (const storyType of ["feature", "bug", "chore"]) {
+    const legend = renderLegend(["issues"], "direct", {
+      ...DEFAULT_CUSTOMIZATION,
+      storyType: /** @type {"feature" | "bug" | "chore"} */ (storyType),
+    });
+    assert.doesNotMatch(legend, /issue type/);
+    assert.match(legend, /closed as not planned/);
+    assert.match(legend, new RegExp(`- story type: all ${storyType}`));
+  }
 });
 
 test("renderLegend strips terminal control chars from milestone titles", () => {

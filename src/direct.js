@@ -17,9 +17,11 @@ import {
   describeFilters,
   FALLBACK_LIMITS,
   hasMilestoneFilter,
+  ISSUE_TYPE_NAMES,
   mapRepo,
   matchesMilestones,
   matchesStates,
+  storyTypeFromIssueType,
   stripControls,
 } from "./mapping.js";
 import { runWithProgress } from "./progress.js";
@@ -76,6 +78,38 @@ function warnFiltersMatchNothing({ issues }, customization, stream) {
 }
 
 /**
+ * Warn once when issues carry an org issue type the table does not know — an org standardised
+ * on `Spike`/`Support` would otherwise have every story silently typed by the old heuristic.
+ * The count is all that is reported: type names are org-authored text, which never reaches the
+ * terminal from this path.
+ *
+ * @param {{ issues: any[] }} fetched
+ * @param {import("./mapping.js").Customization} customization
+ * @param {import("./progress.js").OutStream} [stream]
+ */
+function warnUnrecognisedIssueTypes({ issues }, customization, stream) {
+  const { storyType, states, milestones } = customization;
+  if (storyType !== "infer") return;
+  const count = issues.filter((issue) => {
+    const name = issue.type?.name;
+    return (
+      !issue.pull_request &&
+      matchesStates(issue, states) &&
+      matchesMilestones(issue, milestones) &&
+      typeof name === "string" &&
+      name.trim() !== "" &&
+      storyTypeFromIssueType(issue.type) === null
+    );
+  }).length;
+  if (!count) return;
+  stream?.write(
+    `warning: ${count} issue(s) carry an issue type this importer does not recognise ` +
+      `(it knows ${ISSUE_TYPE_NAMES.join(", ")}) — those stories take their type from ` +
+      "labels + title instead.\n",
+  );
+}
+
+/**
  * Run the client-side import pipeline and return the same
  * {@link import("./importer.js").ImportOutcome} shape the server engine yields.
  *
@@ -111,6 +145,7 @@ export async function runDirect(client, projectId, owner, repo, options) {
     ? await customize(fetched)
     : (options.customization ?? DEFAULT_CUSTOMIZATION);
   warnFiltersMatchNothing(fetched, customization, stream);
+  warnUnrecognisedIssueTypes(fetched, customization, stream);
   // The customized legend + confirm reflect those answers, so they land here —
   // a declined confirm throws, aborting before any prescan or write.
   if (announce) await announce(fetched, customization);

@@ -231,8 +231,9 @@ A `Customization` object, defined next to the mapping profile in
   the flag rules below), so no CLI invocation reaches `mapRepo` with `[]`.
   Entries match verbatim, so a blank entry is not special-cased and matches
   nothing; neither the flag parser nor the wizard emits one.
-- `storyType` (`"infer" | "feature" | "bug" | "chore"`) — `"infer"` keeps the
-  label/title inference; a fixed value applies to every mapped story.
+- `storyType` (`"infer" | "feature" | "bug" | "chore"`) — `"infer"` reads the
+  org's issue type first and falls back to the label/title inference (see "Issue
+  type" below); a fixed value applies to every mapped story, ignoring both.
 - `comments: false` maps no comments; `tasks: false` converts no body
   checklists to tasks (the checklist lines stay in the description verbatim
   either way).
@@ -251,7 +252,8 @@ reflect the real issues — and asks, one at a time:
 2. **Milestones** — a numbered multi-select of the milestone titles present on
    the fetched issues (blank = all). Skipped, with no extra GitHub request,
    when no fetched issue carries a milestone.
-3. **Story type** — infer (default) / all feature / all bug / all chore.
+3. **Story type** — infer (default; the org's issue type, else labels/title) /
+   all feature / all bug / all chore.
 4. **Import issue comments?** (`[Y/n]`).
 5. **Convert body checklists to story tasks?** (`[Y/n]`).
 
@@ -372,9 +374,9 @@ falling back to the `x-ratelimit-reset` time); 401 → token rejected.
 
 The direct engine maps fetched GitHub JSON to an EAT write-op plan client-side
 (`src/mapping.js` — pure functions, no HTTP), mirroring the server importer's
-issue mapping so both engines classify the same repo identically — with one
-deliberate exception, the closed-reason labels below, which only the direct
-engine produces:
+issue mapping so both engines classify the same repo identically — with two
+deliberate exceptions, the closed-reason labels and the org issue type below,
+which only the direct engine produces:
 
 - **State** — open issue → `unstarted` story; closed → `accepted`, keeping the
   GitHub closed date (`completed_at`) — except for the abandoned closed reasons
@@ -404,9 +406,47 @@ engine produces:
   the `rejected` state — an import appends and never updates, and "Marker dedup"
   below skips stories already imported, so on an existing board every closed
   issue keeps the `accepted` it was given and no repair pass exists.
-- **Type inference** (labels + title, bug checked first) — a label containing
-  `bug`/`fix`/`defect`, or a title starting with `fix`/`bug` → `bug`; a label
-  containing `chore`/`maintenance`/`devops`/`infra` → `chore`; else `feature`.
+- **Issue type** (**direct engine only** — the server importer's issue struct has
+  no `type` field, so serde drops it and the server always infers) — GitHub
+  organizations can define issue types; every REST issue row from an org repo
+  carries a `type` (null when unset), while personal-account repos and older
+  GitHub Enterprise Server omit the key entirely. The fetcher already downloads
+  it, so reading it costs no extra request. A recognised `type.name` classifies
+  the story outright: `Bug` → `bug`, `Feature`/`Enhancement`/`Task` → `feature`,
+  `Chore` → `chore`.
+  - **`Task` types as `feature`, not `chore`**, deviating from the story's
+    original acceptance criteria. GitHub seeds every new organization with
+    exactly `Bug` / `Feature` / `Task`, so `Task` is the catch-all for ordinary
+    product work. Typing it `chore` would put that work in EAT's unpointed
+    bucket, outside velocity — where before this rule existed it defaulted to
+    `feature` — and would make the two engines disagree on the most common org
+    type of all: the server never reads `type`, so `infer_story_type`
+    (agile-tracker `common.rs`) types a `Task` issue carrying no chore-ish label
+    and a neutral title as `feature`. Only an explicit `Chore` type yields a
+    chore.
+  - Type names are org-authored free text, not a GitHub enum, so the match is
+    case-insensitive on the trimmed name (`bug`, `BUG` and `" Bug "` all
+    classify) — unlike the closed-reason table above, which matches GitHub's own
+    lowercase spelling exactly. The match is also **exact, not substring**, which
+    is a second divergence worth naming: an issue typed `Bug Report` does not
+    classify and falls through to the inference, where a *label* named
+    `Bug Report` would make the story a bug (the inference matches substrings).
+  - The mapping is total: an unrecognised name, `type: null`, an absent `type`, a
+    `type` that is not an object and a `name` that is not a string all fall
+    through to the inference below, leaving that output identical to v3. A run
+    whose in-scope issues carry unrecognised names warns once, with the **count
+    only** — the name is only ever a lookup key, so no org-authored text reaches
+    the terminal from this path.
+  - Precedence, highest first: an explicit `--story-type feature|bug|chore` (the
+    member's own instruction for the whole run), then `type.name`, then the
+    inference. Only issues imported after this landed carry type-derived story
+    types — an import appends and never updates.
+- **Type inference** (labels + title, bug checked first) — the fallback when the
+  org set no issue type. A label containing `bug`/`fix`/`defect`, or a title
+  starting with `fix`/`bug` → `bug`; a label containing
+  `chore`/`maintenance`/`devops`/`infra` → `chore`; else `feature`. It reads the
+  issue's own labels only: both the closed-reason label above and any other label
+  this mapper synthesises are added after typing, so neither can reclassify a story.
 - **Labels** — names trimmed (blank dropped); duplicate names on one issue
   collapse case-insensitively, the first spelling winning, so a story never
   lists the same label twice (EAT get-or-creates labels case-insensitively, so
@@ -429,11 +469,18 @@ The CLI legend's `issues` lines are assembled by this module's own renderer,
 whose default output is what the `MAPPINGS` registry re-exports — the registry
 entry is that render path's product, not a parallel copy, so legend and mapper
 cannot drift. The server engine's legend output stays byte-identical. The
-closed-reason line is the one exception — it renders only under
-`--engine direct`, because the server importer flattens every closed issue. The
-legend describes the mapping, not the selection, so `--states open` still shows
-both the closed-state line and the closed-reason line, and only `--no-comments`
-/ `--no-tasks` ever drop a line.
+closed-reason and issue-type lines are the exceptions — they render only under
+`--engine direct`, because the server importer flattens every closed issue and
+never reads `type`. The issue-type line names every name the table classifies
+because it is built from that table, so a new entry cannot leave it stale.
+
+The legend describes the mapping, not the selection: a *filter* never drops a
+line, so `--states open` still shows both the closed-state line and the
+closed-reason line. A *mapping override* does, because it turns the described
+rule off for the whole run — `--no-comments` / `--no-tasks` drop their lines, and
+`--story-type feature|bug|chore` drops the issue-type line (the rule is dead for
+that run; the `Customized:` block names the override instead). `--story-type
+infer` is the default, so it keeps the line.
 
 ### Write surface (direct engine)
 

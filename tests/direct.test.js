@@ -631,3 +631,99 @@ test("every milestone title matching keeps the run silent", async () => {
     await mock.close();
   }
 });
+
+// --- org issue types the table does not know (#31927) ------------------------
+
+/**
+ * fetchAll-shaped stub: `types` become one issue each, all open, no labels.
+ *
+ * @param {(object | null | undefined)[]} types
+ */
+function typedRepo(types) {
+  return {
+    issues: types.map((type, i) => ({
+      number: i + 1,
+      title: "one",
+      body: "",
+      state: "open",
+      labels: [],
+      type,
+    })),
+    comments: [],
+    labels: [],
+  };
+}
+
+/**
+ * @param {object} options
+ * @param {(object | null | undefined)[]} options.types
+ * @param {Partial<import("../src/mapping.js").Customization>} [options.overrides]
+ */
+async function runTyped({ types, overrides = {} }) {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const stream = capture();
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream,
+      customization: customization(overrides),
+      github: { fetchAll: async () => typedRepo(types) },
+    });
+    return stream.buf;
+  } finally {
+    await mock.close();
+  }
+}
+
+test("issue types the table does not know are counted in one warning", async () => {
+  const buf = await runTyped({
+    types: [{ name: "Spike" }, { name: "Improvement" }, { name: "Bug" }, null],
+  });
+  assert.match(buf, /warning: 2 issue\(s\) carry an issue type this importer does not recognise/);
+  assert.match(buf, /labels \+ title/);
+});
+
+// The count is the whole message: an org-authored type name is untrusted remote
+// text, so two different unrecognised names must produce identical output.
+test("the unrecognised-type warning never echoes the org's own type name", async () => {
+  const evil = await runTyped({ types: [{ name: "Sp\u001b[31mike" }] });
+  const plain = await runTyped({ types: [{ name: "Improvement" }] });
+  assert.match(evil, /warning: 1 issue\(s\) carry an issue type/);
+  assert.ok(!evil.includes("\u001b"));
+  assert.equal(evil, plain);
+});
+
+test("types that all classify — or no type at all — keep the run silent", async () => {
+  const buf = await runTyped({
+    types: [{ name: "Bug" }, { name: "task" }, { name: "" }, {}, null, undefined],
+  });
+  assert.ok(!buf.includes("warning:"), buf);
+});
+
+test("a fixed --story-type ignores the type field, so it warns about nothing", async () => {
+  const buf = await runTyped({
+    types: [{ name: "Spike" }],
+    overrides: { storyType: "bug" },
+  });
+  assert.ok(!buf.includes("warning:"), buf);
+});
+
+test("issues the filters dropped are not counted as unrecognised types", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const stream = capture();
+    const repo = typedRepo([{ name: "Spike" }, { name: "Spike" }]);
+    repo.issues[0].state = "closed";
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream,
+      customization: customization({ states: "closed" }),
+      github: { fetchAll: async () => repo },
+    });
+    assert.match(stream.buf, /warning: 1 issue\(s\) carry an issue type/);
+  } finally {
+    await mock.close();
+  }
+});

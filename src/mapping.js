@@ -1,7 +1,8 @@
 /**
  * The direct engine's default mapping profile: GitHub issue JSON in → EAT write-op plan out (pure, no HTTP).
  * Mirrors the server importer's issue mapping (agile-tracker github.rs + common.rs) so both engines classify
- * identically, with one deliberate exception: the closed-reason labels below, which the server never produces.
+ * identically, with two deliberate exceptions the server never produces: the closed-reason labels, and the
+ * org issue-type field (the server's `GhIssue` has no `type`, so serde drops it).
  */
 
 // Composed so `--customize` can drop the tasks fragment / comments line without
@@ -16,6 +17,25 @@ const COMMENTS_LINE = "comments → comments (body only)";
 const CLOSED_REASON_LINE =
   "closed as not planned / duplicate → rejected (a chore → accepted, having no rejected " +
   "state), plus a 'not-planned' / 'duplicate' label";
+/**
+ * Direct-only for the same reason: the server's issue struct has no `type` field. Built from
+ * {@link ISSUE_TYPE_STORY_TYPES} (a function, so the table can stay beside its lookup) so a
+ * new entry can never leave this line naming fewer names than the mapper accepts.
+ *
+ * @returns {string}
+ */
+function issueTypeLine() {
+  /** @type {Map<string, string[]>} display names per story type, in table order */
+  const groups = new Map();
+  for (const [name, storyType] of ISSUE_TYPE_STORY_TYPES) {
+    const display = name[0].toUpperCase() + name.slice(1);
+    groups.set(storyType, [...(groups.get(storyType) ?? []), display]);
+  }
+  const rules = [...groups]
+    .map(([storyType, names]) => `${names.join(" / ")} → ${storyType}`)
+    .join("; ");
+  return `issue type ${rules}; otherwise labels + title decide`;
+}
 
 // Milestone titles are untrusted remote data; strip terminal control chars
 // (ESC/C0/C1/DEL) before they reach the terminal, in the wizard and the legend alike.
@@ -23,16 +43,21 @@ export const stripControls = (/** @type {string} */ s) => s.replace(/\p{Cc}/gu, 
 
 /**
  * The issues legend for a run, and the only place these lines are assembled. It describes the
- * mapping, not the selection, so only `comments`/`tasks` — never `states` — can drop a line.
+ * mapping, not the selection, so a *filter* (`states`, `milestones`) never drops a line; only
+ * the mapping overrides do — `comments`/`tasks`, and `storyType`, which switches the rule the
+ * issue-type line describes off for the whole run.
  *
  * @param {import("./engine.js").Engine} [engine]
  * @param {Customization | null} [customization]
  * @returns {string[]}
  */
 export function issuesLegend(engine = "server", customization = null) {
-  const { comments, tasks } = customization ?? DEFAULT_CUSTOMIZATION;
+  const { comments, tasks, storyType } = customization ?? DEFAULT_CUSTOMIZATION;
   const lines = [STATE_LINE];
-  if (engine === "direct") lines.push(CLOSED_REASON_LINE);
+  if (engine === "direct") {
+    lines.push(CLOSED_REASON_LINE);
+    if (storyType === "infer") lines.push(issueTypeLine());
+  }
   lines.push(tasks ? `${LABELS_LINE}${TASKS_SUFFIX}` : LABELS_LINE);
   if (comments) lines.push(COMMENTS_LINE);
   return lines;
@@ -106,7 +131,8 @@ export function matchesMilestones(issue, milestones) {
  * @property {"all" | "open" | "closed"} states which GitHub issue states to import
  * @property {string[] | null} milestones exact `milestone.title` allowlist; null — or an
  *   empty array, treated the same way — imports every issue
- * @property {"infer" | "feature" | "bug" | "chore"} storyType "infer" uses {@link inferStoryType}
+ * @property {"infer" | "feature" | "bug" | "chore"} storyType "infer" reads the org's issue
+ *   type first, falling back to {@link inferStoryType}
  * @property {boolean} comments import issue comments
  * @property {boolean} tasks import body checklists as tasks
  */
@@ -225,8 +251,43 @@ export function parseCustomization(values) {
 }
 
 /**
- * GitHub issues carry no native type, so infer one from the conventional labels + the title.
- * Bug is checked first: a row that matches both rules is a bug.
+ * The story types GitHub's org-defined issue-type names declare, by lowercased name.
+ * Only these classify; anything else falls through to {@link inferStoryType}. `Task` is
+ * ordinary product work in GitHub's own seeded set, so it types as `feature`, not `chore`.
+ *
+ * @type {Map<string, "bug" | "chore" | "feature">}
+ */
+export const ISSUE_TYPE_STORY_TYPES = new Map([
+  ["bug", "bug"],
+  ["feature", "feature"],
+  ["enhancement", "feature"],
+  ["task", "feature"],
+  ["chore", "chore"],
+]);
+
+/** The table's names as an org sees them, for the unrecognised-type warning. */
+export const ISSUE_TYPE_NAMES = [...ISSUE_TYPE_STORY_TYPES.keys()].map(
+  (name) => name[0].toUpperCase() + name.slice(1),
+);
+
+/**
+ * The story type an org's issue type declares, or null. Names are org-authored free text, so
+ * the match is case-insensitive on the trimmed name — and string-guarded, never coercing a
+ * non-string. Matching is exact, so a name like `Bug Report` does not classify.
+ *
+ * @param {unknown} issueType the REST row's `type` (null when unset; the key is absent
+ *   entirely on personal-account repos and older GitHub Enterprise Server)
+ * @returns {"bug" | "chore" | "feature" | null}
+ */
+export function storyTypeFromIssueType(issueType) {
+  const name = /** @type {{ name?: unknown } | null | undefined} */ (issueType)?.name;
+  if (typeof name !== "string") return null;
+  return ISSUE_TYPE_STORY_TYPES.get(name.trim().toLowerCase()) ?? null;
+}
+
+/**
+ * Infer a story type from the conventional labels + the title — the fallback when the org
+ * set no issue type. Bug is checked first: a row that matches both rules is a bug.
  *
  * @param {string[]} labels label names
  * @param {string} title
@@ -437,10 +498,12 @@ export function mapRepo(
     for (const label of issue.labels ?? []) addLabel(label.name, label.color);
 
     const title = String(issue.title ?? "");
-    // Inferred before the reason label joins `names`: the type comes from the author's
-    // own labels, never from a label this mapper invented.
+    // Run here so the heuristic reads the author's own labels, never one this
+    // mapper appends to `names` below.
     const storyType =
-      customization.storyType === "infer" ? inferStoryType(names, title) : customization.storyType;
+      customization.storyType === "infer"
+        ? (storyTypeFromIssueType(issue.type) ?? inferStoryType(names, title))
+        : customization.storyType;
 
     const closed = state === "closed";
     // Abandoned work must stay out of velocity: `accepted` is a done state, `rejected`

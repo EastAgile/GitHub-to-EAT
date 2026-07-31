@@ -119,6 +119,18 @@ test("plain Enter at every prompt yields the default customization", async () =>
   assert.deepEqual(customization, DEFAULT_CUSTOMIZATION);
 });
 
+// Pinned like the legend wording in cli.test.js: `--customize` implies the direct
+// engine, so this menu is where the issue-type rule always applies.
+test("the story-type question names the issue type ahead of labels/title", async () => {
+  const fetched = { issues: [{ number: 1, state: "open" }], comments: [], labels: [] };
+  const output = capture();
+  await runWizard(fetched, { input: scripted(["", "", "", ""]), output });
+  assert.ok(
+    output.buf.includes("  1) infer (issue type, else labels/title) [default]\n"),
+    output.buf,
+  );
+});
+
 test("EOF mid-wizard rejects with WizardAborted", async () => {
   const fetched = { issues: [{ number: 1, state: "open" }], comments: [], labels: [] };
   await assert.rejects(

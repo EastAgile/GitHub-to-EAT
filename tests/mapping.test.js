@@ -9,6 +9,7 @@ import {
   DEFAULT_CUSTOMIZATION,
   describeFilters,
   FALLBACK_LIMITS,
+  ISSUE_TYPE_STORY_TYPES,
   ISSUES_LEGEND,
   inferStoryType,
   issuesLegend,
@@ -17,6 +18,7 @@ import {
   normalizeHexColor,
   parseChecklist,
   parseCustomization,
+  storyTypeFromIssueType,
   TRUNCATION_NOTICE,
 } from "../src/mapping.js";
 import { MAPPINGS, renderLegend } from "../src/mappings.js";
@@ -386,6 +388,25 @@ test("--story-type chore forces the accepted fallback on a would-be feature", ()
   assert.equal(plan.stories[0].current_state, "accepted");
 });
 
+// The org's issue type now decides the type, so it also decides whether an abandoned
+// close can reject at all — the two rules meet here and nowhere else.
+for (const [typeName, storyType, state] of /** @type {[string, string, string][]} */ ([
+  ["Task", "feature", "rejected"],
+  ["Bug", "bug", "rejected"],
+  ["Chore", "chore", "accepted"],
+])) {
+  test(`an issue typed ${typeName} closed as not_planned is ${storyType} and lands ${state}`, () => {
+    const plan = mapRepo({
+      issues: [closedWith({ state_reason: "not_planned", type: { name: typeName } })],
+      comments: [],
+      labels: [],
+    });
+    assert.equal(plan.stories[0].story_type, storyType);
+    assert.equal(plan.stories[0].current_state, state);
+    assert.ok(plan.stories[0].labels.includes("not-planned"));
+  });
+}
+
 for (const reason of [undefined, null, "completed", "reopened", "some_future_reason"]) {
   test(`state_reason ${JSON.stringify(reason)} earns no label, mapping as if it were absent`, () => {
     const withReason = mapRepo({
@@ -393,8 +414,8 @@ for (const reason of [undefined, null, "completed", "reopened", "some_future_rea
       comments: [],
       labels: [],
     });
-    const v3 = mapRepo({ issues: [closedWith({})], comments: [], labels: [] });
-    assert.deepEqual(withReason, v3);
+    const noReason = mapRepo({ issues: [closedWith({})], comments: [], labels: [] });
+    assert.deepEqual(withReason, noReason);
     assert.deepEqual(withReason.stories[0].labels, []);
     assert.deepEqual(withReason.labels, []);
   });
@@ -490,6 +511,152 @@ test("one reason label is created once across issues, first-seen casing winning"
     ["Duplicate"],
   );
   assert.deepEqual(plan.stories[1].labels, ["duplicate"]);
+});
+
+// --- org-defined issue types (#31927) ----------------------------------------
+
+for (const [name, expected] of /** @type {[string, string][]} */ ([
+  ["Bug", "bug"],
+  ["Feature", "feature"],
+  ["Enhancement", "feature"],
+  ["Task", "feature"],
+  ["Chore", "chore"],
+])) {
+  test(`issue type '${name}' maps to a ${expected} story with no matching label or title`, () => {
+    const plan = mapRepo({
+      issues: [ghIssue({ title: "Add a widget", labels: [], type: { name } })],
+      comments: [],
+      labels: [],
+    });
+    assert.equal(plan.stories[0].story_type, expected);
+    assert.deepEqual(plan.stories[0].labels, []);
+  });
+}
+
+// Task lands on feature, not chore: GitHub seeds every org with Bug/Feature/Task,
+// so Task is ordinary product work and belongs inside velocity (see CONTRACT.md).
+test("the issue-type table classifies exactly these five names", () => {
+  assert.deepEqual(
+    [...ISSUE_TYPE_STORY_TYPES],
+    [
+      ["bug", "bug"],
+      ["feature", "feature"],
+      ["enhancement", "feature"],
+      ["task", "feature"],
+      ["chore", "chore"],
+    ],
+  );
+});
+
+// GitHub issue-type names are org-authored free text, so the match is
+// case-insensitive on the trimmed name.
+for (const name of ["bug", "BUG", "bUg", "  Bug  "]) {
+  test(`issue type ${JSON.stringify(name)} matches case-insensitively, surrounding space ignored`, () => {
+    const plan = mapRepo({
+      issues: [ghIssue({ title: "Add a widget", type: { name } })],
+      comments: [],
+      labels: [],
+    });
+    assert.equal(plan.stories[0].story_type, "bug");
+  });
+}
+
+test("issue type wins over a label/title heuristic that says otherwise", () => {
+  const plan = mapRepo({
+    issues: [
+      ghIssue({
+        title: "Fix the parser",
+        labels: [{ name: "bug" }],
+        type: { name: "Feature" },
+      }),
+    ],
+    comments: [],
+    labels: [],
+  });
+  assert.equal(plan.stories[0].story_type, "feature");
+  assert.deepEqual(plan.stories[0].labels, ["bug"]); // the label still rides along
+});
+
+for (const type of [undefined, null, {}, { name: null }, { name: "" }]) {
+  test(`type ${JSON.stringify(type)} keeps the label/title inference, plan unchanged`, () => {
+    const withType = mapRepo({
+      issues: [ghIssue({ title: "Fix the parser", type })],
+      comments: [],
+      labels: [],
+    });
+    const noTypeKey = mapRepo({
+      issues: [ghIssue({ title: "Fix the parser" })],
+      comments: [],
+      labels: [],
+    });
+    assert.deepEqual(withType, noTypeKey);
+    assert.equal(withType.stories[0].story_type, "bug");
+  });
+}
+
+// An org may name a type anything; only the documented names classify, and a
+// non-object / non-string `type` must never be coerced into one.
+for (const type of [
+  { name: "Spike" },
+  { name: "Bug Report" },
+  { name: ["Bug"] },
+  { name: 7 },
+  "Bug",
+  7,
+]) {
+  test(`type ${JSON.stringify(type)} is not a known type name and falls through`, () => {
+    const plan = mapRepo({
+      issues: [ghIssue({ title: "Add a widget", labels: [{ name: "chore" }], type })],
+      comments: [],
+      labels: [],
+    });
+    assert.equal(plan.stories[0].story_type, "chore");
+  });
+}
+
+test("an unknown issue-type name never reaches the plan, control chars included", () => {
+  const plan = mapRepo({
+    issues: [ghIssue({ type: { name: "Sp[31mike" } })],
+    comments: [],
+    labels: [],
+  });
+  // Deep-equality against a no-`type` control, not a fragment match: nothing the
+  // name contains can survive, whatever the fixture's other text happens to be.
+  const noType = mapRepo({ issues: [ghIssue({})], comments: [], labels: [] });
+  assert.ok(!JSON.stringify(plan).includes("\\u001b"));
+  assert.deepEqual(plan, noType);
+});
+
+test("--story-type overrides the issue type, exactly as it overrides the heuristic", () => {
+  const plan = mapRepo(
+    { issues: [ghIssue({ type: { name: "Feature" } })], comments: [], labels: [] },
+    { ...DEFAULT_CUSTOMIZATION, storyType: "bug" },
+  );
+  assert.equal(plan.stories[0].story_type, "bug");
+});
+
+// The type must NOT classify here, or the heuristic never runs and the ordering
+// this test exists to pin becomes unobservable.
+test("a closed-reason label is added after typing, so it cannot become the type", () => {
+  CLOSED_REASON_LABELS.set("wontfix", "known-defect");
+  try {
+    const plan = mapRepo({
+      issues: [closedWith({ state_reason: "wontfix", type: { name: "Spike" } })],
+      comments: [],
+      labels: [],
+    });
+    assert.deepEqual(plan.stories[0].labels, ["known-defect"]);
+    assert.equal(plan.stories[0].story_type, "feature");
+  } finally {
+    CLOSED_REASON_LABELS.delete("wontfix");
+  }
+});
+
+test("storyTypeFromIssueType returns null for anything it does not classify", () => {
+  assert.equal(storyTypeFromIssueType({ name: "Bug" }), "bug");
+  assert.equal(storyTypeFromIssueType(null), null);
+  assert.equal(storyTypeFromIssueType(undefined), null);
+  assert.equal(storyTypeFromIssueType({ name: "Spike" }), null);
 });
 
 // --- MAPPINGS registry integration (AC: legend renders from the same table) --

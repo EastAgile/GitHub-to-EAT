@@ -109,7 +109,7 @@ export async function runWizard(fetched, { input, output }) {
       ask,
       write,
       "Story type for imported issues?",
-      ["infer from labels/title", "all feature", "all bug", "all chore"],
+      ["infer (issue type, else labels/title)", "all feature", "all bug", "all chore"],
       0,
     );
     const storyType = /** @type {"infer" | "feature" | "bug" | "chore"} */ (
