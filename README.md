@@ -114,6 +114,16 @@ must contain `issues` — the other types only add to an issue import:
 - `releases` — GitHub Releases become release-type stories (tag → title,
   notes → description, publish date kept).
 
+**Sub-issues** need no flag. EAT has no parent/child story relation, so on
+`--engine direct` the hierarchy rides the description's last paragraph instead:
+a parent gains `Sub-issues: #12, #14`, and each child gains `Sub-issue of #7`.
+A child listed by two parents keeps only the first, so the two directions never
+contradict each other. This costs one extra request per issue that advertises
+sub-issues — a flat repo pays nothing — and it is the one term that can push a
+large run past the anonymous 60 req/h ceiling, so pass `--token` for a
+hierarchy-heavy repo. If that listing fails or the budget runs out, the run
+says so and keeps going; it never trades the whole import for the cross-links.
+
 ### Customizing an import
 
 By default every issue is imported with the standard mapping. To narrow or
