@@ -262,12 +262,8 @@ export class EATClient {
   }
 
   /**
-   * True when the story create accepts an imported GitHub `requestor`
-   * (`ExternalPersonInput`, server story #32773). The story `requestor`, the
-   * `owners[].external` attachment and the comment `author` shipped as one
-   * change, so this one probe gates all three. Any error (404, auth, parse)
-   * counts as "not supported" — the direct engine then maps nobody and keeps
-   * the `@login` comment prefix. See CONTRACT.md "Fidelity limitations".
+   * True when the story create accepts a `requestor`; the three #32773 person
+   * fields shipped as one change, so this one probe gates all of them.
    *
    * @returns {Promise<boolean>}
    */

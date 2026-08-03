@@ -556,16 +556,15 @@ function commentText(comment, sendDates) {
 /**
  * @typedef {object} ExternalPerson one imported GitHub person, `ExternalPersonInput`-shaped
  * @property {"github"} source
- * @property {string} external_id the immutable numeric GitHub user id, stringified
+ * @property {string} external_id the numeric GitHub user id, stringified
  * @property {string} username the login
- * @property {string} display_name the login again — GitHub's issue payloads carry no profile name
- * @property {string} [html_url] the person's GitHub profile, when the payload carried one
+ * @property {string} display_name the login again — GitHub payloads carry no profile name
+ * @property {string} [html_url] the profile URL, when the payload carried one
  */
 
 /**
- * A GitHub user object as `ExternalPersonInput`, or null for a ghost. Mirrors github.rs
- * `valid_gh_user` + `to_person`: both the numeric id (the `external_member` dedup key, immutable
- * across a rename) and the login must be present, or no person is carried at all.
+ * Mirrors github.rs `valid_gh_user` + `to_person`: no numeric id (the rename-proof
+ * dedup key) or no login means no person is carried at all.
  *
  * @param {unknown} user
  * @returns {ExternalPerson | null}
@@ -732,8 +731,7 @@ const REJECTABLE_TYPES = new Set(["feature", "bug"]);
  * @property {string | null} completed_at the GitHub closed date, or a release's
  *   `published_at`, kept
  * @property {string[]} labels label names on this story
- * @property {ExternalPerson | null} [requestor] the issue author; null for a ghost, a release,
- *   or a run whose server does not accept people — the server then falls back to the caller
+ * @property {ExternalPerson | null} [requestor] the issue author, null for a ghost
  * @property {ExternalPerson[]} [owners] the assignees, ghosts dropped
  * @property {{ description: string, complete: boolean }[]} tasks
  * @property {{ text: string, created_at: string | null,
@@ -748,11 +746,8 @@ const REJECTABLE_TYPES = new Set(["feature", "bug"]);
  *   subIssues?: Map<string, string[]> | null, releases?: any[] | null }} repo
  * @param {Customization} [customization] per-run overrides; the default reproduces
  *   this profile unchanged (the filter/override stories consume the other fields)
- * @param {{ sendDates?: boolean, epics?: boolean, sendPeople?: boolean }} [options]
- *   `sendDates` sends the comment's date on the write; `sendPeople` maps GitHub people to
- *   `ExternalPersonInput` fields and leaves comment bodies verbatim — off, nobody is mapped and
- *   the author rides in the `@login on <date>:` / `@login:` prefix, as the older-server output
- *   always did; `epics` (`--include milestones`) maps each milestone to an epic
+ * @param {{ sendDates?: boolean, epics?: boolean, sendPeople?: boolean }} [options] off,
+ *   `sendPeople` maps nobody and the author rides in a `@login` prefix `sendDates` shortens
  * @returns {{ labels: LabelOp[], stories: StoryOp[], epics: EpicOp[] }}
  */
 export function mapRepo(

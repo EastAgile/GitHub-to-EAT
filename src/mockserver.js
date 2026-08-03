@@ -68,10 +68,8 @@ import { parseArgs } from "node:util";
  *   openapi advertises `created_at`/`completed_at` on story creates and
  *   `created_at` on comment creates, and the handlers persist them; false
  *   simulates a server that predates backdating (fields absent + ignored)
- * @property {boolean} people when true (default, mirroring the server tree), the
- *   openapi advertises `requestor` on story creates and the handlers persist the
- *   requestor, `owners[].external` and a comment's `author` (EAT #32773); false
- *   simulates a server that predates person attribution (fields absent + ignored)
+ * @property {boolean} people when true (default, mirroring the server tree), the openapi
+ *   advertises + the handlers persist the EAT #32773 person fields; false, absent + ignored
  * @property {boolean} asyncImport when true, POST /import/json answers the v2
  *   async accept — 202 `{ import_id, status:"pending" }` plus a pollable job at
  *   GET /imports/{import_id}; false (default) keeps today's synchronous 200

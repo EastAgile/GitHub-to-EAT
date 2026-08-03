@@ -106,10 +106,7 @@ test("parity: a draft release imports to the backlog, and so does one with no pu
 });
 
 // --- people (story #33465) ---------------------------------------------------
-// github.rs `to_person` / `valid_gh_user` and `issue_to_record`'s role assignment:
-// author → requestor, assignees → owners, comment `user` → comment author. The
-// `external_member` dedup key is `(source, external_id)`, so the triples below are
-// the rows the server importer would write for the same repo.
+// From github.rs `to_person` / `valid_gh_user`: the `(source, external_id)` rows the server writes.
 
 const PEOPLE_REPO = {
   issues: [

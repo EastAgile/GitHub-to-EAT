@@ -120,9 +120,8 @@ async function withRetry(fn, attempts, delayMs) {
  *   `runId` scopes the idempotency keys (fresh per run, stable across in-run
  *   retries); `sendProvenance` adds the re-import pair (EAT #31427) to every
  *   story create; `sendDates` adds backdated `created_at`/`completed_at` to the
- *   writes (server owner-gated); `sendPeople` adds the imported GitHub requestor,
- *   owners and comment author (EAT #32773, also owner-gated) — both off keep the
- *   payloads byte-identical to v3
+ *   writes; `sendPeople` adds the imported GitHub requestor, owners and comment author
+ *   (EAT #32773) — both owner-gated, and both off keep the payloads byte-identical to v3
  * @returns {Promise<WriteResult>}
  */
 export async function writePlan(client, projectId, plan, options = {}) {
