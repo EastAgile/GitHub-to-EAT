@@ -261,11 +261,8 @@ function warnUnrecognisedIssueTypes({ issues }, customization, stream) {
 }
 
 /**
- * The distinct GitHub logins this plan attaches as requestor / owner / comment author.
- *
- * The create responses carry no created-vs-reused signal, so this is the roster the run
- * touched, not strictly the rows it created (CONTRACT.md, *Fidelity limitations*). Filtered
- * like the server engine's own list — these logins are rendered raw to a terminal.
+ * The distinct logins this plan attaches — the roster touched, not the rows created (the
+ * creates carry no such signal). Filtered because these reach a terminal raw.
  *
  * @param {{ stories: import("./mapping.js").StoryOp[] }} plan
  * @returns {string[]}

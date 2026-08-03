@@ -69,11 +69,10 @@ import { parseArgs } from "node:util";
  *   `created_at` on comment creates, and the handlers persist them; false
  *   simulates a server that predates backdating (fields absent + ignored)
  * @property {boolean} people when true (default, mirroring the server tree), the openapi
- *   advertises + the handlers persist the EAT #32773 person fields; false, absent + ignored
- *   (`owners` itself predates #32773 and is always advertised, but an `external`-only owner
- *   then 400s, exactly as serde-dropping the unknown key makes `as_target` do)
- * @property {boolean} [commentAuthor] overrides `people` for the comment `author` field
- *   alone, so a test can prove each half of the single probe independently
+ *   advertises + the handlers persist the EAT #32773 person fields; false, absent + ignored,
+ *   and an `external`-only owner 400s the way serde-dropping the unknown key makes it
+ * @property {boolean} [commentAuthor] overrides `people` for the comment `author` alone,
+ *   so a test can prove each half of the single probe independently
  * @property {boolean} asyncImport when true, POST /import/json answers the v2
  *   async accept — 202 `{ import_id, status:"pending" }` plus a pollable job at
  *   GET /imports/{import_id}; false (default) keeps today's synchronous 200

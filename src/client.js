@@ -262,10 +262,8 @@ export class EATClient {
   }
 
   /**
-   * True when the story create accepts a `requestor` **and** the comment create
-   * accepts an `author` (EAT #32773 shipped them together). Both halves are
-   * checked because neither body uses `deny_unknown_fields`: half-support would
-   * silently drop the field, and the `@login` prefix is dropped by then.
+   * True when the story create accepts a `requestor` **and** the comment create an
+   * `author`: neither body rejects unknown fields, so half-support drops one silently.
    *
    * @returns {Promise<boolean>}
    */
