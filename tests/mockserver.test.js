@@ -111,10 +111,8 @@ test("computed import emits external_members_created once per project", async ()
   }
 });
 
-// The GitHub connector never fills the actor cells `unmatched` is built from, so
-// every list stays empty; the mock must still serialize the whole server shape.
-// What the CLI renders from non-empty `errors` / `warnings` is pinned in
-// tests/import.test.js — those drive `makeState({ importResult })`.
+// The GitHub connector never fills the actor cells `unmatched` is built from, so every
+// list stays empty; what the CLI renders from non-empty lists lives in import.test.js.
 test("a computed import carries the server's full result shape", async () => {
   const mock = await startMockServer(
     makeState({

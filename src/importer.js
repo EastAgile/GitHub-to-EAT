@@ -97,9 +97,8 @@ const GITHUB_LOGIN = /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$/;
  *
  * The server returns `imported` as a nested object (`{"stories": N,
  * "labels": M}`); a flat integer from older/other sources is also tolerated.
- * `unmatched` is always empty here: it is built from the email/name actor cells
- * (`owner_emails`, `requester_email`, …) that the GitHub connector never fills —
- * GitHub people ride in `author` / `assignees` and always resolve.
+ * `unmatched` is always empty here: it is built from email/name actor cells the
+ * GitHub connector never fills (its people ride in `author` / `assignees`).
  *
  * When the server answers the async accept (`202 { import_id, status }`
  * instead of the synchronous 200 body), poll the job to a terminal state and

@@ -539,11 +539,8 @@ function issueNumberFromUrl(issueUrl) {
 }
 
 /**
- * The API grew owner-gated comment-author attribution (`author: ExternalPersonInput`, server
- * #32773) but this engine has not adopted it yet (story #33465), so the author still rides in
- * the text prefix; a deleted GitHub account renders as `@ghost`. When `sendDates` is
- * false the date rides there too (`@login on <date>:`), matching an older server; when true the
- * comment's real `created_at` is sent on the write instead, so the prefix collapses to `@login:`.
+ * The API grew owner-gated comment-author attribution (server #32773) but this engine has not
+ * adopted it yet (story #33465), so the author — and, off `sendDates`, the date — rides in a prefix.
  *
  * @param {{ user?: { login?: string } | null, created_at?: string | null, body?: string | null }} comment
  * @param {boolean} sendDates
