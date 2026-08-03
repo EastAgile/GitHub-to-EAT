@@ -5,6 +5,8 @@
  * error mapping to a small exception hierarchy. Timeouts are in seconds.
  */
 
+import { scrubControl } from "./progress.js";
+
 export const DEFAULT_IMPORT_TIMEOUT = 300;
 
 /** Base class for East Agile Tracker client errors. */
@@ -55,6 +57,29 @@ export class EATClient {
   }
 
   /**
+   * Map a transport-level rejection to the right EAT error.
+   *
+   * Shared by the request and the body-read phases — the abort clock stays armed
+   * while the body streams, so both can fail the same way and must say the same thing.
+   *
+   * @param {unknown} err
+   * @param {string} path
+   * @param {number} seconds
+   * @returns {EATError}
+   */
+  #transportError(err, path, seconds) {
+    const e = /** @type {{ name?: string, message?: string, cause?: { message?: string } }} */ (
+      err
+    );
+    if (e?.name === "TimeoutError" || e?.name === "AbortError") {
+      return new EATTimeout(`request to ${path} timed out after ${Math.round(seconds)}s`);
+    }
+    return new EATError(
+      `could not reach ${this.apiBase}${path}: ${e?.cause?.message ?? e?.message ?? err}`,
+    );
+  }
+
+  /**
    * @param {string} method
    * @param {string} path
    * @param {{ timeout?: number, headers?: Record<string, string>, json?: unknown }} [options]
@@ -76,13 +101,7 @@ export class EATClient {
         signal: AbortSignal.timeout(seconds * 1000),
       });
     } catch (err) {
-      const e = /** @type {{ name?: string, message?: string, cause?: { message?: string } }} */ (
-        err
-      );
-      if (e?.name === "TimeoutError" || e?.name === "AbortError") {
-        throw new EATTimeout(`request to ${path} timed out after ${Math.round(seconds)}s`);
-      }
-      throw new EATError(`could not reach ${url}: ${e?.cause?.message ?? e?.message ?? err}`);
+      throw this.#transportError(err, path, seconds);
     }
 
     if (response.status === 401 || response.status === 403) {
@@ -97,9 +116,11 @@ export class EATClient {
       error.status = 404;
       throw error;
     }
+    // An unreadable or hostile error body must not upgrade a clean HTTP error
+    // into a crash, nor reach the terminal with control characters intact.
     if (response.status === 409) {
-      const text = await response.text();
-      const error = new ConflictError(`conflict on ${path}: ${text.slice(0, 200)}`);
+      const text = await response.text().catch(() => "");
+      const error = new ConflictError(`conflict on ${path}: ${scrubControl(text)}`);
       error.status = 409;
       try {
         const body = JSON.parse(text);
@@ -109,9 +130,9 @@ export class EATClient {
       throw error;
     }
     if (response.status >= 400) {
-      const text = await response.text();
+      const text = await response.text().catch(() => "");
       const error = new EATError(
-        `request to ${path} failed (${response.status}): ${text.slice(0, 200)}`,
+        `request to ${path} failed (${response.status}): ${scrubControl(text)}`,
       );
       error.status = response.status;
       throw error;
@@ -120,12 +141,39 @@ export class EATClient {
   }
 
   /**
+   * Make a request and parse its body as JSON.
+   *
+   * A body that is not JSON at all (proxy error page, captive portal, an
+   * `EAT_API_BASE` that points at something other than the API) is a payload
+   * error; a body-phase timeout or reset keeps the transport wording. Either
+   * way the caller sees an {@link EATError}, never a raw `SyntaxError`.
+   *
+   * @param {string} method
+   * @param {string} path
+   * @param {{ timeout?: number, headers?: Record<string, string>, json?: unknown }} [options]
+   * @returns {Promise<any>}
+   */
+  async #requestJson(method, path, options = {}) {
+    const response = await this.#request(method, path, options);
+    try {
+      return await response.json();
+    } catch (err) {
+      if (!(err instanceof SyntaxError)) {
+        throw this.#transportError(err, path, options.timeout ?? this.timeout);
+      }
+      throw new EATError(`the server returned an unexpected payload for ${path} (expected JSON)`, {
+        cause: err,
+      });
+    }
+  }
+
+  /**
    * Fetch `/meta` — used to confirm reachability and a valid token.
    *
    * @returns {Promise<any>}
    */
   async getMeta() {
-    return (await this.#request("GET", "/meta")).json();
+    return this.#requestJson("GET", "/meta");
   }
 
   /**
@@ -135,7 +183,7 @@ export class EATClient {
    * @returns {Promise<any>}
    */
   async getProject(projectId) {
-    return (await this.#request("GET", `/projects/${projectId}`)).json();
+    return this.#requestJson("GET", `/projects/${projectId}`);
   }
 
   /**
@@ -145,8 +193,7 @@ export class EATClient {
    * @returns {Promise<boolean>}
    */
   async projectHasStories(projectId) {
-    const response = await this.#request("GET", `/projects/${projectId}/stories?limit=1`);
-    const data = await response.json();
+    const data = await this.#requestJson("GET", `/projects/${projectId}/stories?limit=1`);
     // With ?limit, EAT returns a cursor page {"items": [...], "next_cursor": ...};
     // a bare array (no query) is also tolerated.
     const items = Array.isArray(data) ? data : (data.items ?? data.stories ?? []);
@@ -165,7 +212,7 @@ export class EATClient {
   async #openapi() {
     if (this.#spec === undefined) {
       try {
-        this.#spec = await (await this.#request("GET", "/openapi.json")).json();
+        this.#spec = await this.#requestJson("GET", "/openapi.json");
       } catch {
         this.#spec = null;
       }
@@ -321,8 +368,7 @@ export class EATClient {
     if (fields) params.set("fields", fields);
     if (importSource !== undefined) params.set("import_source", importSource);
     if (importExternalId !== undefined) params.set("import_external_id", importExternalId);
-    const response = await this.#request("GET", `/projects/${projectId}/stories?${params}`);
-    return response.json();
+    return this.#requestJson("GET", `/projects/${projectId}/stories?${params}`);
   }
 
   /**
@@ -335,11 +381,10 @@ export class EATClient {
    * @returns {Promise<any>}
    */
   async createLabel(projectId, label, idempotencyKey) {
-    const response = await this.#request("POST", `/projects/${projectId}/labels`, {
+    return this.#requestJson("POST", `/projects/${projectId}/labels`, {
       json: label,
       headers: { "Idempotency-Key": idempotencyKey },
     });
-    return response.json();
   }
 
   /**
@@ -393,11 +438,10 @@ export class EATClient {
    * @returns {Promise<any>}
    */
   async createStory(projectId, story, idempotencyKey) {
-    const response = await this.#request("POST", `/projects/${projectId}/stories`, {
+    return this.#requestJson("POST", `/projects/${projectId}/stories`, {
       json: story,
       headers: { "Idempotency-Key": idempotencyKey },
     });
-    return response.json();
   }
 
   /**
@@ -410,15 +454,10 @@ export class EATClient {
    * @returns {Promise<any>}
    */
   async createTask(projectId, storyId, task, idempotencyKey) {
-    const response = await this.#request(
-      "POST",
-      `/projects/${projectId}/stories/${storyId}/tasks`,
-      {
-        json: task,
-        headers: { "Idempotency-Key": idempotencyKey },
-      },
-    );
-    return response.json();
+    return this.#requestJson("POST", `/projects/${projectId}/stories/${storyId}/tasks`, {
+      json: task,
+      headers: { "Idempotency-Key": idempotencyKey },
+    });
   }
 
   /**
@@ -435,12 +474,10 @@ export class EATClient {
    */
   async createComment(projectId, storyId, text, idempotencyKey, { createdAt } = {}) {
     const json = createdAt ? { text, created_at: createdAt } : { text };
-    const response = await this.#request(
-      "POST",
-      `/projects/${projectId}/stories/${storyId}/comments`,
-      { json, headers: { "Idempotency-Key": idempotencyKey } },
-    );
-    return response.json();
+    return this.#requestJson("POST", `/projects/${projectId}/stories/${storyId}/comments`, {
+      json,
+      headers: { "Idempotency-Key": idempotencyKey },
+    });
   }
 
   /**
@@ -467,12 +504,11 @@ export class EATClient {
     const body = { source: "github", owner, repo, ...flags };
     if (dryRun) body.dry_run = true;
     if (token) body.token = token;
-    const response = await this.#request("POST", `/projects/${projectId}/import/json`, {
+    return this.#requestJson("POST", `/projects/${projectId}/import/json`, {
       json: body,
       headers: { "Idempotency-Key": idempotencyKey },
       timeout: timeout ?? DEFAULT_IMPORT_TIMEOUT,
     });
-    return response.json();
   }
 
   /**
@@ -484,7 +520,6 @@ export class EATClient {
    *   progress_current, progress_total, error, error_code, result }`
    */
   async getImport(projectId, importId) {
-    const response = await this.#request("GET", `/projects/${projectId}/imports/${importId}`);
-    return response.json();
+    return this.#requestJson("GET", `/projects/${projectId}/imports/${importId}`);
   }
 }
