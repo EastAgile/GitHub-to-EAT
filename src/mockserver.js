@@ -70,6 +70,10 @@ import { parseArgs } from "node:util";
  *   simulates a server that predates backdating (fields absent + ignored)
  * @property {boolean} people when true (default, mirroring the server tree), the openapi
  *   advertises + the handlers persist the EAT #32773 person fields; false, absent + ignored
+ *   (`owners` itself predates #32773 and is always advertised, but an `external`-only owner
+ *   then 400s, exactly as serde-dropping the unknown key makes `as_target` do)
+ * @property {boolean} [commentAuthor] overrides `people` for the comment `author` field
+ *   alone, so a test can prove each half of the single probe independently
  * @property {boolean} asyncImport when true, POST /import/json answers the v2
  *   async accept — 202 `{ import_id, status:"pending" }` plus a pollable job at
  *   GET /imports/{import_id}; false (default) keeps today's synchronous 200
@@ -242,9 +246,9 @@ function openapiDoc(state) {
           // must be seen never to send it; a numeric type here would invite the wrong guess.
           estimate: { type: ["string", "null"] },
           ...(state.backdating ? { created_at: dateTime, completed_at: dateTime } : {}),
-          ...(state.people
-            ? { requestor: externalPerson, owners: { type: ["array", "null"] } }
-            : {}),
+          // `owners` is server story #199, not #32773 — every older server publishes it.
+          owners: { type: ["array", "null"] },
+          ...(state.people ? { requestor: externalPerson } : {}),
         },
       ),
       "/api/v1/projects/{project_id}/stories/{story_id}/tasks": post({
@@ -255,7 +259,7 @@ function openapiDoc(state) {
         { text: ml.comment_text, comment_text: ml.comment_text },
         {
           ...(state.backdating ? { created_at: dateTime } : {}),
-          ...(state.people ? { author: externalPerson } : {}),
+          ...((state.commentAuthor ?? state.people) ? { author: externalPerson } : {}),
         },
       ),
     },
@@ -613,7 +617,7 @@ const LABEL_DEFAULT_TEXT = "#ffffff";
  * @returns {any}
  */
 function toStoryPayload(row) {
-  const { comments, ...payload } = row;
+  const { comments, people, ...payload } = row;
   return payload;
 }
 
@@ -827,6 +831,22 @@ function createStory(state, projectId, body) {
     }
   }
 
+  // Pre-#32773 `OwnerInput` has no `external` and no deny_unknown_fields, so serde drops
+  // the key and `as_target()` rejects the now-empty owner (stories.rs:472-478).
+  for (const owner of body.owners ?? []) {
+    const usable = state.people && owner?.external != null;
+    if (!usable && owner?.member_id == null && owner?.agent_id == null) {
+      return {
+        status: 400,
+        payload: {
+          code: "validation_failed",
+          details: { fields: ["owners"] },
+          error: "owners[*]: exactly one of member_id / agent_id is required",
+        },
+      };
+    }
+  }
+
   state.labels[projectId] ??= [];
   const projectLabels = state.labels[projectId];
   const labels = [];
@@ -876,12 +896,12 @@ function createStory(state, projectId, body) {
     updated_at: now,
   };
   if (state.people) {
-    // A ghost sends no field at all, and the server falls back to the caller —
-    // stored as null/[] so a test can tell "nobody" from "not supported".
-    story.requestor = body.requestor ?? null;
-    story.owners = (body.owners ?? [])
-      .map((/** @type {any} */ owner) => owner?.external)
-      .filter(Boolean);
+    // Kept off the read payload (like `comments`): the real read side returns
+    // polymorphic actor blocks, not the input shape, and the CLI reads neither.
+    story.people = {
+      requestor: body.requestor ?? null,
+      owners: (body.owners ?? []).map((/** @type {any} */ o) => o?.external).filter(Boolean),
+    };
   }
   if (state.backdating && body.created_at != null) {
     story.created_at = body.created_at;

@@ -439,14 +439,14 @@ test("against a person-attributing server, people ride the writes and the commen
       github: { fetchAll: async () => fetchedRepo() },
     });
     const closed = mock.state.stories[91].find((r) => r.title === "older closed issue");
-    assert.deepEqual(closed.requestor, {
+    assert.deepEqual(closed.people.requestor, {
       source: "github",
       external_id: "11",
       username: "alice",
       display_name: "alice",
       html_url: "https://github.com/alice",
     });
-    assert.deepEqual(closed.owners, [
+    assert.deepEqual(closed.people.owners, [
       { source: "github", external_id: "22", username: "bob", display_name: "bob" },
     ]);
     assert.equal(closed.comments[0].comment_text, "confirmed");
@@ -468,8 +468,78 @@ test("an unassigned issue with no readable author sends no person fields at all"
     });
     // Issue #7 in the fixture carries neither `user` nor `assignees`.
     const open = mock.state.stories[91].find((r) => r.title === "newer open issue");
-    assert.equal(open.requestor, null);
-    assert.deepEqual(open.owners, []);
+    assert.equal(open.people.requestor, null);
+    assert.deepEqual(open.people.owners, []);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a person-attributing server that cannot backdate still keeps the comment's GitHub date", async () => {
+  const mock = await startMockServer(makeState({ backdating: false, people: true }));
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    });
+    const closed = mock.state.stories[91].find((r) => r.title === "older closed issue");
+    // The two probes are independent: with no `created_at` to ride on, the date
+    // has to stay in the body even though the author rides structurally.
+    assert.equal(closed.comments[0].comment_text, "@alice on 2020-01-05:\n\nconfirmed");
+    assert.equal(closed.comments[0].author.external_id, "11");
+    assert.ok(!("created_at" in closed.comments[0]));
+    assert.ok(!("created_at" in closed));
+  } finally {
+    await mock.close();
+  }
+});
+
+test("the direct engine reports the placeholder owners it attached, deduped and sorted", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    });
+    // alice is both the issue author and the comment author — reported once.
+    assert.deepEqual(result.externalMembersCreated, ["alice", "bob"]);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("the direct dry run previews the same placeholder-owner roster", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      dryRun: true,
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    });
+    assert.equal(result.dryRun, true);
+    assert.deepEqual(result.externalMembersCreated, ["alice", "bob"]);
+    assert.equal(mock.state.stories[91], undefined);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a server with no person support reports no placeholder owners", async () => {
+  const mock = await startMockServer(makeState({ people: false }));
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    });
+    assert.deepEqual(result.externalMembersCreated, []);
   } finally {
     await mock.close();
   }

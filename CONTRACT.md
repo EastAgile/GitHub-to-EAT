@@ -189,13 +189,30 @@ story #32773). The payload it builds is `to_person`'s output field for field —
 `source: "github"`, `external_id` the stringified numeric id, `username` and
 `display_name` both the trimmed login, `html_url` when the payload carried one —
 so both engines get-or-create the same `(source, external_id)` row. A ghost is
-omitted rather than sent partially, and the server then falls back to the calling
-key, which is the server importer's own fallback. `tests/parity.test.js` pins the
-triples. Two differences remain, both of scope, not of shape: the direct engine
-imports no pull requests, so the "PR creator is also an owner" rule has nothing to
-apply to; and all three fields are **owner-gated and create-only**, so the engine
-feature-detects them first and falls back to the `@login` comment prefix against a
-server that does not advertise them (see *Fidelity limitations* below).
+omitted rather than sent partially; the story's requestor and the comment's author
+then fall back to the calling key (the server importer's own fallback), while a
+ghost *assignee* is simply absent — the caller does not become an owner.
+`tests/parity.test.js` pins the triples. The differences that remain:
+
+- **Scope** — the direct engine imports no pull requests, so the "PR creator is
+  also an owner" rule has nothing to apply to.
+- **Gating** — all three fields are **owner-gated and create-only**, so the engine
+  feature-detects them first and falls back to the `@login` comment prefix against
+  a server that does not advertise them (see *Fidelity limitations* below).
+- **A safe-integer id floor** — `valid_gh_user` keeps any non-zero `i64`, but a
+  GitHub id past 2^53 does not survive `JSON.parse` intact, and two such ids would
+  stringify to one `external_id`, merging two people onto one `external_member`
+  row. The direct engine drops that person instead (pinned in the ghost table of
+  `tests/mapping.test.js`).
+- **Two CLI-side normalisations** — a whitespace-only `html_url` is dropped rather
+  than sent (`to_person` passes `Option<String>` through untouched), and the
+  comment body is trimmed before it is sent (the server importer stores it
+  untrimmed, testing `trim()` only to skip blank comments).
+- **Placeholder-owner reporting** — the create responses carry no created-vs-reused
+  signal, so the direct engine's `N placeholder owner(s)` line reports the distinct
+  logins the run *attached*, not strictly the `external_member` rows it created; on
+  a re-import into a project that already knows those people the count therefore
+  over-reports where the server engine's would read 0.
 
 ## v2 — async import
 
@@ -658,10 +675,12 @@ drifting in prose.
 - **Comments** — joined to their issue by `issue_url`. The fetcher has already
   dropped PR conversation comments by the same key, and the join keeps any
   stray unmatched comment inert (its issue is never mapped). The body is stored
-  **verbatim** and the author rides on the write's own `author` field, like the
-  server engine's. Against a server that does not advertise the field the body
-  is prefixed `@<login> on <YYYY-MM-DD>:` instead (`@<login>:` when the comment's
-  date rides on the write; deleted accounts render as `@ghost`) — see "Comment
+  with **no prefix** (leading/trailing whitespace trimmed — a CLI-side
+  normalisation) and the author rides on the write's own `author` field, like the
+  server engine's. That needs *both* person and backdating support: whenever the
+  comment's date cannot ride on the write, the body is prefixed
+  `@<login> on <YYYY-MM-DD>:` so the date is not lost (`@<login>:` when the date
+  does ride but people do not; deleted accounts render as `@ghost`) — see "Comment
   authorship" under *Fidelity limitations*.
 - **People** — the issue author becomes the story's `requestor` and the
   assignees its `owners`, both as `ExternalPersonInput` (see *GitHub identity
@@ -920,9 +939,9 @@ real server 2026-07-16 and mirrored by `src/mockserver.js`):
 - **`POST /stories`** — body requires `name` (the read-side field is `title`;
   missing → `400 validation_failed`); optional `description`, `story_type`,
   `current_state`, `estimate`, `icebox`, `created_at`, `completed_at`,
-  `import_source`, `import_external_id`, `requestor`, `owners`, and `labels` as bare strings or
-  `{ "name": "..." }` objects — the server attaches by name, get-or-creating
-  with default colors (unlike `POST /labels`, the story payload never 409s on
+  `import_source`, `import_external_id`, `requestor`, `owners`, and `labels` as
+  bare strings or `{ "name": "..." }` objects — the server attaches by name,
+  get-or-creating with default colors (unlike `POST /labels`, it never 409s on
   an existing name), and embeds the full label objects in the response.
   `current_state: "accepted"` is accepted at create time for an unestimated
   feature (verified 2026-07-16) — no estimate guard, so no
@@ -1111,19 +1130,32 @@ and both are prescanned, in union.
   iteration info, so the write report cannot yet surface which iteration a
   backdated story landed in.
 - **People** — feature-detected from `GET /openapi.json`: when the story create
-  advertises `requestor`, the direct engine sends the issue author as the story's
-  `requestor`, the assignees as `owners[].external`, and each comment's author as
-  that comment's `author` — all `ExternalPersonInput` (server story #32773, one
-  change, so one probe gates all three). All are owner-gated server-side and
-  honoured on create only; the CLI's agent key qualifies. A ghost (no numeric id,
-  or no login) sends no field at all, and the server falls back to the calling
-  key, matching the server importer. Against a server that does **not** advertise
-  the field (older server, or `/openapi.json` missing/unparseable) nobody is
-  mapped and every payload stays byte-identical to v3, with the GitHub author
-  riding in the comment body prefix instead: `@login:` when the comment's
-  `created_at` rides on the write (backdating-capable server), `@login on
-  YYYY-MM-DD:` when it does not. Pull requests are out of scope for this engine,
-  so the server's "the PR creator is also an owner" rule has nothing to apply to.
+  advertises `requestor` **and** the comment create advertises `author`, the
+  direct engine sends the issue author as the story's `requestor`, the assignees
+  as `owners[].external`, and each comment's author as that comment's `author` —
+  all `ExternalPersonInput` (server story #32773, one change, so one probe gates
+  all three; both halves are checked because neither request body rejects unknown
+  fields, so half-support would drop the field silently). All are owner-gated
+  server-side and honoured on create only; the CLI's agent key qualifies. A ghost
+  (no numeric id, no login, or an id past 2^53 — see *GitHub identity mapping*)
+  sends no field at all: the story's requestor and the comment's author then fall
+  back to the calling key, matching the server importer, while a ghost assignee is
+  simply absent and the story ends with one fewer owner. Against a server that
+  does **not** advertise the fields (older server, or `/openapi.json`
+  missing/unparseable) nobody is mapped and every payload stays byte-identical to
+  v3, with the GitHub author riding in the comment body prefix instead. The prefix
+  also survives the mixed case: because backdating and person attribution are two
+  independent probes, the body keeps `@login on YYYY-MM-DD:` whenever the
+  comment's `created_at` cannot ride on the write, and collapses to `@login:` (or
+  disappears entirely, once people ride too) only when it can. Pull requests are
+  out of scope for this engine, so the server's "the PR creator is also an owner"
+  rule has nothing to apply to.
+- **Placeholder-owner reporting** — the direct engine's `N placeholder owner(s)
+  created` / `would create N placeholder owner(s)` line lists the distinct GitHub
+  logins the run attached as requestor, owner or comment author. The story-create
+  response carries no created-vs-reused signal, so unlike the server engine's
+  `external_members_created` this is the roster touched, not the rows created: a
+  re-import into a project that already knows those people still lists them.
 - **Sub-issue hierarchy** — EAT has no parent/child story relation, so the
   cross-links above are plain text in the description, not a queryable link: a
   board can read them, nothing can filter or traverse on them, and moving or

@@ -462,6 +462,22 @@ test("accepting the prompt runs the direct import", async () => {
   );
 });
 
+test("the direct engine's placeholder owners render through the shared report path", async () => {
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      const out = capture();
+      const code = await main(["--project", "91", "--repo", "o/r", "--engine", "direct", "-y"], {
+        stdout: out,
+        stderr: capture(),
+        preflight: async () => preflightResult(),
+        runDirect: async () => outcome({ externalMembersCreated: ["alice", "bob"] }),
+      });
+      assert.equal(code, 0);
+      assert.ok(out.buf.includes("note: 2 placeholder owner(s) created: @alice, @bob"), out.buf);
+    }),
+  );
+});
+
 test("a GitHub failure in the direct engine maps to a clean exit 1", async () => {
   await inTempDir(() =>
     withEnv({ EAT_AGENT_KEY: "key" }, async () => {

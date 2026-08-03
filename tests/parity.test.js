@@ -137,8 +137,12 @@ const PEOPLE_REPO = {
 const triple = (/** @type {any} */ p) =>
   p === null ? null : [p.source, p.external_id, p.username];
 
+// Both probes on: the fully-supported path, the only one the server importer has.
+const mapPeople = () =>
+  mapRepo(PEOPLE_REPO, DEFAULT_CUSTOMIZATION, { sendPeople: true, sendDates: true });
+
 test("parity: the people triples the server importer would write", () => {
-  const { stories } = mapRepo(PEOPLE_REPO, DEFAULT_CUSTOMIZATION, { sendPeople: true });
+  const { stories } = mapPeople();
   const seven = /** @type {any} */ (stories.find((s) => s.external_id === "7"));
   const eight = /** @type {any} */ (stories.find((s) => s.external_id === "8"));
 
@@ -160,16 +164,40 @@ test("parity: the people triples the server importer would write", () => {
 });
 
 test("parity: the login is the display name too, and html_url rides along when GitHub sent one", () => {
-  const { stories } = mapRepo(PEOPLE_REPO, DEFAULT_CUSTOMIZATION, { sendPeople: true });
+  const { stories } = mapPeople();
   const seven = /** @type {any} */ (stories.find((s) => s.external_id === "7"));
   assert.equal(seven.requestor.display_name, "alice");
   assert.equal(seven.requestor.html_url, "https://github.com/alice");
-  // GhUser.html_url is Option<String>: absent stays absent, never an empty string.
+  // GhUser.html_url is Option<String>: absent stays absent.
   assert.equal("html_url" in seven.owners[0], false);
 });
 
-test("parity: a comment body is stored verbatim — no '@login' prefix, like the server's", () => {
-  const { stories } = mapRepo(PEOPLE_REPO, DEFAULT_CUSTOMIZATION, { sendPeople: true });
+// Two deliberate CLI-side normalisations, not server parity: `to_person` passes
+// html_url through untouched, and the importer stores the comment body untrimmed.
+test("cli-side: a blank html_url is dropped and the comment body is trimmed", () => {
+  const { stories } = mapRepo(
+    {
+      issues: [issue({ number: 7, user: { id: 12, login: "alice", html_url: "   " } })],
+      comments: [
+        {
+          issue_url: "https://api.github.com/repos/o/r/issues/7",
+          user: { id: 34, login: "bob" },
+          created_at: "2026-03-04T05:06:07Z",
+          body: "  padded body  ",
+        },
+      ],
+      labels: [],
+    },
+    DEFAULT_CUSTOMIZATION,
+    { sendPeople: true, sendDates: true },
+  );
+  const seven = /** @type {any} */ (stories[0]);
+  assert.equal("html_url" in seven.requestor, false);
+  assert.equal(seven.comments[0].text, "padded body");
+});
+
+test("parity: a comment body carries no '@login' prefix, like the server's", () => {
+  const { stories } = mapPeople();
   const seven = /** @type {any} */ (stories.find((s) => s.external_id === "7"));
   assert.equal(seven.comments[0].text, "verbatim body");
 });

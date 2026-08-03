@@ -746,8 +746,12 @@ const REJECTABLE_TYPES = new Set(["feature", "bug"]);
  *   subIssues?: Map<string, string[]> | null, releases?: any[] | null }} repo
  * @param {Customization} [customization] per-run overrides; the default reproduces
  *   this profile unchanged (the filter/override stories consume the other fields)
- * @param {{ sendDates?: boolean, epics?: boolean, sendPeople?: boolean }} [options] off,
- *   `sendPeople` maps nobody and the author rides in a `@login` prefix `sendDates` shortens
+ * @param {{ sendDates?: boolean, epics?: boolean, sendPeople?: boolean }} [options] `sendDates`
+ *   sends the comment's date on the write, so its prefix collapses to `@login:` (off, it stays
+ *   `@login on <date>:`, reproducing the older-server output byte-for-byte); `epics`
+ *   (`--include milestones`) maps each milestone to an epic; `sendPeople` maps the GitHub
+ *   people onto `requestor`/`owners`/`author` (off, nobody is mapped and the author rides in
+ *   the comment prefix — as does the date, unless `sendDates` carries it)
  * @returns {{ labels: LabelOp[], stories: StoryOp[], epics: EpicOp[] }}
  */
 export function mapRepo(
@@ -880,10 +884,11 @@ export function mapRepo(
     if (!(comment.body ?? "").trim()) continue;
     const target = byIssue.get(issueNumberFromUrl(comment.issue_url) ?? "");
     if (target) {
-      // With people on, attribution is structural (author + created_at) and the body is
-      // verbatim — the server engine's own shape. Off, the prefix is all there is.
+      // Both probes, because they are independent: only `sendDates` puts the date on the
+      // write, so without it the prefix is still the date's only ride.
       target.push({
-        text: sendPeople ? (comment.body ?? "").trim() : commentText(comment, sendDates),
+        text:
+          sendPeople && sendDates ? (comment.body ?? "").trim() : commentText(comment, sendDates),
         created_at: comment.created_at ?? null,
         author: person(comment.user),
       });

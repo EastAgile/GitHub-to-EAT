@@ -1093,6 +1093,28 @@ test("sendPeople authors each comment and leaves the body verbatim — no @login
   ]);
 });
 
+test("sendPeople without sendDates keeps the dated prefix — the date has nowhere else to ride", () => {
+  const plan = mapRepo(
+    {
+      issues: [ghIssue({ number: 7 })],
+      comments: [
+        {
+          issue_url: "https://api.github.com/repos/o/r/issues/7",
+          user: { id: 5, login: "bob" },
+          created_at: "2026-03-04T05:06:07Z",
+          body: "Looks good",
+        },
+      ],
+      labels: [],
+    },
+    DEFAULT_CUSTOMIZATION,
+    { sendPeople: true, sendDates: false },
+  );
+  assert.equal(plan.stories[0].comments[0].text, "@bob on 2026-03-04:\n\nLooks good");
+  // The author still rides structurally — only the date needs the prefix.
+  assert.equal(plan.stories[0].comments[0].author?.username, "bob");
+});
+
 // github.rs `valid_gh_user`: both the numeric id and the login must be present.
 for (const [label, user] of /** @type {[string, any][]} */ ([
   ["a null user (deleted account)", null],
@@ -1100,6 +1122,9 @@ for (const [label, user] of /** @type {[string, any][]} */ ([
   ["a user whose id is 0", { id: 0, login: "ghosty" }],
   ["a user with a blank login", { id: 9, login: "   " }],
   ["a user with a non-numeric id", { id: "9", login: "ghosty" }],
+  // JS-only divergence from valid_gh_user: past 2^53 two ids stringify to one
+  // external_id, so the direct engine drops rather than merge two people.
+  ["a user whose id is past 2^53", { id: 2 ** 53, login: "ghosty" }],
 ])) {
   test(`ghost: ${label} is omitted entirely, never partially`, () => {
     const plan = withPeople({

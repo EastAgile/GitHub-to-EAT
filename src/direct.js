@@ -12,6 +12,7 @@ import {
   unionImported,
 } from "./dedup.js";
 import { GitHubClient } from "./github.js";
+import { GITHUB_LOGIN } from "./importer.js";
 import {
   clampPlan,
   DEFAULT_CUSTOMIZATION,
@@ -260,6 +261,32 @@ function warnUnrecognisedIssueTypes({ issues }, customization, stream) {
 }
 
 /**
+ * The distinct GitHub logins this plan attaches as requestor / owner / comment author.
+ *
+ * The create responses carry no created-vs-reused signal, so this is the roster the run
+ * touched, not strictly the rows it created (CONTRACT.md, *Fidelity limitations*). Filtered
+ * like the server engine's own list — these logins are rendered raw to a terminal.
+ *
+ * @param {{ stories: import("./mapping.js").StoryOp[] }} plan
+ * @returns {string[]}
+ */
+function attachedPeople(plan) {
+  /** @type {Set<string>} */
+  const logins = new Set();
+  for (const story of plan.stories) {
+    for (const person of [
+      story.requestor,
+      ...(story.owners ?? []),
+      ...story.comments.map((c) => c.author),
+    ]) {
+      const login = person?.username;
+      if (typeof login === "string" && GITHUB_LOGIN.test(login)) logins.add(login);
+    }
+  }
+  return [...logins].sort();
+}
+
+/**
  * Run the client-side import pipeline and return the same
  * {@link import("./importer.js").ImportOutcome} shape the server engine yields.
  *
@@ -384,7 +411,7 @@ export async function runDirect(client, projectId, owner, repo, options) {
       errors: [],
       warnings: [],
       unmatched: {},
-      externalMembersCreated: [],
+      externalMembersCreated: attachedPeople(plan),
       dryRun: true,
     };
   }
@@ -403,7 +430,7 @@ export async function runDirect(client, projectId, owner, repo, options) {
     errors: [],
     warnings: [],
     unmatched: {},
-    externalMembersCreated: [],
+    externalMembersCreated: attachedPeople(plan),
     dryRun: false,
   };
 }

@@ -262,18 +262,24 @@ export class EATClient {
   }
 
   /**
-   * True when the story create accepts a `requestor`; the three #32773 person
-   * fields shipped as one change, so this one probe gates all of them.
+   * True when the story create accepts a `requestor` **and** the comment create
+   * accepts an `author` (EAT #32773 shipped them together). Both halves are
+   * checked because neither body uses `deny_unknown_fields`: half-support would
+   * silently drop the field, and the `@login` prefix is dropped by then.
    *
    * @returns {Promise<boolean>}
    */
   async supportsPersonAttribution() {
     const spec = await this.#openapi();
+    let requestor = false;
+    let author = false;
     for (const [path, ops] of Object.entries(spec?.paths ?? {})) {
-      if (!path.includes("/projects/") || !path.endsWith("/stories")) continue;
-      if ("requestor" in EATClient.#postProperties(spec, ops)) return true;
+      if (!path.includes("/projects/")) continue;
+      const props = EATClient.#postProperties(spec, ops);
+      if (path.endsWith("/stories") && "requestor" in props) requestor = true;
+      if (path.endsWith("/comments") && "author" in props) author = true;
     }
-    return false;
+    return requestor && author;
   }
 
   /**

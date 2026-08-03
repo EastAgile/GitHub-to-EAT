@@ -297,6 +297,22 @@ test("supportsPersonAttribution is true when the spec advertises requestor, fals
   }
 });
 
+// Neither CreateStory nor CreateComment uses deny_unknown_fields, so half-support
+// would be ignored silently — with the prefix dropped, attribution would vanish.
+for (const [label, overrides] of /** @type {[string, any][]} */ ([
+  ["the comment create does not advertise author", { commentAuthor: false }],
+  ["the story create does not advertise requestor", { people: false, commentAuthor: true }],
+])) {
+  test(`supportsPersonAttribution is false when ${label}`, async () => {
+    const mock = await startMockServer(makeState(overrides));
+    try {
+      assert.equal(await new EATClient(mock.baseUrl, "tok").supportsPersonAttribution(), false);
+    } finally {
+      await mock.close();
+    }
+  });
+}
+
 test("supportsPersonAttribution is false when /openapi.json is absent", async () => {
   const mock = await startMockServer(makeState({ serverDryRun: false }));
   try {
