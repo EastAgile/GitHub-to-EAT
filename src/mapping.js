@@ -539,8 +539,9 @@ function issueNumberFromUrl(issueUrl) {
 }
 
 /**
- * The public EAT API has no comment-author attribution (EAT-team ask pending), so the author
- * rides in the text prefix; a deleted GitHub account renders as `@ghost`. When `sendDates` is
+ * The API grew owner-gated comment-author attribution (`author: ExternalPersonInput`, server
+ * #32773) but this engine has not adopted it yet (story #33465), so the author still rides in
+ * the text prefix; a deleted GitHub account renders as `@ghost`. When `sendDates` is
  * false the date rides there too (`@login on <date>:`), matching an older server; when true the
  * comment's real `created_at` is sent on the write instead, so the prefix collapses to `@login:`.
  *

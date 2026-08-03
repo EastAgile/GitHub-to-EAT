@@ -43,6 +43,7 @@ function outcome(overrides = {}) {
     importedLabels: 0,
     skipped: 0,
     errors: [],
+    warnings: [],
     unmatched: {},
     externalMembersCreated: [],
     dryRun: false,

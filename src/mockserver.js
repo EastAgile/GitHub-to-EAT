@@ -317,8 +317,8 @@ function computeImportResult(state, projectId, body) {
     errors: [],
     warnings: [],
     external_members_created: createdMembers,
-    // Serialized but always empty: `unmatched` is EAT-CSV-only, and GitHub
-    // actors key on the numeric user id (CONTRACT.md).
+    // Serialized but always empty: the GitHub connector never fills the
+    // email/name actor cells these lists are built from (CONTRACT.md).
     unmatched: {
       owners: [],
       followers: [],

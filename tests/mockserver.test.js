@@ -111,8 +111,10 @@ test("computed import emits external_members_created once per project", async ()
   }
 });
 
-// A GitHub import keys actors on the numeric user id, so every `unmatched`
-// list stays empty; the mock must still serialize the whole server shape.
+// The GitHub connector never fills the actor cells `unmatched` is built from, so
+// every list stays empty; the mock must still serialize the whole server shape.
+// What the CLI renders from non-empty `errors` / `warnings` is pinned in
+// tests/import.test.js — those drive `makeState({ importResult })`.
 test("a computed import carries the server's full result shape", async () => {
   const mock = await startMockServer(
     makeState({
@@ -131,14 +133,15 @@ test("a computed import carries the server's full result shape", async () => {
       "unmatched",
       "warnings",
     ]);
-    assert.deepEqual(result.warnings, []);
-    assert.deepEqual(result.unmatched, {
-      owners: [],
-      followers: [],
-      reviewers: [],
-      requesters: [],
-      comment_authors: [],
-    });
+    assert.deepEqual(Object.keys(result.unmatched).sort(), [
+      "comment_authors",
+      "followers",
+      "owners",
+      "requesters",
+      "reviewers",
+    ]);
+    assert.ok(Object.values(result.unmatched).every((list) => Array.isArray(list) && !list.length));
+    assert.ok(Array.isArray(result.warnings) && !result.warnings.length);
   } finally {
     await mock.close();
   }
