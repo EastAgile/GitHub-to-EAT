@@ -48,12 +48,14 @@ function fetchedRepo() {
         created_at: "2020-01-01T00:00:00Z",
         closed_at: "2020-02-01T00:00:00Z",
         labels: [{ name: "bug", color: "ff0000" }],
+        user: { id: 11, login: "alice", html_url: "https://github.com/alice" },
+        assignees: [{ id: 22, login: "bob" }],
       },
     ],
     comments: [
       {
         issue_url: "https://api.github.com/repos/o/r/issues/3",
-        user: { login: "alice" },
+        user: { id: 11, login: "alice" },
         created_at: "2020-01-05T00:00:00Z",
         body: "confirmed",
       },
@@ -371,7 +373,7 @@ test("over-long text is clamped to the published limits and the import completes
     repo.issues[0].body = "B".repeat(1000);
     repo.comments.push({
       issue_url: "https://api.github.com/repos/o/r/issues/7",
-      user: { login: "bob" },
+      user: { id: 22, login: "bob" },
       created_at: "2024-05-02T00:00:00Z",
       body: "b".repeat(5000),
     });
@@ -400,8 +402,8 @@ test("over-long text is clamped to the published limits and the import completes
 
 // --- backdating end-to-end (story #32427) --------------------------------------
 
-test("against a backdating server, rows carry the GitHub dates and the @login: prefix", async () => {
-  const mock = await startMockServer();
+test("against a backdating server with no person support, the @login: prefix carries the author", async () => {
+  const mock = await startMockServer(makeState({ people: false }));
   try {
     const client = new EATClient(mock.baseUrl, "ea_token");
     await runDirect(client, 91, "o", "r", {
@@ -425,8 +427,56 @@ test("against a backdating server, rows carry the GitHub dates and the @login: p
   }
 });
 
+// --- person attribution end-to-end (story #33465) ------------------------------
+
+test("against a person-attributing server, people ride the writes and the comment body is verbatim", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    });
+    const closed = mock.state.stories[91].find((r) => r.title === "older closed issue");
+    assert.deepEqual(closed.requestor, {
+      source: "github",
+      external_id: "11",
+      username: "alice",
+      display_name: "alice",
+      html_url: "https://github.com/alice",
+    });
+    assert.deepEqual(closed.owners, [
+      { source: "github", external_id: "22", username: "bob", display_name: "bob" },
+    ]);
+    assert.equal(closed.comments[0].comment_text, "confirmed");
+    assert.equal(closed.comments[0].author.external_id, "11");
+    assert.equal(closed.comments[0].created_at, "2020-01-05T00:00:00Z");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("an unassigned issue with no readable author sends no person fields at all", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    });
+    // Issue #7 in the fixture carries neither `user` nor `assignees`.
+    const open = mock.state.stories[91].find((r) => r.title === "newer open issue");
+    assert.equal(open.requestor, null);
+    assert.deepEqual(open.owners, []);
+  } finally {
+    await mock.close();
+  }
+});
+
 test("against an older (non-backdating) server, the dated prefix is preserved and no dates leak", async () => {
-  const mock = await startMockServer(makeState({ backdating: false }));
+  const mock = await startMockServer(makeState({ backdating: false, people: false }));
   try {
     const client = new EATClient(mock.baseUrl, "ea_token");
     await runDirect(client, 91, "o", "r", {

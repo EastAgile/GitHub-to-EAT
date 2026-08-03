@@ -20,7 +20,8 @@ import { runWithProgress } from "./progress.js";
  * @property {(projectId: number, storyId: number, task: { description: string,
  *   complete?: boolean }, idempotencyKey: string) => Promise<any>} createTask
  * @property {(projectId: number, storyId: number, text: string,
- *   idempotencyKey: string, options?: { createdAt?: string | null }) => Promise<any>} createComment
+ *   idempotencyKey: string, options?: { createdAt?: string | null,
+ *   author?: import("./mapping.js").ExternalPerson | null }) => Promise<any>} createComment
  * @property {(projectId: number) => Promise<any[]>} listEpics
  * @property {(projectId: number, epic: { name: string, description?: string | null },
  *   idempotencyKey: string) => Promise<any>} createEpic
@@ -115,11 +116,13 @@ async function withRetry(fn, attempts, delayMs) {
  * @param {WritePlan} plan
  * @param {{ runId?: string, stream?: import("./progress.js").OutStream,
  *   retryAttempts?: number, retryDelayMs?: number, sendProvenance?: boolean,
- *   sendDates?: boolean }} [options]
+ *   sendDates?: boolean, sendPeople?: boolean }} [options]
  *   `runId` scopes the idempotency keys (fresh per run, stable across in-run
  *   retries); `sendProvenance` adds the re-import pair (EAT #31427) to every
  *   story create; `sendDates` adds backdated `created_at`/`completed_at` to the
- *   writes (server owner-gated) — off keeps the payloads byte-identical to v3
+ *   writes (server owner-gated); `sendPeople` adds the imported GitHub requestor,
+ *   owners and comment author (EAT #32773, also owner-gated) — both off keep the
+ *   payloads byte-identical to v3
  * @returns {Promise<WriteResult>}
  */
 export async function writePlan(client, projectId, plan, options = {}) {
@@ -130,6 +133,7 @@ export async function writePlan(client, projectId, plan, options = {}) {
     retryDelayMs = 250,
     sendProvenance = false,
     sendDates = false,
+    sendPeople = false,
   } = options;
   /** @template T @param {() => Promise<T>} fn */
   const retrying = (fn) => withRetry(fn, retryAttempts, retryDelayMs);
@@ -255,6 +259,12 @@ export async function writePlan(client, projectId, plan, options = {}) {
             // open issues rather than sending null.
             if (op.completed_at != null) body.completed_at = op.completed_at;
           }
+          if (sendPeople) {
+            // Omitted rather than null for a ghost: the server then falls back to
+            // the calling agent, which is exactly the server importer's behaviour.
+            if (op.requestor) body.requestor = op.requestor;
+            if (op.owners?.length) body.owners = op.owners.map((p) => ({ external: p }));
+          }
           const created = await retrying(() =>
             client.createStory(projectId, body, `${runId}:story:${op.external_id}`),
           );
@@ -271,13 +281,18 @@ export async function writePlan(client, projectId, plan, options = {}) {
             result.tasks += 1;
           }
           for (const [i, comment] of op.comments.entries()) {
+            const extras = {
+              ...(sendDates ? { createdAt: comment.created_at } : {}),
+              ...(sendPeople && comment.author ? { author: comment.author } : {}),
+            };
             await retrying(() =>
               client.createComment(
                 projectId,
                 created.story_id,
                 comment.text,
                 `${runId}:comment:${op.external_id}:${i}`,
-                sendDates ? { createdAt: comment.created_at } : undefined,
+                // undefined, not {}, when neither rides: the v3 call shape is unchanged.
+                Object.keys(extras).length ? extras : undefined,
               ),
             );
             result.comments += 1;

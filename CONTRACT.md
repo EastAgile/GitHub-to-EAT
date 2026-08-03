@@ -148,11 +148,12 @@ The API base is `.../api/v1`. Shapes the CLI parses:
 
 These shapes are mirrored by the bundled mock server (`src/mockserver.js`).
 
-### GitHub identity mapping (server engine)
+### GitHub identity mapping (both engines)
 
-How the server engine turns GitHub people into EAT rows — verified against the
+How an import turns GitHub people into EAT rows — verified against the
 server importer (`services/import/github.rs`, `common.rs`; server stories
-#26314 / #32141):
+#26314 / #32141). The direct engine mirrors every rule below (tracker story
+#33465); where the two can still differ is spelled out after the list:
 
 - **Identity is the numeric GitHub user id, not the login.** Each person becomes
   an `external_member` row keyed `(source = "github", external_id = <numeric
@@ -180,8 +181,21 @@ server importer (`services/import/github.rs`, `common.rs`; server stories
   the unmatched-comment-author fallback, reached only by a source that carries
   an email-valued author cell — never a GitHub import.
 
-The direct engine has no equivalent stage: it attributes a comment by prefixing
-the body instead (see *Default mapping profile* below).
+**How the direct engine writes the same rows.** It has no importer stage; it
+sends the people on the public writes, which land on the same `external_member`
+substrate: `requestor: ExternalPersonInput` and `owners[].external` on
+`POST .../stories`, `author: ExternalPersonInput` on `POST .../comments` (server
+story #32773). The payload it builds is `to_person`'s output field for field —
+`source: "github"`, `external_id` the stringified numeric id, `username` and
+`display_name` both the trimmed login, `html_url` when the payload carried one —
+so both engines get-or-create the same `(source, external_id)` row. A ghost is
+omitted rather than sent partially, and the server then falls back to the calling
+key, which is the server importer's own fallback. `tests/parity.test.js` pins the
+triples. Two differences remain, both of scope, not of shape: the direct engine
+imports no pull requests, so the "PR creator is also an owner" rule has nothing to
+apply to; and all three fields are **owner-gated and create-only**, so the engine
+feature-detects them first and falls back to the `@login` comment prefix against a
+server that does not advertise them (see *Fidelity limitations* below).
 
 ## v2 — async import
 
@@ -643,19 +657,15 @@ drifting in prose.
   are parsed from the issue body alone, never from the cross-link block.
 - **Comments** — joined to their issue by `issue_url`. The fetcher has already
   dropped PR conversation comments by the same key, and the join keeps any
-  stray unmatched comment inert (its issue is never mapped). The public EAT API has
-  no comment-author attribution, so each body is prefixed
-  `@<login> on <YYYY-MM-DD>:` (deleted accounts render as `@ghost`). That prefix
-  is a **known divergence from the server engine, not the target end state**:
-  the server authors the comment as an `external_member` keyed on the numeric
-  GitHub user id and leaves the body untouched (see *GitHub identity mapping
-  (server engine)* above). The public API **does** carry comment-author
-  attribution — `POST .../stories/{id}/comments` accepts
-  `author: ExternalPersonInput` (server story #32773), owner-gated by the same
-  check as the `created_at` this engine already sends. The direct engine has
-  simply not adopted it yet; tracker story **#33465** owns that change. Until it
-  lands the prefix stays — see "Comment authorship" under *Fidelity
-  limitations*.
+  stray unmatched comment inert (its issue is never mapped). The body is stored
+  **verbatim** and the author rides on the write's own `author` field, like the
+  server engine's. Against a server that does not advertise the field the body
+  is prefixed `@<login> on <YYYY-MM-DD>:` instead (`@<login>:` when the comment's
+  date rides on the write; deleted accounts render as `@ghost`) — see "Comment
+  authorship" under *Fidelity limitations*.
+- **People** — the issue author becomes the story's `requestor` and the
+  assignees its `owners`, both as `ExternalPersonInput` (see *GitHub identity
+  mapping (both engines)* above). Releases carry neither.
 - **Identity** — `external_id` is the issue number as a string; rows carrying
   a `pull_request` key are dropped (v3 is issues-only).
 
@@ -910,14 +920,17 @@ real server 2026-07-16 and mirrored by `src/mockserver.js`):
 - **`POST /stories`** — body requires `name` (the read-side field is `title`;
   missing → `400 validation_failed`); optional `description`, `story_type`,
   `current_state`, `estimate`, `icebox`, `created_at`, `completed_at`,
-  `import_source`, `import_external_id`, and `labels` as bare strings or
+  `import_source`, `import_external_id`, `requestor`, `owners`, and `labels` as bare strings or
   `{ "name": "..." }` objects — the server attaches by name, get-or-creating
   with default colors (unlike `POST /labels`, the story payload never 409s on
   an existing name), and embeds the full label objects in the response.
   `current_state: "accepted"` is accepted at create time for an unestimated
   feature (verified 2026-07-16) — no estimate guard, so no
   create-then-transition fallback is needed. The four backdating / provenance
-  fields are owner-gated (see "Marker dedup" and "Fidelity limitations"); the
+  fields are owner-gated, and so are `requestor` and `owners[].external`
+  (`ExternalPersonInput`, server story #32773 — create-only: the PUT `owners`
+  reconcile rejects `external`); see "Marker dedup", "GitHub identity mapping
+  (both engines)" and "Fidelity limitations". The
   create body has **no** `scheduled_at` — that column is importer-only, so the
   direct engine cannot reproduce the planned date the server importer seeds on
   a draft release. 200 → the full story object (`story_id`, `title`,
@@ -949,6 +962,8 @@ real server 2026-07-16 and mirrored by `src/mockserver.js`):
   (`comment_text` is an accepted request alias; empty →
   `400 invalid_parameter`, "comment must have text or emoji") → 200
   `{ comment_id, story_comment_id, story_id, comment_text, created }`.
+  Optional `created_at` and `author` (`ExternalPersonInput`) are both
+  owner-gated by the same check (server stories #31425 / #32773).
 - **Idempotency** — every `POST` replays on same key + same body and returns
   `409 idempotency_conflict` on same key + different body (see the v1 import
   note). The ledger is keyed by key + body only: a same-key + same-body
@@ -1095,13 +1110,20 @@ and both are prescanned, in union.
   the grid-extension server ask (#32434) lands; the create response carries no
   iteration info, so the write report cannot yet surface which iteration a
   backdated story landed in.
-- **Comment authorship** — the API accepts an owner-gated `author`
-  (`ExternalPersonInput`, server story #32773), but this engine does not send it
-  yet (tracker story #33465): comments are authored by the importing key, with
-  the GitHub author riding in the body prefix. When the comment's `created_at`
-  is sent (backdating-capable server)
-  the prefix is `@login:`; against an older server the date rides there too
-  (`@login on YYYY-MM-DD:`).
+- **People** — feature-detected from `GET /openapi.json`: when the story create
+  advertises `requestor`, the direct engine sends the issue author as the story's
+  `requestor`, the assignees as `owners[].external`, and each comment's author as
+  that comment's `author` — all `ExternalPersonInput` (server story #32773, one
+  change, so one probe gates all three). All are owner-gated server-side and
+  honoured on create only; the CLI's agent key qualifies. A ghost (no numeric id,
+  or no login) sends no field at all, and the server falls back to the calling
+  key, matching the server importer. Against a server that does **not** advertise
+  the field (older server, or `/openapi.json` missing/unparseable) nobody is
+  mapped and every payload stays byte-identical to v3, with the GitHub author
+  riding in the comment body prefix instead: `@login:` when the comment's
+  `created_at` rides on the write (backdating-capable server), `@login on
+  YYYY-MM-DD:` when it does not. Pull requests are out of scope for this engine,
+  so the server's "the PR creator is also an owner" rule has nothing to apply to.
 - **Sub-issue hierarchy** — EAT has no parent/child story relation, so the
   cross-links above are plain text in the description, not a queryable link: a
   board can read them, nothing can filter or traverse on them, and moving or

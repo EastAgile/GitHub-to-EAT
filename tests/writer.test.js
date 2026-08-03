@@ -155,6 +155,83 @@ test("without sendProvenance the create body carries no pair", async () => {
   }
 });
 
+// --- person attribution on the write (story #33465) --------------------------
+
+/** @returns {import("../src/writer.js").WritePlan} */
+function peoplePlan() {
+  /** @type {import("../src/mapping.js").ExternalPerson} */
+  const alice = { source: "github", external_id: "12", username: "alice", display_name: "alice" };
+  /** @type {import("../src/mapping.js").ExternalPerson} */
+  const bob = { source: "github", external_id: "34", username: "bob", display_name: "bob" };
+  return {
+    labels: [],
+    stories: [
+      {
+        external_id: "3",
+        name: "issue",
+        description: null,
+        story_type: "bug",
+        current_state: "unstarted",
+        created_at: "2020-01-01T00:00:00Z",
+        completed_at: null,
+        labels: [],
+        requestor: alice,
+        owners: [bob],
+        tasks: [],
+        comments: [{ text: "looks broken", created_at: "2020-01-05T00:00:00Z", author: bob }],
+      },
+      {
+        external_id: "4",
+        name: "ghost-authored issue",
+        description: null,
+        story_type: "bug",
+        current_state: "unstarted",
+        created_at: "2020-01-02T00:00:00Z",
+        completed_at: null,
+        labels: [],
+        requestor: null,
+        owners: [],
+        tasks: [],
+        comments: [{ text: "orphan", created_at: "2020-01-06T00:00:00Z", author: null }],
+      },
+    ],
+  };
+}
+
+test("sendPeople puts the requestor, the external owners and the comment author on the writes", async () => {
+  const { client, stories, comments } = recordingClient();
+  await writePlan(client, 91, peoplePlan(), { stream: capture(), sendPeople: true });
+  assert.deepEqual(stories[0].requestor, {
+    source: "github",
+    external_id: "12",
+    username: "alice",
+    display_name: "alice",
+  });
+  // Owners ride as `{ external: … }` — the OwnerInput shape the create composer resolves.
+  assert.deepEqual(stories[0].owners, [
+    { external: { source: "github", external_id: "34", username: "bob", display_name: "bob" } },
+  ]);
+  assert.equal(comments[0]?.options?.author?.username, "bob");
+});
+
+test("sendPeople omits requestor/owners entirely for a ghost-authored, unassigned issue", async () => {
+  const { client, stories, comments } = recordingClient();
+  await writePlan(client, 91, peoplePlan(), { stream: capture(), sendPeople: true });
+  assert.equal("requestor" in stories[1], false);
+  assert.equal("owners" in stories[1], false);
+  assert.equal(comments[1]?.options?.author, undefined);
+});
+
+test("without sendPeople no create body mentions a person", async () => {
+  const { client, stories, comments } = recordingClient();
+  await writePlan(client, 91, peoplePlan(), { stream: capture() });
+  for (const body of stories) {
+    assert.equal("requestor" in body, false);
+    assert.equal("owners" in body, false);
+  }
+  for (const { options } of comments) assert.equal(options?.author, undefined);
+});
+
 test("emoji and CJK label names survive the idempotency-key path", async () => {
   const mock = await startMockServer();
   try {

@@ -776,6 +776,48 @@ test("async import returns 202 then a job that progresses to done with a result"
   }
 });
 
+test("a person-attributing server persists the requestor, the external owners and the author", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    /** @type {import("../src/mapping.js").ExternalPerson} */
+    const bob = { source: "github", external_id: "34", username: "bob", display_name: "bob" };
+    const story = await client.createStory(
+      91,
+      { name: "s", requestor: bob, owners: [{ external: bob }] },
+      "k",
+    );
+    await client.createComment(91, story.story_id, "hi", "k2", { author: bob });
+    const row = mock.state.stories[91][0];
+    assert.deepEqual(row.requestor, bob);
+    assert.deepEqual(row.owners, [bob]);
+    assert.deepEqual(row.comments[0].author, bob);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a server with no person support ignores requestor / owners.external / author", async () => {
+  const mock = await startMockServer(makeState({ people: false }));
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    /** @type {import("../src/mapping.js").ExternalPerson} */
+    const bob = { source: "github", external_id: "34", username: "bob", display_name: "bob" };
+    const story = await client.createStory(
+      91,
+      { name: "s", requestor: bob, owners: [{ external: bob }] },
+      "k",
+    );
+    await client.createComment(91, story.story_id, "hi", "k2", { author: bob });
+    const row = mock.state.stories[91][0];
+    assert.ok(!("requestor" in row));
+    assert.ok(!("owners" in row));
+    assert.ok(!("author" in row.comments[0]));
+  } finally {
+    await mock.close();
+  }
+});
+
 test("a non-backdating server ignores created_at on story creates", async () => {
   const mock = await startMockServer(makeState({ backdating: false }));
   try {

@@ -104,3 +104,75 @@ test("parity: a draft release imports to the backlog, and so does one with no pu
   assert.equal(oneRelease({ draft: false, published_at: null }).current_state, "unstarted");
   assert.equal(oneRelease({ body: "   " }).description, null);
 });
+
+// --- people (story #33465) ---------------------------------------------------
+// github.rs `to_person` / `valid_gh_user` and `issue_to_record`'s role assignment:
+// author → requestor, assignees → owners, comment `user` → comment author. The
+// `external_member` dedup key is `(source, external_id)`, so the triples below are
+// the rows the server importer would write for the same repo.
+
+const PEOPLE_REPO = {
+  issues: [
+    issue({
+      number: 7,
+      user: { id: 12, login: "alice", html_url: "https://github.com/alice" },
+      assignees: [{ id: 34, login: "bob" }, { id: 0, login: "ghost-by-id" }, null],
+    }),
+    issue({ number: 8, user: null, assignees: [{ id: 56, login: " carol " }] }),
+  ],
+  comments: [
+    {
+      issue_url: "https://api.github.com/repos/o/r/issues/7",
+      user: { id: 34, login: "bob" },
+      created_at: "2026-03-04T05:06:07Z",
+      body: "verbatim body",
+    },
+    {
+      issue_url: "https://api.github.com/repos/o/r/issues/8",
+      user: { id: 78, login: "" },
+      created_at: "2026-03-05T05:06:07Z",
+      body: "from a ghost",
+    },
+  ],
+  labels: [],
+};
+
+const triple = (/** @type {any} */ p) =>
+  p === null ? null : [p.source, p.external_id, p.username];
+
+test("parity: the people triples the server importer would write", () => {
+  const { stories } = mapRepo(PEOPLE_REPO, DEFAULT_CUSTOMIZATION, { sendPeople: true });
+  const seven = /** @type {any} */ (stories.find((s) => s.external_id === "7"));
+  const eight = /** @type {any} */ (stories.find((s) => s.external_id === "8"));
+
+  assert.deepEqual(triple(seven.requestor), ["github", "12", "alice"]);
+  // A ghost assignee (id 0, or no user object at all) is dropped; the rest stay in order.
+  assert.deepEqual(seven.owners.map(triple), [["github", "34", "bob"]]);
+  assert.deepEqual(
+    seven.comments.map((/** @type {any} */ c) => triple(c.author)),
+    [["github", "34", "bob"]],
+  );
+
+  // A ghost issue author leaves no requestor — the server falls back to the caller.
+  assert.equal(eight.requestor, null);
+  assert.deepEqual(eight.owners.map(triple), [["github", "56", "carol"]]);
+  // A ghost comment author likewise: no author, and the body is still verbatim.
+  assert.deepEqual(eight.comments, [
+    { text: "from a ghost", created_at: "2026-03-05T05:06:07Z", author: null },
+  ]);
+});
+
+test("parity: the login is the display name too, and html_url rides along when GitHub sent one", () => {
+  const { stories } = mapRepo(PEOPLE_REPO, DEFAULT_CUSTOMIZATION, { sendPeople: true });
+  const seven = /** @type {any} */ (stories.find((s) => s.external_id === "7"));
+  assert.equal(seven.requestor.display_name, "alice");
+  assert.equal(seven.requestor.html_url, "https://github.com/alice");
+  // GhUser.html_url is Option<String>: absent stays absent, never an empty string.
+  assert.equal("html_url" in seven.owners[0], false);
+});
+
+test("parity: a comment body is stored verbatim — no '@login' prefix, like the server's", () => {
+  const { stories } = mapRepo(PEOPLE_REPO, DEFAULT_CUSTOMIZATION, { sendPeople: true });
+  const seven = /** @type {any} */ (stories.find((s) => s.external_id === "7"));
+  assert.equal(seven.comments[0].text, "verbatim body");
+});

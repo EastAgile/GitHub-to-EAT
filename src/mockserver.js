@@ -68,6 +68,10 @@ import { parseArgs } from "node:util";
  *   openapi advertises `created_at`/`completed_at` on story creates and
  *   `created_at` on comment creates, and the handlers persist them; false
  *   simulates a server that predates backdating (fields absent + ignored)
+ * @property {boolean} people when true (default, mirroring the server tree), the
+ *   openapi advertises `requestor` on story creates and the handlers persist the
+ *   requestor, `owners[].external` and a comment's `author` (EAT #32773); false
+ *   simulates a server that predates person attribution (fields absent + ignored)
  * @property {boolean} asyncImport when true, POST /import/json answers the v2
  *   async accept — 202 `{ import_id, status:"pending" }` plus a pollable job at
  *   GET /imports/{import_id}; false (default) keeps today's synchronous 200
@@ -130,6 +134,7 @@ export function makeState(overrides = {}) {
     serverDryRun: true,
     provenance: true,
     backdating: true,
+    people: true,
     asyncImport: false,
     asyncFail: false,
     jobs: {},
@@ -179,6 +184,7 @@ function openapiDoc(state) {
   const ml = state.maxLengths ?? {};
   // Backdated instants — advertised only when the server supports backdating.
   const dateTime = { type: ["string", "null"], format: "date-time" };
+  const externalPerson = { type: ["object", "null"] };
   /** @param {Record<string, number | undefined>} fields @param {Record<string, any>} [extra] */
   const post = (fields, extra = {}) => ({
     post: {
@@ -238,6 +244,9 @@ function openapiDoc(state) {
           // must be seen never to send it; a numeric type here would invite the wrong guess.
           estimate: { type: ["string", "null"] },
           ...(state.backdating ? { created_at: dateTime, completed_at: dateTime } : {}),
+          ...(state.people
+            ? { requestor: externalPerson, owners: { type: ["array", "null"] } }
+            : {}),
         },
       ),
       "/api/v1/projects/{project_id}/stories/{story_id}/tasks": post({
@@ -246,7 +255,10 @@ function openapiDoc(state) {
       }),
       "/api/v1/projects/{project_id}/stories/{story_id}/comments": post(
         { text: ml.comment_text, comment_text: ml.comment_text },
-        state.backdating ? { created_at: dateTime } : {},
+        {
+          ...(state.backdating ? { created_at: dateTime } : {}),
+          ...(state.people ? { author: externalPerson } : {}),
+        },
       ),
     },
   };
@@ -865,6 +877,14 @@ function createStory(state, projectId, body) {
     created: now,
     updated_at: now,
   };
+  if (state.people) {
+    // A ghost sends no field at all, and the server falls back to the caller —
+    // stored as null/[] so a test can tell "nobody" from "not supported".
+    story.requestor = body.requestor ?? null;
+    story.owners = (body.owners ?? [])
+      .map((/** @type {any} */ owner) => owner?.external)
+      .filter(Boolean);
+  }
   if (state.backdating && body.created_at != null) {
     story.created_at = body.created_at;
     story.created = body.created_at;
@@ -954,6 +974,7 @@ function createComment(state, projectId, storyId, body) {
     comment.created_at = body.created_at;
     comment.created = body.created_at;
   }
+  if (state.people && body.author != null) comment.author = body.author;
   story.comments.push(comment);
   story.comment_count = story.comments.length;
   return { status: 200, payload: comment };
