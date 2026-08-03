@@ -18,7 +18,7 @@ import { runImport as defaultRunImport } from "./importer.js";
 import { customizationFlagsGiven, parseCustomization } from "./mapping.js";
 import { MAPPINGS, parseInclude, renderLegend, requestFlags } from "./mappings.js";
 import { preflight as defaultPreflight } from "./preflight.js";
-import { makeImportReporter, runWithProgress } from "./progress.js";
+import { makeImportReporter, runWithProgress, scrubControl } from "./progress.js";
 import { VERSION } from "./version.js";
 import { runWizard as defaultRunWizard, WizardAborted } from "./wizard.js";
 
@@ -117,6 +117,37 @@ function placeholderOwnersTail(created) {
 }
 
 /**
+ * Render one server row error. The server sends `{ code, row }` objects
+ * (CONTRACT.md); a bare string from an older/other source still renders.
+ *
+ * @param {unknown} err
+ * @returns {string}
+ */
+function rowErrorLine(err) {
+  if (err && typeof err === "object" && "code" in err) {
+    const { code, row } = /** @type {{ code: unknown, row?: unknown }} */ (err);
+    return scrubControl(row == null ? String(code) : `row ${row}: ${code}`);
+  }
+  return scrubControl(err);
+}
+
+/**
+ * Render one non-fatal server advisory (`{ code, count, floor_year }`).
+ *
+ * @param {unknown} warning
+ * @returns {string}
+ */
+function warningLine(warning) {
+  if (!warning || typeof warning !== "object") return scrubControl(warning);
+  const { code, count, floor_year: floorYear } = /** @type {any} */ (warning);
+  const detail = [
+    count == null ? null : `${count} ${count === 1 ? "story" : "stories"}`,
+    floorYear == null ? null : `floor year ${floorYear}`,
+  ].filter(Boolean);
+  return scrubControl(detail.length ? `${code} (${detail.join(", ")})` : String(code));
+}
+
+/**
  * Write the import result and board link; return the process exit code (1 when
  * the server reported per-item errors, else 0). Shared by both engines so their
  * output convention is identical.
@@ -132,9 +163,17 @@ function reportImport(outcome, { stdout, stderr, project, appBase }) {
     `Imported ${outcome.importedStories} stories (${outcome.importedLabels} labels), ` +
       `skipped ${outcome.skipped}${skippedNote}, ${outcome.errors.length} error(s).\n`,
   );
-  const unmatchedTotal = Object.values(outcome.unmatched).reduce((n, v) => n + v.length, 0);
+  // The GitHub connector never fills the actor cells `unmatched` is built from,
+  // so this note exists for a server that starts reporting actors anyway.
+  const unmatchedTotal = Object.values(outcome.unmatched).reduce(
+    (/** @type {number} */ n, v) => n + (Array.isArray(v) ? v.length : 0),
+    0,
+  );
   if (unmatchedTotal) {
-    stdout.write(`note: ${unmatchedTotal} GitHub user(s) could not be matched to members.\n`);
+    stdout.write(`note: ${unmatchedTotal} actor(s) could not be matched to members.\n`);
+  }
+  for (const warning of outcome.warnings ?? []) {
+    stdout.write(`note: ${warningLine(warning)}\n`);
   }
   const created = Array.isArray(outcome.externalMembersCreated)
     ? outcome.externalMembersCreated
@@ -146,7 +185,7 @@ function reportImport(outcome, { stdout, stderr, project, appBase }) {
   }
   stdout.write(`Board: ${appBase}/projects/${project}\n`);
   for (const err of outcome.errors) {
-    stderr.write(`  - ${err}\n`);
+    stderr.write(`  - ${rowErrorLine(err)}\n`);
   }
   return outcome.errors.length ? 1 : 0;
 }
@@ -174,7 +213,7 @@ function reportDryRunPlan(plan, { stdout, stderr, owner, repo, project, projectT
       "No changes made.\n",
   );
   for (const err of plan.errors) {
-    stderr.write(`  - ${err}\n`);
+    stderr.write(`  - ${rowErrorLine(err)}\n`);
   }
   return 0;
 }

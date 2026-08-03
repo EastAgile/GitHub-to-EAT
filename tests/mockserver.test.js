@@ -111,6 +111,40 @@ test("computed import emits external_members_created once per project", async ()
   }
 });
 
+// The GitHub connector never fills the actor cells `unmatched` is built from, so every
+// list stays empty; what the CLI renders from non-empty lists lives in import.test.js.
+test("a computed import carries the server's full result shape", async () => {
+  const mock = await startMockServer(
+    makeState({
+      fixture: { issues: 1, prs: 0, milestones: 0, releases: 0, labels: 0, assignees: [] },
+    }),
+  );
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const result = await client.importGithub(91, "o", "r", { idempotencyKey: "k1" });
+    assert.deepEqual(Object.keys(result).sort(), [
+      "dry_run",
+      "errors",
+      "external_members_created",
+      "imported",
+      "skipped",
+      "unmatched",
+      "warnings",
+    ]);
+    assert.deepEqual(Object.keys(result.unmatched).sort(), [
+      "comment_authors",
+      "followers",
+      "owners",
+      "requesters",
+      "reviewers",
+    ]);
+    assert.ok(Object.values(result.unmatched).every((list) => Array.isArray(list) && !list.length));
+    assert.ok(Array.isArray(result.warnings) && !result.warnings.length);
+  } finally {
+    await mock.close();
+  }
+});
+
 test("a dry-run import does not persist external members", async () => {
   const mock = await startMockServer(
     makeState({

@@ -55,6 +55,30 @@ function fakeClient(raw) {
   };
 }
 
+/**
+ * Run the CLI against a mock serving `result` verbatim.
+ *
+ * @param {unknown} result
+ * @param {string[]} [args]
+ * @returns {Promise<{ code: number, out: string, err: string }>}
+ */
+async function runCliWith(result, args = ["--project", "91", "--repo", "o/r", "-y"]) {
+  const mock = await startMockServer(makeState({ importResult: result }));
+  const out = capture();
+  const err = capture();
+  let code = -1;
+  try {
+    await inTempDir(() =>
+      withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
+        code = await main(args, { stdout: out, stderr: err });
+      }),
+    );
+  } finally {
+    await mock.close();
+  }
+  return { code, out: out.buf, err: err.buf };
+}
+
 test("importGithub posts the expected body and idempotency key", async () => {
   const state = makeState({ importResult: { imported: 2, skipped: 0, errors: [] } });
   const mock = await startMockServer(state);
@@ -90,6 +114,7 @@ test("runImport normalizes missing fields", async () => {
     importedLabels: 0,
     skipped: 0,
     errors: [],
+    warnings: [],
     unmatched: {},
     externalMembersCreated: [],
     dryRun: false,
@@ -103,6 +128,7 @@ test("runImport reads nested imported", async () => {
     importedLabels: 2,
     skipped: 1,
     errors: ["x"],
+    warnings: [],
     unmatched: {},
     externalMembersCreated: [],
     dryRun: false,
@@ -116,6 +142,7 @@ test("runImport tolerates flat imported", async () => {
     importedLabels: 0,
     skipped: 0,
     errors: [],
+    warnings: [],
     unmatched: {},
     externalMembersCreated: [],
     dryRun: false,
@@ -173,10 +200,10 @@ test("runImport reads unmatched", async () => {
     imported: { stories: 1, labels: 0 },
     skipped: 0,
     errors: [],
-    unmatched: { owners: ["a", "b"], followers: [] },
+    unmatched: { owners: ["a@x.test", "b@x.test"], followers: [] },
   };
   const outcome = await runImport(fakeClient(raw), 91, "o", "r", { idempotencyKey: "k" });
-  assert.deepEqual(outcome.unmatched, { owners: ["a", "b"], followers: [] });
+  assert.deepEqual(outcome.unmatched, { owners: ["a@x.test", "b@x.test"], followers: [] });
 });
 
 test("full import against the mock", async () => {
@@ -234,6 +261,99 @@ test("import errors exit one", async () => {
     await mock.close();
   }
   assert.ok(err.buf.includes("issue 5 failed"));
+});
+
+test("structured row errors render their code and row", async () => {
+  const { code, err } = await runCliWith({
+    imported: { stories: 1, labels: 0 },
+    skipped: 0,
+    errors: [
+      { code: "missing_title", row: 3 },
+      { code: "skipped_epic_row", row: 7 },
+    ],
+  });
+  assert.equal(code, 1);
+  assert.ok(err.includes("  - row 3: missing_title\n"), err);
+  assert.ok(err.includes("  - row 7: skipped_epic_row\n"), err);
+  assert.ok(!err.includes("[object Object]"), err);
+});
+
+test("the dry-run plan renders structured row errors", async () => {
+  const { code, err } = await runCliWith(
+    {
+      dry_run: true,
+      imported: { stories: 1, labels: 0 },
+      skipped: 0,
+      errors: [{ code: "missing_title", row: 3 }],
+    },
+    ["--project", "91", "--repo", "o/r", "--dry-run"],
+  );
+  assert.equal(code, 0);
+  assert.ok(err.includes("  - row 3: missing_title\n"), err);
+  assert.ok(!err.includes("[object Object]"), err);
+});
+
+test("a server row error cannot write control characters to the terminal", async () => {
+  const { err } = await runCliWith({
+    imported: { stories: 1, labels: 0 },
+    skipped: 0,
+    errors: [{ code: "missing\u001b[2K\rtitle", row: 1 }],
+  });
+  assert.ok(!err.includes("\u001b"), JSON.stringify(err));
+  assert.ok(err.includes("  - row 1: missing[2Ktitle\n"), JSON.stringify(err));
+});
+
+test("runImport carries the server's warnings", async () => {
+  const raw = {
+    imported: { stories: 1, labels: 0 },
+    skipped: 0,
+    errors: [],
+    warnings: [{ code: "history_floor_clamped", count: 3, floor_year: 2024 }],
+  };
+  const outcome = await runImport(fakeClient(raw), 91, "o", "r", { idempotencyKey: "k" });
+  assert.deepEqual(outcome.warnings, [
+    { code: "history_floor_clamped", count: 3, floor_year: 2024 },
+  ]);
+});
+
+test("runImport defaults warnings to an empty list", async () => {
+  const raw = { imported: { stories: 1, labels: 0 }, skipped: 0, errors: [] };
+  const outcome = await runImport(fakeClient(raw), 91, "o", "r", { idempotencyKey: "k" });
+  assert.deepEqual(outcome.warnings, []);
+});
+
+test("a history_floor_clamped warning is reported", async () => {
+  const { code, out } = await runCliWith({
+    imported: { stories: 4, labels: 0 },
+    skipped: 0,
+    errors: [],
+    warnings: [{ code: "history_floor_clamped", count: 3, floor_year: 2024 }],
+  });
+  assert.equal(code, 0);
+  assert.ok(out.includes("note: history_floor_clamped (3 stories, floor year 2024)\n"), out);
+  assert.ok(!out.includes("[object Object]"), out);
+});
+
+test("a warning cannot write control characters to the terminal", async () => {
+  const { out } = await runCliWith({
+    imported: { stories: 1, labels: 0 },
+    skipped: 0,
+    errors: [],
+    warnings: [{ code: "history\u001b[2K\rclamped", count: 1, floor_year: 2024 }],
+  });
+  assert.ok(out.includes("note: history[2Kclamped (1 story, floor year 2024)\n"), out);
+  assert.ok(!out.includes("\u001b"), JSON.stringify(out));
+});
+
+test("a non-array unmatched member does not break the actor note", async () => {
+  const { code, out } = await runCliWith({
+    imported: { stories: 1, labels: 0 },
+    skipped: 0,
+    errors: [],
+    unmatched: { owners: null, followers: ["a@x.test"], requesters: 3 },
+  });
+  assert.equal(code, 0);
+  assert.ok(out.includes("note: 1 actor(s) could not be matched"), out);
 });
 
 test("--dry-run makes no import", async () => {
@@ -303,12 +423,17 @@ test("GITHUB_TOKEN env flows to the import", async () => {
   assert.equal(mock.state.imports[0].body.token, "ghp_env");
 });
 
-test("unmatched users are reported", async () => {
+// The server's shape for a source that carries email actor cells (never
+// GitHub): a `comment_authors` entry is an `{ email, count }` object.
+test("unmatched actors are reported", async () => {
   const result = {
     imported: { stories: 1, labels: 0 },
     skipped: 0,
     errors: [],
-    unmatched: { owners: ["alice", "bob"], comment_authors: ["carol"] },
+    unmatched: {
+      owners: ["alice@x.test", "bob@x.test"],
+      comment_authors: [{ email: "carol@x.test", count: 2 }],
+    },
   };
   const mock = await startMockServer(makeState({ importResult: result }));
   const out = capture();
@@ -325,7 +450,7 @@ test("unmatched users are reported", async () => {
   } finally {
     await mock.close();
   }
-  assert.ok(out.buf.includes("3 GitHub user"));
+  assert.ok(out.buf.includes("3 actor(s) could not be matched"));
 });
 
 const PLACEHOLDER_NOTE =
@@ -738,7 +863,7 @@ const DONE_RESULT = {
   imported: { stories: 4, labels: 1 },
   skipped: 2,
   errors: [],
-  unmatched: { owners: ["x"] },
+  unmatched: { owners: ["x@x.test"] },
 };
 
 test("pollImport returns the done result", async () => {

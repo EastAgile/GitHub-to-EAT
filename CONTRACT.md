@@ -80,30 +80,66 @@ The API base is `.../api/v1`. Shapes the CLI parses:
     "dry_run": false,
     "imported": { "stories": 39, "labels": 0 },
     "skipped": 0,
-    "errors": ["Row 3: ..."],
+    "errors": [{ "code": "missing_title", "row": 3 }],
+    "warnings": [{ "code": "history_floor_clamped", "count": 3, "floor_year": 2010 }],
+    "external_members_created": ["octocat"],
     "unmatched": { "owners": [], "followers": [], "reviewers": [],
-                   "requesters": [],
-                   "comment_authors": [{ "email": "x@users.noreply.github.com", "count": 2 }] }
+                   "requesters": [], "comment_authors": [] }
   }
   ```
   `imported` is an **object**, not an integer; it counts stories and labels
   only (epics created from milestones are not counted). `skipped` means
-  "already imported" (see re-import dedup above). `errors` is a list of
-  strings. `dry_run` echoes the request's `dry_run` field.
+  "already imported" (see re-import dedup above). `dry_run` echoes the request's
+  `dry_run` field.
 
-  **Optional** `"external_members_created": ["<github login>", ...]` — the
-  GitHub logins whose external-member rows (display-only owner attributions
-  outside the project roster; auto-linked to a real member when a matching
-  GitHub account signs in) were newly created by this import. **Not yet
-  emitted by the hosted tracker** — this is the agreed forward-compat shape
-  (assignees-become-owners shipped server-side 2026-07-09 without reporting
-  the rows it creates). The CLI renders a placeholder-owners note when the
-  field is present and non-empty (on `--dry-run`, as a `would create` line in
-  the plan); an absent field, empty array, or non-array value renders nothing
-  and never errors. Entries that are not valid GitHub logins (alphanumerics
-  and single inner hyphens, at most 39 chars) are dropped and duplicates
-  collapsed before rendering. The mock server emits the field in computed
-  mode (`fixture.assignees`), creating each login at most once per project.
+  `errors` is **not** a list of strings: each entry is a coded
+  `{ "code": "missing_title", "row": 3 }` object — a stable machine code plus
+  the 1-based source row, never a pre-formatted English sentence (server story
+  #31311). The CLI renders one `  - row <row>: <code>` line per entry on stderr
+  and still exits 1; a bare string from an older/other source is rendered as-is,
+  and every entry is control-character-scrubbed before it reaches the terminal.
+
+  `warnings` are **coded** non-fatal advisories about an import that otherwise
+  succeeded — unlike `errors`, nothing was skipped (server story #32239). Each
+  entry is a `{ "code": ..., "count": N, "floor_year": Y }` object; today the
+  only code is `history_floor_clamped` (completed stories dated before the
+  server's grid floor were placed on the oldest iteration's Done board), which
+  fires for any source with imported stories, so a GitHub import of long-closed
+  issues can hit it. The CLI renders one scrubbed `note:` line per
+  entry naming the code, the story count and the floor year.
+
+  **`unmatched` is always empty for a GitHub import.** The lists are built from
+  the *email/name actor cells* a source can carry — `owner_emails`,
+  `follower_emails`, `reviewers[].email`, `requester_email`,
+  `ImportComment.author_name` — and the GitHub connector never populates any of
+  them: it fills `author` and `assignees` with GitHub `ImportedPerson` rows,
+  routed through `resolve_person_actor`, which resolves member-or-external and
+  never reports (`import/github.rs`, `import/common.rs`). The sources that do
+  feed these lists are the ones carrying email/name actor cells — EAT CSV, Jira,
+  GitLab, Shortcut, Pivotal — not GitHub. Note that `looks_like_email`
+  (`import/common.rs`) gates only the **comment-author** path; `owners` /
+  `followers` / `reviewers` / `requesters` report *any* non-empty, non-`agent:`
+  value that misses the member map, so "a GitHub login is not an email" is not
+  what keeps these lists empty. `comment_authors` is also **not** a list of
+  strings: its entries are `{ "email": "...", "count": N }` objects. The lists
+  are still serialized on every import, so the CLI parses the field — but it
+  must never be presented as GitHub-user coverage.
+
+  `"external_members_created": ["<github login>", ...]` — the GitHub logins
+  whose external-member rows (display-only owner attributions outside the
+  project roster; auto-linked to a real member when a matching GitHub account
+  signs in) were newly created by this import; reused rows are excluded, the
+  list is deduped and sorted, and a `dry_run` preview reports it too (server
+  story #32141, verified against the server tree — the field landed after the
+  last prod deploy, so hosted emission is read from the source, not observed).
+  The CLI renders a placeholder-owners note when the field is present and
+  non-empty (on `--dry-run`, as a `would create` line in the plan);
+  an absent field (an older server), empty array, or non-array value renders
+  nothing and never errors. Entries that are not valid GitHub logins
+  (alphanumerics and single inner hyphens, at most 39 chars) are dropped and
+  duplicates collapsed before rendering. The mock server emits the field in
+  computed mode (`fixture.assignees`), creating each login at most once per
+  project.
 - **Project** (`GET .../projects/{id}`): the name field is `project_title` (not
   `title`/`name`); also `project_id`, `project_desc`, etc.
 - **Stories** (`GET .../projects/{id}/stories`): with `?limit=` (or `?cursor=`) it
@@ -111,6 +147,41 @@ The API base is `.../api/v1`. Shapes the CLI parses:
   query it returns a bare JSON array.
 
 These shapes are mirrored by the bundled mock server (`src/mockserver.js`).
+
+### GitHub identity mapping (server engine)
+
+How the server engine turns GitHub people into EAT rows — verified against the
+server importer (`services/import/github.rs`, `common.rs`; server stories
+#26314 / #32141):
+
+- **Identity is the numeric GitHub user id, not the login.** Each person becomes
+  an `external_member` row keyed `(source = "github", external_id = <numeric
+  GitHub user id>)`, so a login rename converges on the existing row instead of
+  forking a second identity.
+- **The login is a display value and a mapping key, nothing more.** It is stored
+  as `external_username` (and `display_name`, since GitHub's issue payloads
+  carry no profile name) and refreshed on every re-import. Linking an external
+  member to a real EAT member is a separate scan matching
+  `lower(external_username) = lower(oauth_identity.provider_username)`; a row
+  that is already mapped keeps its mapping across a rename, because the identity
+  is the id.
+- **An external member is display-only.** The import never creates a `member`
+  row and never touches project membership.
+- **Ghosts are dropped.** A user object missing either the id or the login
+  (GitHub's `ghost` for a deleted account) is not carried at all — but only an
+  *assignee* simply disappears. A ghost issue author leaves the story with no
+  author, so it falls back to the importing member as requestor; a ghost comment
+  author likewise leaves the comment attributed to the importing member.
+- **Roles** — the issue author becomes the story's **requestor**; assignees
+  become **owners**, and for a pull request the creator is an owner too.
+- **Comment attribution is structural, not textual.** A comment is authored by
+  its author's `external_member` row and its body is stored verbatim — no
+  `(originally …)` prefix, and nothing reported in `unmatched`. That prefix is
+  the unmatched-comment-author fallback, reached only by a source that carries
+  an email-valued author cell — never a GitHub import.
+
+The direct engine has no equivalent stage: it attributes a comment by prefixing
+the body instead (see *Default mapping profile* below).
 
 ## v2 — async import
 
@@ -574,7 +645,17 @@ drifting in prose.
   dropped PR conversation comments by the same key, and the join keeps any
   stray unmatched comment inert (its issue is never mapped). The public EAT API has
   no comment-author attribution, so each body is prefixed
-  `@<login> on <YYYY-MM-DD>:` (deleted accounts render as `@ghost`).
+  `@<login> on <YYYY-MM-DD>:` (deleted accounts render as `@ghost`). That prefix
+  is a **known divergence from the server engine, not the target end state**:
+  the server authors the comment as an `external_member` keyed on the numeric
+  GitHub user id and leaves the body untouched (see *GitHub identity mapping
+  (server engine)* above). The public API **does** carry comment-author
+  attribution — `POST .../stories/{id}/comments` accepts
+  `author: ExternalPersonInput` (server story #32773), owner-gated by the same
+  check as the `created_at` this engine already sends. The direct engine has
+  simply not adopted it yet; tracker story **#33465** owns that change. Until it
+  lands the prefix stays — see "Comment authorship" under *Fidelity
+  limitations*.
 - **Identity** — `external_id` is the issue number as a string; rows carrying
   a `pull_request` key are dropped (v3 is issues-only).
 
@@ -1014,9 +1095,11 @@ and both are prescanned, in union.
   the grid-extension server ask (#32434) lands; the create response carries no
   iteration info, so the write report cannot yet surface which iteration a
   backdated story landed in.
-- **Comment authorship** — the API has no comment-author attribution; comments
-  are authored by the importing key, with the GitHub author riding in the body
-  prefix. When the comment's `created_at` is sent (backdating-capable server)
+- **Comment authorship** — the API accepts an owner-gated `author`
+  (`ExternalPersonInput`, server story #32773), but this engine does not send it
+  yet (tracker story #33465): comments are authored by the importing key, with
+  the GitHub author riding in the body prefix. When the comment's `created_at`
+  is sent (backdating-capable server)
   the prefix is `@login:`; against an older server the date rides there too
   (`@login on YYYY-MM-DD:`).
 - **Sub-issue hierarchy** — EAT has no parent/child story relation, so the

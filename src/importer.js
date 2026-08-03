@@ -76,8 +76,12 @@ export async function pollImport(client, projectId, importId, { onProgress, poll
  * @property {number} importedStories
  * @property {number} importedLabels
  * @property {number} skipped
- * @property {unknown[]} errors
- * @property {Record<string, unknown[]>} unmatched
+ * @property {unknown[]} errors server row errors, `{ code, row }` objects
+ *   (a plain string from an older/other source is tolerated)
+ * @property {unknown[]} warnings non-fatal server advisories,
+ *   `{ code, count, floor_year }` objects
+ * @property {Record<string, unknown>} unmatched always empty on a GitHub
+ *   import (see `runImport` below); values are lists, but unvalidated
  * @property {string[]} externalMembersCreated logins of external_member rows
  *   newly created by the import; empty when the server predates the field
  * @property {boolean} dryRun true when the server confirmed this was a
@@ -93,7 +97,8 @@ const GITHUB_LOGIN = /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$/;
  *
  * The server returns `imported` as a nested object (`{"stories": N,
  * "labels": M}`); a flat integer from older/other sources is also tolerated.
- * `unmatched` lists GitHub users the server could not map to EAT members.
+ * `unmatched` is always empty here: it is built from email/name actor cells the
+ * GitHub connector never fills (its people ride in `author` / `assignees`).
  *
  * When the server answers the async accept (`202 { import_id, status }`
  * instead of the synchronous 200 body), poll the job to a terminal state and
@@ -141,6 +146,7 @@ export async function runImport(
     importedLabels: labels,
     skipped: Number(raw.skipped ?? 0) || 0,
     errors: [...(raw.errors || [])],
+    warnings: [...(raw.warnings || [])],
     unmatched: { ...(raw.unmatched || {}) },
     externalMembersCreated: Array.isArray(created)
       ? [
