@@ -1556,3 +1556,119 @@ test("--include issues,prs is still a usage error on the direct engine", async (
   assert.ok(err.buf.includes("prs not supported by the direct engine yet"));
   assert.ok(!err.buf.includes("releases not supported"));
 });
+
+// --- --include milestones on the direct engine (#31931) ----------------------
+
+test("--engine direct --include issues,milestones runs and renders the direct epic lines", async () => {
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      const out = capture();
+      const err = capture();
+      /** @type {any} */
+      let seen = null;
+      const code = await main(
+        [
+          "--project",
+          "91",
+          "--repo",
+          "o/r",
+          "--engine",
+          "direct",
+          "--include",
+          "issues,milestones",
+          "-y",
+        ],
+        {
+          stdout: out,
+          stderr: err,
+          preflight: async () => preflightResult(),
+          runDirect: async (_client, _project, _owner, _repo, opts) => {
+            seen = opts;
+            return outcome({ importedStories: 3 });
+          },
+        },
+      );
+      assert.equal(code, 0);
+      assert.ok(!err.buf.includes("not supported by the direct engine yet"), err.buf);
+      assert.deepEqual(seen.included, ["issues", "milestones"]);
+      assert.ok(out.buf.includes("  milestones:"));
+      assert.ok(out.buf.includes("    - milestone → epic (an issue keeps its milestone"));
+      assert.ok(out.buf.includes("    - milestone state + due date → the epic's description"));
+      assert.ok(out.buf.includes("    - an epic that already exists is reused"));
+    }),
+  );
+});
+
+test("--milestones composes with --include milestones and implies the direct engine", async () => {
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      const out = capture();
+      const err = capture();
+      /** @type {any} */
+      let seen = null;
+      const code = await main(
+        [
+          "--project",
+          "91",
+          "--repo",
+          "o/r",
+          "--include",
+          "issues,milestones",
+          "--milestones",
+          "v1.0",
+          "-y",
+        ],
+        {
+          stdout: out,
+          stderr: err,
+          preflight: async () => preflightResult(),
+          runDirect: async (_c, _p, _o, _r, opts) => {
+            seen = opts;
+            return outcome({ importedStories: 1 });
+          },
+        },
+      );
+      assert.equal(code, 0);
+      assert.deepEqual(seen.customization.milestones, ["v1.0"]);
+      assert.ok(out.buf.includes("[engine: direct]"));
+      // a selection filter narrows what maps; it never drops a mapping line
+      assert.ok(out.buf.includes("    - milestone → epic (an issue keeps its milestone"));
+      assert.ok(out.buf.includes("    - an epic that already exists is reused"));
+      assert.ok(out.buf.includes("  - milestones: v1.0"));
+    }),
+  );
+});
+
+test("--engine server --include issues,milestones prints the one line it always has", async () => {
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key", EAT_APP_BASE: "https://eat.example" }, async () => {
+      const out = capture();
+      const err = capture();
+      const code = await main(
+        ["--project", "91", "--repo", "o/r", "--include", "issues,milestones", "-y"],
+        {
+          stdout: out,
+          stderr: err,
+          preflight: async () => preflightResult(),
+          runImport: async () => outcome({ importedStories: 2, importedLabels: 1, skipped: 1 }),
+        },
+      );
+      assert.equal(code, 0);
+      assert.equal(
+        out.buf,
+        "Import mapping (GitHub → East Agile Tracker):\n" +
+          "  issues:\n" +
+          "    - open issue → story (unstarted); closed issue → story (accepted, keeps the closed date)\n" +
+          "    - labels → labels (with colors); issue-body checklists → story tasks\n" +
+          "    - comments → comments (body only)\n" +
+          "  milestones:\n" +
+          "    - milestone → epic (an issue keeps its milestone as the epic's label)\n" +
+          "Imports append to the project; re-runs skip already-imported items; nothing is updated or deleted.\n" +
+          "Importing o/r into project 91 (Demo)...\n" +
+          "Imported 2 stories (1 labels), skipped 1 (already imported), 0 error(s).\n" +
+          "Board: https://eat.example/projects/91\n",
+      );
+      assert.equal(err.buf, "");
+    }),
+  );
+});

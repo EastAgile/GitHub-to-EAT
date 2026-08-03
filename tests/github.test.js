@@ -989,6 +989,46 @@ test("the releases listing is page-bounded, so an endless rel=next cannot spin",
   assert.equal(pages, MAX_RELEASE_PAGES);
 });
 
+// --- milestones (#31931) -----------------------------------------------------
+
+// Every issue row embeds title/state/due_on, so milestone→epic costs no request — worth
+// pinning: the anonymous budget is 60/h and a listing endpoint would be a silent regression.
+test("no --include selection makes fetchAll request the milestones listing", async () => {
+  /** @type {string[]} */
+  const paths = [];
+  await withGitHub(
+    (req, res) => {
+      const parsed = new URL(req.url ?? "", "http://x");
+      paths.push(parsed.pathname);
+      if (parsed.pathname === "/repos/o/r/issues") {
+        return json(res, 200, [
+          {
+            number: 1,
+            milestone: { title: "v1.0", state: "open", due_on: "2024-12-01T00:00:00Z" },
+          },
+        ]);
+      }
+      json(res, 200, []);
+    },
+    async (base) => {
+      const client = new GitHubClient("o", "r", { apiBase: base });
+      const plain = await client.fetchAll();
+      const withReleases = await client.fetchAll({ releases: true });
+      // the mapper's three fields ride on the issue row itself
+      assert.deepEqual(plain.issues[0].milestone, {
+        title: "v1.0",
+        state: "open",
+        due_on: "2024-12-01T00:00:00Z",
+      });
+      assert.deepEqual(withReleases.issues[0].milestone, plain.issues[0].milestone);
+    },
+  );
+  assert.ok(
+    !paths.some((p) => p.includes("/milestones")),
+    `no milestones fetch, got ${paths.join(", ")}`,
+  );
+});
+
 // The mechanism above is pinned against the constant; the documented *value* is
 // the server importer's own `MAX_PAGES` (github.rs:76), so drift would start
 // refusing repos the server accepts.

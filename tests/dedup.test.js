@@ -7,6 +7,7 @@ import {
   markerFor,
   prescanImported,
   prescanProvenance,
+  storyLabelKeys,
   unionImported,
   withMarker,
 } from "../src/dedup.js";
@@ -282,4 +283,112 @@ test("applyDedup stamps release markers and skips already-imported releases", ()
   );
   assert.equal(deduped.stories[0].description, markerFor("o", "r", "release-2"));
   assert.equal(markerExternalId(deduped.stories[0].description, "o", "r"), "release-2");
+});
+
+// --- epics (#31931) ----------------------------------------------------------
+
+/**
+ * @param {string} externalId
+ * @param {string[]} labels
+ * @returns {any}
+ */
+const epicStory = (externalId, labels) => ({
+  external_id: externalId,
+  name: `issue ${externalId}`,
+  description: null,
+  story_type: "feature",
+  current_state: "unstarted",
+  created_at: null,
+  completed_at: null,
+  labels,
+  tasks: [],
+  comments: [],
+});
+
+test("applyDedup keeps only the epics a surviving story still carries", () => {
+  const plan = /** @type {import("../src/writer.js").WritePlan} */ ({
+    labels: [],
+    epics: [
+      { title: "V1", description: null },
+      { title: "V2", description: "GitHub milestone — State: closed" },
+    ],
+    stories: [epicStory("3", ["V1"]), epicStory("7", ["V2"])],
+  });
+  const { plan: pruned, skipped } = applyDedup(plan, new Set(["3"]), "o", "r");
+  assert.equal(skipped, 1);
+  assert.deepEqual(pruned.epics, [
+    { title: "V2", description: "GitHub milestone — State: closed" },
+  ]);
+});
+
+test("a re-run whose stories are all skipped plans no epic work at all", () => {
+  const plan = /** @type {import("../src/writer.js").WritePlan} */ ({
+    labels: [],
+    epics: [{ title: "V1", description: null }],
+    stories: [epicStory("3", ["V1"])],
+  });
+  assert.deepEqual(applyDedup(plan, new Set(["3"]), "o", "r").plan.epics, []);
+});
+
+test("epic pruning matches case-insensitively, like EAT's label names", () => {
+  const plan = /** @type {import("../src/writer.js").WritePlan} */ ({
+    labels: [],
+    epics: [{ title: "V1", description: null }],
+    stories: [epicStory("7", ["v1"])],
+  });
+  assert.deepEqual(applyDedup(plan, new Set(), "o", "r").plan.epics, [
+    { title: "V1", description: null },
+  ]);
+});
+
+test("a plan with no epics field still dedups, yielding an empty epic list", () => {
+  const plan = /** @type {import("../src/writer.js").WritePlan} */ ({
+    labels: [],
+    stories: [epicStory("7", [])],
+  });
+  assert.deepEqual(applyDedup(plan, new Set(), "o", "r").plan.epics, []);
+});
+
+// These keys decide whether an already-imported story counts as grouped, so a row this
+// misreads turns into a false "epic is partial" warning on every healthy re-run.
+test("storyLabelKeys reads both label spellings, and never coerces a non-string", () => {
+  // `label_name` is what every server version emits; `name` is the newer alias.
+  assert.deepEqual([...storyLabelKeys({ labels: [{ label_name: "  V1  " }] })], ["v1"]);
+  assert.deepEqual([...storyLabelKeys({ labels: [{ name: "V1" }] })], ["v1"]);
+  // Where the two disagree, `label_name` decides — like the epic scan's own key.
+  assert.deepEqual(
+    [...storyLabelKeys({ labels: [{ label_name: "V1", name: "renamed" }] })],
+    ["v1"],
+  );
+  // A bare string row is accepted too.
+  assert.deepEqual([...storyLabelKeys({ labels: ["V1"] })], ["v1"]);
+  // A non-string name is dropped, not stringified: coercing 123 would let it claim
+  // membership of an epic really named "123".
+  assert.deepEqual([...storyLabelKeys({ labels: [{ label_name: 123 }, { name: null }] })], []);
+  // A row with no labels at all is empty, not a crash.
+  for (const row of [{}, { labels: null }, null, undefined]) {
+    assert.deepEqual([...storyLabelKeys(row)], []);
+  }
+});
+
+test("the prescans request labels only when asked, and both do it the same way", async () => {
+  /** @type {string[]} */
+  const fields = [];
+  /** @type {any} */
+  const client = {
+    listStoryPage: async (/** @type {number} */ _id, /** @type {any} */ opts) => {
+      fields.push(String(opts.fields));
+      return { items: [], next_cursor: null };
+    },
+  };
+  await prescanImported(client, 91, "o", "r");
+  await prescanImported(client, 91, "o", "r", { withLabels: true });
+  await prescanProvenance(client, 91);
+  await prescanProvenance(client, 91, "github", { withLabels: true });
+  assert.deepEqual(fields, [
+    "story_id,description,tasks_count,comment_count",
+    "story_id,description,tasks_count,comment_count,labels",
+    "story_id,import_external_id,tasks_count,comment_count",
+    "story_id,import_external_id,tasks_count,comment_count,labels",
+  ]);
 });

@@ -11,6 +11,8 @@ import {
   describeCustomization,
   ISSUES_LEGEND,
   issuesLegend,
+  MILESTONES_LEGEND,
+  milestonesLegend,
   RELEASES_LEGEND,
   releasesLegend,
 } from "./mapping.js";
@@ -45,7 +47,8 @@ export const MAPPINGS = {
   },
   milestones: {
     requestField: "include_milestones",
-    legend: ["milestone → epic (an issue keeps its milestone as the epic's label)"],
+    legend: MILESTONES_LEGEND,
+    render: milestonesLegend,
   },
   releases: {
     requestField: "include_releases",
@@ -87,6 +90,21 @@ export function parseInclude(value) {
     );
   }
   return selected;
+}
+
+/**
+ * The `--include` value that adds `type` to a run's own selection, in registry order.
+ * Advice a run prints has to be followable verbatim without dropping a type it already had.
+ *
+ * @param {string[]} selected the run's current selection
+ * @param {string} type
+ * @returns {string}
+ */
+export function includeWith(selected, type) {
+  const wanted = new Set([...selected, type]);
+  return Object.keys(MAPPINGS)
+    .filter((name) => wanted.has(name))
+    .join(",");
 }
 
 /**

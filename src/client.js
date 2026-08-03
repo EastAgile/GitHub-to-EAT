@@ -26,6 +26,13 @@ export class NotFoundError extends EATError {}
 export class ConflictError extends EATError {
   /** @type {string | undefined} the server's error `code` field */
   code;
+
+  /**
+   * @type {string | undefined} the server's human `error` field. For epics it names which
+   * kind of row holds the title (`Epic '…'` / `Label '…'`) — a discriminator no second
+   * read can supply as reliably.
+   */
+  detail;
 }
 
 /** The request exceeded its timeout. */
@@ -95,7 +102,9 @@ export class EATClient {
       const error = new ConflictError(`conflict on ${path}: ${text.slice(0, 200)}`);
       error.status = 409;
       try {
-        error.code = JSON.parse(text)?.code;
+        const body = JSON.parse(text);
+        error.code = body?.code;
+        if (typeof body?.error === "string") error.detail = body.error;
       } catch {}
       throw error;
     }
@@ -328,6 +337,47 @@ export class EATClient {
   async createLabel(projectId, label, idempotencyKey) {
     const response = await this.#request("POST", `/projects/${projectId}/labels`, {
       json: label,
+      headers: { "Idempotency-Key": idempotencyKey },
+    });
+    return response.json();
+  }
+
+  /**
+   * The endpoint answers a bare array (`handlers/epics.rs` selects a project's epics with
+   * no LIMIT and no cursor). Reading any other shape as "no epics" would make every epic
+   * POST, 409 and be reported blocked, so an unexpected body fails the run instead.
+   *
+   * @param {number} projectId
+   * @returns {Promise<any[]>}
+   */
+  async listEpics(projectId) {
+    const path = `/projects/${projectId}/epics`;
+    const data = await (await this.#request("GET", path)).json();
+    if (!Array.isArray(data)) {
+      const error = new EATError(
+        `GET ${path} answered ${data === null ? "null" : typeof data}, not the documented ` +
+          "bare array of epics — refusing to read that as a project with no epics.",
+      );
+      // The real 200, so the writer's retry rule treats it as terminal: a body this
+      // wrong is a contract change, not a blip a second request would fix.
+      error.status = 200;
+      throw error;
+    }
+    return data;
+  }
+
+  /**
+   * Unlike the internal importer this does **not** get-or-create: a title matching an
+   * existing epic *or* plain label raises {@link ConflictError} with `code: "conflict"`.
+   *
+   * @param {number} projectId
+   * @param {{ name: string, description?: string | null }} epic
+   * @param {string} idempotencyKey
+   * @returns {Promise<any>}
+   */
+  async createEpic(projectId, { name, description }, idempotencyKey) {
+    const response = await this.#request("POST", `/projects/${projectId}/epics`, {
+      json: description == null ? { name } : { name, description },
       headers: { "Idempotency-Key": idempotencyKey },
     });
     return response.json();

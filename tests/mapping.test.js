@@ -23,6 +23,7 @@ import {
   parseCustomization,
   releaseExternalId,
   storyTypeFromIssueType,
+  stripControls,
   TRUNCATION_NOTICE,
 } from "../src/mapping.js";
 import { MAPPINGS, renderLegend } from "../src/mappings.js";
@@ -1043,7 +1044,7 @@ test("sendDates=true carries the comment date and collapses the prefix to @login
       labels: [],
     },
     DEFAULT_CUSTOMIZATION,
-    true,
+    { sendDates: true },
   );
   assert.deepEqual(plan.stories[0].comments, [
     { text: "@bob:\n\nLooks good", created_at: "2026-03-04T05:06:07Z" },
@@ -1064,7 +1065,7 @@ test("sendDates defaults to the older-server output (dated prefix) byte-for-byte
     labels: [],
   };
   const dflt = mapRepo(repo, DEFAULT_CUSTOMIZATION);
-  const explicit = mapRepo(repo, DEFAULT_CUSTOMIZATION, false);
+  const explicit = mapRepo(repo, DEFAULT_CUSTOMIZATION, { sendDates: false });
   assert.deepEqual(dflt.stories[0].comments, [
     { text: "@bob on 2026-03-04:\n\nLooks good", created_at: "2026-03-04T05:06:07Z" },
   ]);
@@ -1168,6 +1169,39 @@ test("an invalid value is stripped of control characters before it is reported",
       assert.match(err.message, /x\[2Jy/);
       return true;
     },
+  );
+});
+
+// The epic warning is the first path that renders *remote* author-controlled text, so
+// bidi controls matter as much as C0: U+202E alone can visually reverse the warning line.
+test("stripControls removes format characters, not only control characters", () => {
+  const format = [
+    "\u202a", // LEFT-TO-RIGHT EMBEDDING
+    "\u202b",
+    "\u202c",
+    "\u202d",
+    "\u202e", // RIGHT-TO-LEFT OVERRIDE — reverses what follows it on screen
+    "\u2066", // the four isolates
+    "\u2067",
+    "\u2068",
+    "\u2069",
+    "\u200b", // ZERO WIDTH SPACE
+    "\u200c",
+    "\u200d",
+    "\u200e", // LEFT-TO-RIGHT MARK
+    "\u200f",
+    "\u00ad", // SOFT HYPHEN
+    "\ufeff", // ZERO WIDTH NO-BREAK SPACE
+  ];
+  for (const ch of format) {
+    const hex = ch.codePointAt(0)?.toString(16).toUpperCase();
+    assert.equal(stripControls(`a${ch}b`), "ab", `U+${hex} survived`);
+  }
+  // C0/C1/DEL still go, and printable text is untouched.
+  assert.equal(stripControls("a\u001b[2Jb\u007fc"), "a[2Jbc");
+  assert.equal(
+    stripControls("v1.0 \u2014 release \u2713 \u00e9"),
+    "v1.0 \u2014 release \u2713 \u00e9",
   );
 });
 
@@ -1703,4 +1737,281 @@ test("a release's clamped description still fits once its marker is stamped", ()
   );
   assert.equal(markerExternalId(stamped, "o", "r"), "release-100");
   assert.ok(stamped.includes(TRUNCATION_NOTICE));
+});
+
+// --- milestones → epics (#31931) ---------------------------------------------
+
+/** @param {any} [milestone] @param {any} [overrides] */
+const milestoneRepo = (milestone, overrides = {}) => ({
+  issues: [ghIssue({ number: 7, milestone })],
+  comments: [],
+  labels: [],
+  ...overrides,
+});
+
+const withEpics = { epics: true };
+
+test("a milestone becomes an epic whose title is the story's label", () => {
+  const plan = mapRepo(
+    milestoneRepo({ title: "V1", state: "open", due_on: "2024-12-01T00:00:00Z" }),
+    DEFAULT_CUSTOMIZATION,
+    withEpics,
+  );
+  assert.deepEqual(plan.epics, [
+    { title: "V1", description: "GitHub milestone — State: open, Due: 2024-12-01" },
+  ]);
+  assert.deepEqual(plan.stories[0].labels, ["V1"]);
+});
+
+test("the epic description mirrors the server's four milestone_epic_desc shapes", () => {
+  /** @param {any} m */
+  const desc = (m) =>
+    mapRepo(milestoneRepo(m), DEFAULT_CUSTOMIZATION, withEpics).epics[0].description;
+  assert.equal(
+    desc({ title: "V1", state: "open", due_on: "2024-12-01T00:00:00Z" }),
+    "GitHub milestone — State: open, Due: 2024-12-01",
+  );
+  assert.equal(desc({ title: "V1", state: "closed" }), "GitHub milestone — State: closed");
+  assert.equal(desc({ title: "V1", due_on: "2025-01-15" }), "GitHub milestone — Due: 2025-01-15");
+  assert.equal(desc({ title: "V1" }), null);
+  // the separator is an em dash (U+2014), like the server's
+  assert.ok(String(desc({ title: "V1", state: "open" })).includes("—"));
+});
+
+test("a closed milestone still yields an epic — epics have no state of their own", () => {
+  const plan = mapRepo(
+    milestoneRepo({ title: "V1", state: "closed" }),
+    DEFAULT_CUSTOMIZATION,
+    withEpics,
+  );
+  assert.equal(plan.epics.length, 1);
+  assert.deepEqual(plan.stories[0].labels, ["V1"]);
+});
+
+test("a blank or non-string milestone title yields no epic and no label", () => {
+  for (const milestone of [{ title: "   " }, { title: "" }, { title: 7 }, {}, null, "V1", 3]) {
+    const plan = mapRepo(milestoneRepo(milestone), DEFAULT_CUSTOMIZATION, withEpics);
+    assert.deepEqual(plan.epics, [], `milestone ${JSON.stringify(milestone)} made an epic`);
+    assert.deepEqual(plan.stories[0].labels, []);
+  }
+});
+
+test("a non-string milestone state or due date contributes no description part", () => {
+  const plan = mapRepo(
+    milestoneRepo({ title: "V1", state: 1, due_on: {} }),
+    DEFAULT_CUSTOMIZATION,
+    withEpics,
+  );
+  assert.deepEqual(plan.epics, [{ title: "V1", description: null }]);
+});
+
+test("without the epics option a milestone contributes nothing at all", () => {
+  const repo = milestoneRepo({ title: "V1", state: "open", due_on: "2024-12-01T00:00:00Z" });
+  const off = mapRepo(repo, DEFAULT_CUSTOMIZATION, { epics: false });
+  assert.deepEqual(off.epics, []);
+  assert.deepEqual(off.stories[0].labels, []);
+  // and the default (no options at all) is the same, byte for byte
+  assert.deepEqual(mapRepo(repo), off);
+});
+
+test("two issues in one milestone share a single epic, deduped case-insensitively", () => {
+  const plan = mapRepo(
+    {
+      issues: [
+        ghIssue({ number: 1, milestone: { title: "V1", state: "open" } }),
+        ghIssue({ number: 2, milestone: { title: " v1 ", state: "closed" } }),
+      ],
+      comments: [],
+      labels: [],
+    },
+    DEFAULT_CUSTOMIZATION,
+    withEpics,
+  );
+  assert.equal(plan.epics.length, 1);
+  // the first spelling wins, and every story in the epic carries that one label name
+  assert.equal(plan.epics[0].title, "V1");
+  assert.equal(plan.epics[0].description, "GitHub milestone — State: open");
+  assert.deepEqual(plan.stories[0].labels, ["V1"]);
+  assert.deepEqual(plan.stories[1].labels, ["V1"]);
+});
+
+test("the epic label is never created as a plain label of its own", () => {
+  const plan = mapRepo(milestoneRepo({ title: "V1" }), DEFAULT_CUSTOMIZATION, withEpics);
+  assert.deepEqual(plan.epics, [{ title: "V1", description: null }]);
+  assert.deepEqual(plan.labels, []);
+});
+
+test("an issue label matching its milestone is not listed twice", () => {
+  const plan = mapRepo(
+    {
+      issues: [
+        ghIssue({
+          number: 1,
+          labels: [{ name: "v1", color: "d73a4a" }],
+          milestone: { title: "V1" },
+        }),
+      ],
+      comments: [],
+      labels: [],
+    },
+    DEFAULT_CUSTOMIZATION,
+    withEpics,
+  );
+  assert.deepEqual(plan.stories[0].labels, ["v1"]);
+  assert.deepEqual(plan.epics, [{ title: "V1", description: null }]);
+  assert.deepEqual(plan.labels, [
+    { name: "v1", background_color_hex: "#d73a4a", text_color_hex: "#ffffff" },
+  ]);
+});
+
+test("a milestone can never reclassify a story's type", () => {
+  const plan = mapRepo(milestoneRepo({ title: "bugfix" }), DEFAULT_CUSTOMIZATION, withEpics);
+  assert.equal(plan.stories[0].story_type, "feature");
+  assert.deepEqual(plan.stories[0].labels, ["bugfix"]);
+});
+
+test("the epic label lands after the issue's own labels and the closed-reason label", () => {
+  const plan = mapRepo(
+    {
+      issues: [
+        ghIssue({
+          number: 1,
+          state: "closed",
+          state_reason: "not_planned",
+          labels: [{ name: "ui" }],
+          milestone: { title: "V1" },
+        }),
+      ],
+      comments: [],
+      labels: [],
+    },
+    DEFAULT_CUSTOMIZATION,
+    withEpics,
+  );
+  assert.deepEqual(plan.stories[0].labels, ["ui", "not-planned", "V1"]);
+});
+
+test("an over-long milestone title is cut to 255 bytes on both the epic and the label", () => {
+  const plan = mapRepo(milestoneRepo({ title: "v".repeat(300) }), DEFAULT_CUSTOMIZATION, withEpics);
+  assert.equal(plan.epics[0].title, "v".repeat(255));
+  assert.deepEqual(plan.stories[0].labels, ["v".repeat(255)]);
+  // A 4-byte character straddling the boundary must not split into a lone surrogate:
+  // 63 emoji fill 252 bytes, so the 64th cannot fit inside 255.
+  const astral = "\u{1F600}".repeat(100);
+  const cut = mapRepo(milestoneRepo({ title: astral }), DEFAULT_CUSTOMIZATION, withEpics).epics[0]
+    .title;
+  assert.equal(cut, "\u{1F600}".repeat(63));
+  assert.equal(Buffer.byteLength(cut, "utf8"), 252);
+  // A lone surrogate would encode to U+FFFD, so the round-trip would differ.
+  assert.equal(cut, Buffer.from(cut, "utf8").toString("utf8"));
+});
+
+// The slice runs after the trim, so a cut landing on a space leaves a title the server
+// stores one byte shorter — and every later run then misses it in the listing.
+test("a cut that lands on whitespace is trimmed again, so the stored title round-trips", () => {
+  const title = `${"a".repeat(254)} b`;
+  const plan = mapRepo(milestoneRepo({ title }), DEFAULT_CUSTOMIZATION, withEpics);
+  assert.equal(plan.epics[0].title, "a".repeat(254));
+  assert.deepEqual(plan.stories[0].labels, ["a".repeat(254)]);
+});
+
+// Trimming *before* the cut is what keeps padding from eating the budget: measure the
+// padded string and 5 real characters fall off the end, with no truncation warning.
+test("leading whitespace is trimmed before the cut, not counted against the 255 bytes", () => {
+  const title = `${" ".repeat(10)}${"a".repeat(250)}`;
+  const plan = mapRepo(milestoneRepo({ title }), DEFAULT_CUSTOMIZATION, withEpics);
+  assert.equal(plan.epics[0].title, "a".repeat(250));
+});
+
+// Every other plan text field is clamped, and this one is written before any story, so an
+// unbounded description would 400 the epic stage and kill the import before it starts.
+test("an over-long epic description is clamped like every other plan text field", () => {
+  const plan = clampPlan(
+    {
+      labels: [],
+      stories: [],
+      epics: [
+        { title: "V1", description: `GitHub milestone — State: ${"s".repeat(400)}` },
+        { title: "V2", description: null },
+      ],
+    },
+    { ...FALLBACK_LIMITS, epicDescription: 100 },
+  );
+  assert.ok(bytes(String(plan.epics[0].description)) <= 100);
+  assert.ok(String(plan.epics[0].description).endsWith(TRUNCATION_NOTICE));
+  assert.equal(plan.epics[1].description, null);
+  // Titles are cut at map time, so the clamp leaves them alone.
+  assert.equal(plan.epics[0].title, "V1");
+});
+
+test("an epic description inside the limit is passed through untouched", () => {
+  const epics = [{ title: "V1", description: "GitHub milestone — State: open" }];
+  const plan = clampPlan({ labels: [], stories: [], epics }, FALLBACK_LIMITS);
+  assert.deepEqual(plan.epics, epics);
+});
+
+// Bytes, not UTF-16 units — the limit the server enforces is `str::len()`.
+test("an epic description is clamped by bytes, so multi-byte text cannot slip past", () => {
+  const description = "é".repeat(200); // 400 bytes, 200 UTF-16 units
+  const plan = clampPlan(
+    { labels: [], stories: [], epics: [{ title: "V1", description }] },
+    {
+      ...FALLBACK_LIMITS,
+      epicDescription: 300,
+    },
+  );
+  assert.ok(bytes(String(plan.epics[0].description)) <= 300);
+  assert.notEqual(plan.epics[0].description, description);
+});
+
+// The fallback is `limits::EPIC_DESCRIPTION`, not a conservative guess like the text
+// fields: a smaller one would truncate notes the server would have accepted.
+test("the epic-description fallback is the server's documented 100,000 bytes", () => {
+  const description = "d".repeat(100_000);
+  const plan = clampPlan(
+    { labels: [], stories: [], epics: [{ title: "V1", description }] },
+    FALLBACK_LIMITS,
+  );
+  assert.equal(plan.epics[0].description, description);
+  const over = clampPlan(
+    { labels: [], stories: [], epics: [{ title: "V1", description: `${description}x` }] },
+    FALLBACK_LIMITS,
+  );
+  assert.ok(bytes(String(over.epics[0].description)) <= 100_000);
+  assert.ok(String(over.epics[0].description).endsWith(TRUNCATION_NOTICE));
+});
+
+test("filtered-out issues contribute no epic", () => {
+  const repo = {
+    issues: [
+      ghIssue({ number: 1, state: "closed", milestone: { title: "V1" } }),
+      ghIssue({ number: 2, state: "open", milestone: { title: "V2" } }),
+    ],
+    comments: [],
+    labels: [],
+  };
+  const plan = mapRepo(repo, custom({ states: "open" }), withEpics);
+  assert.deepEqual(
+    plan.epics.map((e) => e.title),
+    ["V2"],
+  );
+});
+
+test("clampPlan carries the epics through untouched", () => {
+  const plan = mapRepo(
+    milestoneRepo({ title: "V1", state: "open" }),
+    DEFAULT_CUSTOMIZATION,
+    withEpics,
+  );
+  assert.equal(plan.epics.length, 1);
+  assert.deepEqual(clampPlan(plan, FALLBACK_LIMITS, {}).epics, plan.epics);
+});
+
+test("a padded milestone state or due date is trimmed into the epic description", () => {
+  const plan = mapRepo(
+    milestoneRepo({ title: "V1", state: "  open  ", due_on: "  2024-12-01T00:00:00Z  " }),
+    DEFAULT_CUSTOMIZATION,
+    withEpics,
+  );
+  assert.equal(plan.epics[0].description, "GitHub milestone — State: open, Due: 2024-12-01");
 });

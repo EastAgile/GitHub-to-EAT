@@ -343,3 +343,148 @@ test("createComment sends created_at only when a date is supplied", async () => 
     await mock.close();
   }
 });
+
+// --- epics (#31931) ----------------------------------------------------------
+
+test("listEpics returns the project's epics; a non-array body reads as none", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    assert.deepEqual(await client.listEpics(91), []);
+    await client.createEpic(91, { name: "V1", description: "note" }, "k1");
+    const epics = await client.listEpics(91);
+    assert.equal(epics.length, 1);
+    assert.equal(epics[0].epic_title, "V1");
+  } finally {
+    await mock.close();
+  }
+});
+
+// Reading an envelope as "no epics" would POST every epic, 409 it, re-read nothing and
+// report every milestone blocked — a confident lie. The unexpected shape must be visible.
+test("listEpics refuses a non-array 200 body instead of reading it as an empty project", async () => {
+  await withServer(
+    (_req, res) => json(res, 200, { epics: [], next_cursor: null }),
+    async (base) => {
+      await assert.rejects(new EATClient(base, "t").listEpics(91), (err) => {
+        assert.ok(err instanceof EATError);
+        assert.match(err.message, /answered object, not the documented bare array of epics/);
+        // The real status, so the writer's retry rule treats a contract change as terminal.
+        assert.equal(err.status, 200);
+        return true;
+      });
+    },
+  );
+  await withServer(
+    (_req, res) => json(res, 200, null),
+    async (base) => {
+      await assert.rejects(new EATClient(base, "t").listEpics(91), /answered null/);
+    },
+  );
+});
+
+test("listEpics passes a bare array through, the empty one included", async () => {
+  await withServer(
+    (_req, res) => json(res, 200, []),
+    async (base) => {
+      assert.deepEqual(await new EATClient(base, "t").listEpics(91), []);
+    },
+  );
+});
+
+// `detail` is typed `string | undefined` and the writer branches on its prefix, so a
+// structured `error` field must be dropped rather than stored as an object.
+test("a 409 whose error field is not a string leaves detail unset", async () => {
+  await withServer(
+    (_req, res) => json(res, 409, { code: "conflict", error: { message: "Epic 'V1' exists" } }),
+    async (base) => {
+      await assert.rejects(
+        new EATClient(base, "t").createEpic(91, { name: "V1", description: null }, "k"),
+        (err) => {
+          assert.ok(err instanceof ConflictError);
+          assert.equal(err.code, "conflict");
+          assert.equal(err.detail, undefined);
+          return true;
+        },
+      );
+    },
+  );
+});
+
+test("a duplicate epic's 409 carries the server's own Epic/Label discriminator", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await client.createEpic(91, { name: "V1", description: null }, "k1");
+    await assert.rejects(client.createEpic(91, { name: "V1", description: null }, "k2"), (err) => {
+      assert.ok(err instanceof ConflictError);
+      assert.equal(err.detail, "Epic 'V1' already exists in this project");
+      return true;
+    });
+    await client.createLabel(91, { name: "plain" }, "k3");
+    await assert.rejects(
+      client.createEpic(91, { name: "plain", description: null }, "k4"),
+      (err) => {
+        assert.ok(err instanceof ConflictError);
+        assert.equal(err.detail, "Label 'plain' already exists in this project");
+        return true;
+      },
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("createEpic posts name + description with an Idempotency-Key", async () => {
+  /** @type {any} */
+  let seen = null;
+  /** @type {string | string[] | undefined} */
+  let key;
+  await withServer(
+    async (req, res) => {
+      key = req.headers["idempotency-key"];
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      seen = { path: req.url, body: JSON.parse(Buffer.concat(chunks).toString()) };
+      json(res, 200, { epic_id: 1 });
+    },
+    async (base) => {
+      await new EATClient(base, "t").createEpic(91, { name: "V1", description: "n" }, "run:epic:0");
+    },
+  );
+  assert.equal(seen.path, "/api/v1/projects/91/epics");
+  assert.deepEqual(seen.body, { name: "V1", description: "n" });
+  assert.equal(key, "run:epic:0");
+});
+
+test("createEpic omits a null description rather than sending it", async () => {
+  /** @type {any} */
+  let body = null;
+  await withServer(
+    async (req, res) => {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      body = JSON.parse(Buffer.concat(chunks).toString());
+      json(res, 200, {});
+    },
+    async (base) => {
+      await new EATClient(base, "t").createEpic(91, { name: "V1", description: null }, "k");
+    },
+  );
+  assert.deepEqual(body, { name: "V1" });
+});
+
+test("a duplicate epic surfaces as ConflictError with the server's conflict code", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await client.createEpic(91, { name: "V1", description: null }, "k1");
+    await assert.rejects(client.createEpic(91, { name: "V1", description: null }, "k2"), (err) => {
+      assert.ok(err instanceof ConflictError);
+      assert.equal(err.code, "conflict");
+      return true;
+    });
+  } finally {
+    await mock.close();
+  }
+});
