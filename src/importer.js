@@ -94,9 +94,8 @@ const GITHUB_LOGIN = /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$/;
  *
  * The server returns `imported` as a nested object (`{"stories": N,
  * "labels": M}`); a flat integer from older/other sources is also tolerated.
- * `unmatched` is EAT-CSV-only and always empty for a GitHub import: the server
- * keys GitHub actors on the numeric user id, so they never reach its
- * unmatched-email path (CONTRACT.md, *GitHub identity mapping*).
+ * `unmatched` is EAT-CSV-only, so it is always empty here: GitHub actors key on
+ * the numeric user id and never reach the server's unmatched-email path.
  *
  * When the server answers the async accept (`202 { import_id, status }`
  * instead of the synchronous 200 body), poll the job to a terminal state and
