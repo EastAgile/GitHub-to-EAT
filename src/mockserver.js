@@ -315,7 +315,10 @@ function computeImportResult(state, projectId, body) {
     imported: { stories: fresh.length, labels: fresh.length ? state.fixture.labels : 0 },
     skipped: ids.length - fresh.length,
     errors: [],
+    warnings: [],
     external_members_created: createdMembers,
+    // Serialized but always empty: `unmatched` is EAT-CSV-only, and GitHub
+    // actors key on the numeric user id (CONTRACT.md).
     unmatched: {
       owners: [],
       followers: [],

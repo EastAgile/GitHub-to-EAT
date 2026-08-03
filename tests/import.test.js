@@ -173,10 +173,10 @@ test("runImport reads unmatched", async () => {
     imported: { stories: 1, labels: 0 },
     skipped: 0,
     errors: [],
-    unmatched: { owners: ["a", "b"], followers: [] },
+    unmatched: { owners: ["a@x.test", "b@x.test"], followers: [] },
   };
   const outcome = await runImport(fakeClient(raw), 91, "o", "r", { idempotencyKey: "k" });
-  assert.deepEqual(outcome.unmatched, { owners: ["a", "b"], followers: [] });
+  assert.deepEqual(outcome.unmatched, { owners: ["a@x.test", "b@x.test"], followers: [] });
 });
 
 test("full import against the mock", async () => {
@@ -303,12 +303,17 @@ test("GITHUB_TOKEN env flows to the import", async () => {
   assert.equal(mock.state.imports[0].body.token, "ghp_env");
 });
 
-test("unmatched users are reported", async () => {
+// The server's shape, which is EAT-CSV-only: `unmatched` carries emails, and a
+// `comment_authors` entry is an `{ email, count }` object.
+test("unmatched actors are reported", async () => {
   const result = {
     imported: { stories: 1, labels: 0 },
     skipped: 0,
     errors: [],
-    unmatched: { owners: ["alice", "bob"], comment_authors: ["carol"] },
+    unmatched: {
+      owners: ["alice@x.test", "bob@x.test"],
+      comment_authors: [{ email: "carol@x.test", count: 2 }],
+    },
   };
   const mock = await startMockServer(makeState({ importResult: result }));
   const out = capture();
@@ -325,7 +330,7 @@ test("unmatched users are reported", async () => {
   } finally {
     await mock.close();
   }
-  assert.ok(out.buf.includes("3 GitHub user"));
+  assert.ok(out.buf.includes("3 actor(s) could not be matched"));
 });
 
 const PLACEHOLDER_NOTE =
@@ -738,7 +743,7 @@ const DONE_RESULT = {
   imported: { stories: 4, labels: 1 },
   skipped: 2,
   errors: [],
-  unmatched: { owners: ["x"] },
+  unmatched: { owners: ["x@x.test"] },
 };
 
 test("pollImport returns the done result", async () => {

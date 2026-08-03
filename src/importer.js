@@ -77,7 +77,8 @@ export async function pollImport(client, projectId, importId, { onProgress, poll
  * @property {number} importedLabels
  * @property {number} skipped
  * @property {unknown[]} errors
- * @property {Record<string, unknown[]>} unmatched
+ * @property {Record<string, unknown[]>} unmatched EAT-CSV-only; empty on a
+ *   GitHub import (see `runImport` below)
  * @property {string[]} externalMembersCreated logins of external_member rows
  *   newly created by the import; empty when the server predates the field
  * @property {boolean} dryRun true when the server confirmed this was a
@@ -93,7 +94,9 @@ const GITHUB_LOGIN = /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$/;
  *
  * The server returns `imported` as a nested object (`{"stories": N,
  * "labels": M}`); a flat integer from older/other sources is also tolerated.
- * `unmatched` lists GitHub users the server could not map to EAT members.
+ * `unmatched` is EAT-CSV-only and always empty for a GitHub import: the server
+ * keys GitHub actors on the numeric user id, so they never reach its
+ * unmatched-email path (CONTRACT.md, *GitHub identity mapping*).
  *
  * When the server answers the async accept (`202 { import_id, status }`
  * instead of the synchronous 200 body), poll the job to a terminal state and

@@ -132,9 +132,11 @@ function reportImport(outcome, { stdout, stderr, project, appBase }) {
     `Imported ${outcome.importedStories} stories (${outcome.importedLabels} labels), ` +
       `skipped ${outcome.skipped}${skippedNote}, ${outcome.errors.length} error(s).\n`,
   );
+  // `unmatched` is EAT-CSV-only, so a GitHub import never reaches this note —
+  // it exists for a server that starts reporting actors this CLI never sends.
   const unmatchedTotal = Object.values(outcome.unmatched).reduce((n, v) => n + v.length, 0);
   if (unmatchedTotal) {
-    stdout.write(`note: ${unmatchedTotal} GitHub user(s) could not be matched to members.\n`);
+    stdout.write(`note: ${unmatchedTotal} actor(s) could not be matched to members.\n`);
   }
   const created = Array.isArray(outcome.externalMembersCreated)
     ? outcome.externalMembersCreated

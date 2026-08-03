@@ -81,29 +81,44 @@ The API base is `.../api/v1`. Shapes the CLI parses:
     "imported": { "stories": 39, "labels": 0 },
     "skipped": 0,
     "errors": ["Row 3: ..."],
+    "warnings": [],
+    "external_members_created": ["octocat"],
     "unmatched": { "owners": [], "followers": [], "reviewers": [],
-                   "requesters": [],
-                   "comment_authors": [{ "email": "x@users.noreply.github.com", "count": 2 }] }
+                   "requesters": [], "comment_authors": [] }
   }
   ```
   `imported` is an **object**, not an integer; it counts stories and labels
   only (epics created from milestones are not counted). `skipped` means
   "already imported" (see re-import dedup above). `errors` is a list of
-  strings. `dry_run` echoes the request's `dry_run` field.
+  strings. `dry_run` echoes the request's `dry_run` field. `warnings` are
+  **coded** non-fatal advisories about an import that otherwise succeeded —
+  unlike `errors`, nothing was skipped (server story #32239).
 
-  **Optional** `"external_members_created": ["<github login>", ...]` — the
-  GitHub logins whose external-member rows (display-only owner attributions
-  outside the project roster; auto-linked to a real member when a matching
-  GitHub account signs in) were newly created by this import. **Not yet
-  emitted by the hosted tracker** — this is the agreed forward-compat shape
-  (assignees-become-owners shipped server-side 2026-07-09 without reporting
-  the rows it creates). The CLI renders a placeholder-owners note when the
-  field is present and non-empty (on `--dry-run`, as a `would create` line in
-  the plan); an absent field, empty array, or non-array value renders nothing
-  and never errors. Entries that are not valid GitHub logins (alphanumerics
-  and single inner hyphens, at most 39 chars) are dropped and duplicates
-  collapsed before rendering. The mock server emits the field in computed
-  mode (`fixture.assignees`), creating each login at most once per project.
+  **`unmatched` is always empty for a GitHub import.** The server only fills it
+  for the **EAT-CSV** source, which carries actors as email addresses: its
+  owner / follower / reviewer / requester / comment-author resolvers report a
+  value only when it looks like an email (`import/common.rs::looks_like_email`)
+  and matched no member. A GitHub actor is not an email — it is keyed on the
+  numeric GitHub user id and always resolves to an `external_member` row (see
+  *GitHub identity mapping (server engine)* below), so it can never land here.
+  `comment_authors` is also **not** a list of strings: its entries are
+  `{ "email": "...", "count": N }` objects. The lists are still serialized on
+  every import, so the CLI parses the field — but it must never be presented as
+  GitHub-user coverage.
+
+  `"external_members_created": ["<github login>", ...]` — the GitHub logins
+  whose external-member rows (display-only owner attributions outside the
+  project roster; auto-linked to a real member when a matching GitHub account
+  signs in) were newly created by this import; reused rows are excluded, the
+  list is deduped and sorted, and a `dry_run` preview reports it too (server
+  story #32141). The CLI renders a placeholder-owners note when the field is
+  present and non-empty (on `--dry-run`, as a `would create` line in the plan);
+  an absent field (an older server), empty array, or non-array value renders
+  nothing and never errors. Entries that are not valid GitHub logins
+  (alphanumerics and single inner hyphens, at most 39 chars) are dropped and
+  duplicates collapsed before rendering. The mock server emits the field in
+  computed mode (`fixture.assignees`), creating each login at most once per
+  project.
 - **Project** (`GET .../projects/{id}`): the name field is `project_title` (not
   `title`/`name`); also `project_id`, `project_desc`, etc.
 - **Stories** (`GET .../projects/{id}/stories`): with `?limit=` (or `?cursor=`) it
@@ -111,6 +126,37 @@ The API base is `.../api/v1`. Shapes the CLI parses:
   query it returns a bare JSON array.
 
 These shapes are mirrored by the bundled mock server (`src/mockserver.js`).
+
+### GitHub identity mapping (server engine)
+
+How the server engine turns GitHub people into EAT rows — verified against the
+server importer (`services/import/github.rs`, `common.rs`; server stories
+#26314 / #32141):
+
+- **Identity is the numeric GitHub user id, not the login.** Each person becomes
+  an `external_member` row keyed `(source = "github", external_id = <numeric
+  GitHub user id>)`, so a login rename converges on the existing row instead of
+  forking a second identity.
+- **The login is a display value and a mapping key, nothing more.** It is stored
+  as `external_username` (and `display_name`, since GitHub's issue payloads
+  carry no profile name) and refreshed on every re-import. Linking an external
+  member to a real EAT member is a separate scan matching
+  `lower(external_username) = lower(oauth_identity.provider_username)`; a row
+  that is already mapped keeps its mapping across a rename, because the identity
+  is the id.
+- **An external member is display-only.** The import never creates a `member`
+  row and never touches project membership.
+- **Ghosts are dropped.** A user object missing either the id or the login
+  (GitHub's `ghost` for a deleted account) is not carried at all.
+- **Roles** — the issue author becomes the story's **requestor**; assignees
+  become **owners**, and for a pull request the creator is an owner too.
+- **Comment attribution is structural, not textual.** A comment is authored by
+  its author's `external_member` row and its body is stored verbatim — no
+  `(originally …)` prefix, and nothing reported in `unmatched`. That prefix is
+  the EAT-CSV unmatched-email fallback, which a GitHub import never reaches.
+
+The direct engine has no equivalent stage: it attributes a comment by prefixing
+the body instead (see *Default mapping profile* below).
 
 ## v2 — async import
 
@@ -574,7 +620,13 @@ drifting in prose.
   dropped PR conversation comments by the same key, and the join keeps any
   stray unmatched comment inert (its issue is never mapped). The public EAT API has
   no comment-author attribution, so each body is prefixed
-  `@<login> on <YYYY-MM-DD>:` (deleted accounts render as `@ghost`).
+  `@<login> on <YYYY-MM-DD>:` (deleted accounts render as `@ghost`). That prefix
+  is a **known divergence from the server engine, not the target end state**:
+  the server authors the comment as an `external_member` keyed on the numeric
+  GitHub user id and leaves the body untouched (see *GitHub identity mapping
+  (server engine)* above). Closing the gap needs comment-author attribution on
+  the public API, which does not exist yet — see "Comment authorship" under
+  *Fidelity limitations*.
 - **Identity** — `external_id` is the issue number as a string; rows carrying
   a `pull_request` key are dropped (v3 is issues-only).
 

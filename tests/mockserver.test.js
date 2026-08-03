@@ -111,6 +111,39 @@ test("computed import emits external_members_created once per project", async ()
   }
 });
 
+// A GitHub import keys actors on the numeric user id, so every `unmatched`
+// list stays empty; the mock must still serialize the whole server shape.
+test("a computed import carries the server's full result shape", async () => {
+  const mock = await startMockServer(
+    makeState({
+      fixture: { issues: 1, prs: 0, milestones: 0, releases: 0, labels: 0, assignees: [] },
+    }),
+  );
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const result = await client.importGithub(91, "o", "r", { idempotencyKey: "k1" });
+    assert.deepEqual(Object.keys(result).sort(), [
+      "dry_run",
+      "errors",
+      "external_members_created",
+      "imported",
+      "skipped",
+      "unmatched",
+      "warnings",
+    ]);
+    assert.deepEqual(result.warnings, []);
+    assert.deepEqual(result.unmatched, {
+      owners: [],
+      followers: [],
+      reviewers: [],
+      requesters: [],
+      comment_authors: [],
+    });
+  } finally {
+    await mock.close();
+  }
+});
+
 test("a dry-run import does not persist external members", async () => {
   const mock = await startMockServer(
     makeState({
