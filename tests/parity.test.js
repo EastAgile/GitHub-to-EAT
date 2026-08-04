@@ -106,11 +106,7 @@ test("parity: a draft release imports to the backlog, and so does one with no pu
 });
 
 // --- pull requests (story #31933) --------------------------------------------
-// From github.rs `issue_to_record`'s `is_pr` branches, expectations copied from its own
-// tests `open_pr_maps_to_started_with_marker_and_label`,
-// `merged_pr_maps_to_accepted_with_completed_and_label`,
-// `closed_unmerged_pr_maps_to_rejected_with_label` and
-// `state_reason_on_a_pull_request_row_is_ignored`.
+// From github.rs `issue_to_record`'s `is_pr` branches, expectations copied from its own tests.
 
 const pr = (/** @type {object} */ over = {}) =>
   issue({
@@ -174,9 +170,8 @@ for (const [reason, merged_at, state] of /** @type {[string, string | null, stri
   });
 }
 
-// The PR branch of `current_state` (github.rs:1025-1030) is unconditional, where the
-// closed-reason branch below it is gated on `type_accepts_rejected`. So a chore-typed PR
-// closed unmerged still lands `rejected`, unlike a chore issue closed `not_planned`.
+// The PR branch of `current_state` (github.rs:1025-1030) is ungated, where the closed-reason
+// branch below it checks `type_accepts_rejected` — so a chore PR closed unmerged is rejected.
 test("parity: a chore-typed closed-unmerged PR is still rejected", () => {
   const s = onePr({
     state: "closed",
@@ -187,9 +182,8 @@ test("parity: a chore-typed closed-unmerged PR is still rejected", () => {
   assert.equal(s.current_state, "rejected");
 });
 
-// The synthetic label is pushed after `infer_story_type` has read the author's own labels
-// (github.rs:992-994), so it can never reclassify the story — a `pull-request` label does
-// not make a chore, and the author's own labels still decide.
+// Pushed after `infer_story_type` has read the author's own labels (github.rs:992-994), so
+// the synthetic label can never reclassify the story.
 test("parity: the pull-request label lands after type inference, never before it", () => {
   assert.equal(onePr({ title: "Fix the parser" }).story_type, "bug");
   assert.equal(inferStoryType(["pull-request"], "Add feature X"), "feature");
@@ -235,9 +229,8 @@ test("parity: a creator who is also an assignee is one owner, not two", () => {
   ]);
 });
 
-// github.rs:434-472. A **merged** PR whose body closes an imported issue that is itself
-// `closed` resolved it, so it must not create a second story; the PR's URL lands on the
-// issue's story as a `pull_request` link instead (stories #26313 / #26528).
+// github.rs:434-472: a merged PR that closed an already-closed imported issue resolved it, so
+// it writes no second story — its URL lands on that issue's story instead (#26313 / #26528).
 const REF_REPO = (/** @type {object} */ prOver, /** @type {object} */ issueOver = {}) => ({
   issues: [
     issue({ number: 7, state: "closed", closed_at: "2024-03-04T00:00:00Z", ...issueOver }),

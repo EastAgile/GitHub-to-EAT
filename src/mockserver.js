@@ -74,8 +74,7 @@ import { parseArgs } from "node:util";
  * @property {boolean} [commentAuthor] overrides `people` for the comment `author` alone,
  *   so a test can prove each half of the single probe independently
  * @property {boolean} storyLinks when true (default, mirroring prod), the openapi publishes
- *   `POST /stories/{id}/links` and the route accepts links; false simulates a server
- *   without it, where the route 404s
+ *   `POST /stories/{id}/links` and the route accepts links; false, the route 404s
  * @property {boolean} asyncImport when true, POST /import/json answers the v2
  *   async accept — 202 `{ import_id, status:"pending" }` plus a pollable job at
  *   GET /imports/{import_id}; false (default) keeps today's synchronous 200
