@@ -44,8 +44,18 @@ import { writePlan } from "./writer.js";
  *   & { fieldLimits?: () => Promise<Partial<import("./mapping.js").FieldLimits>>,
  *       supportsProvenanceDedup?: () => Promise<boolean>,
  *       supportsBackdating?: () => Promise<boolean>,
- *       supportsPersonAttribution?: () => Promise<boolean> }} DirectClient
+ *       supportsPersonAttribution?: () => Promise<boolean>,
+ *       supportsStoryLinks?: () => Promise<boolean> }} DirectClient
  */
+
+/**
+ * A row this run would map at all: a PR only under `--include prs`, matching mapRepo's own gate.
+ *
+ * @param {any} issue
+ * @param {boolean} pullRequests
+ * @returns {boolean}
+ */
+const mappableRow = (issue, pullRequests) => pullRequests || !issue.pull_request;
 
 /**
  * Warn when a run's filters leave nothing to import — a `--milestones` typo, or
@@ -55,15 +65,18 @@ import { writePlan } from "./writer.js";
  *
  * @param {{ issues: any[], releases?: any[] }} fetched
  * @param {import("./mapping.js").Customization} customization
+ * @param {boolean} pullRequests
  * @param {import("./progress.js").OutStream} [stream]
  */
-function warnFiltersMatchNothing({ issues, releases }, customization, stream) {
+function warnFiltersMatchNothing({ issues, releases }, customization, pullRequests, stream) {
   const filters = describeFilters(customization);
   if (!filters.length) return;
   const { states, milestones } = customization;
   // Milestones are matched against what survives the other filters, because
   // that is the order mapRepo applies them in.
-  const candidates = issues.filter((issue) => !issue.pull_request && matchesStates(issue, states));
+  const candidates = issues.filter(
+    (issue) => mappableRow(issue, pullRequests) && matchesStates(issue, states),
+  );
 
   if (hasMilestoneFilter(milestones)) {
     const present = new Set(candidates.map((issue) => issue.milestone?.title));
@@ -109,16 +122,19 @@ function warnUnmappableReleases({ releases }, stream) {
 }
 
 /**
- * The issues a run actually maps: not a PR, and past both selection filters.
+ * The rows a run actually maps: mappable at all, and past both selection filters.
  *
  * @param {any[]} issues
  * @param {import("./mapping.js").Customization} customization
+ * @param {boolean} pullRequests
  * @returns {any[]}
  */
-function inScope(issues, { states, milestones }) {
+function inScope(issues, { states, milestones }, pullRequests) {
   return issues.filter(
     (issue) =>
-      !issue.pull_request && matchesStates(issue, states) && matchesMilestones(issue, milestones),
+      mappableRow(issue, pullRequests) &&
+      matchesStates(issue, states) &&
+      matchesMilestones(issue, milestones),
   );
 }
 
@@ -131,10 +147,11 @@ function inScope(issues, { states, milestones }) {
  * @param {{ issues: any[] }} fetched
  * @param {import("./mapping.js").Customization} customization
  * @param {string[]} included
+ * @param {boolean} pullRequests
  * @param {import("./progress.js").OutStream} [stream]
  */
-function noteMilestonesNotImported({ issues }, customization, included, stream) {
-  const count = inScope(issues, customization).filter((issue) =>
+function noteMilestonesNotImported({ issues }, customization, included, pullRequests, stream) {
+  const count = inScope(issues, customization, pullRequests).filter((issue) =>
     milestoneEpicTitle(issue.milestone),
   ).length;
   if (!count) return;
@@ -208,13 +225,14 @@ function warnEpicsPruned(mapped, plan, imported, included, stream) {
  *
  * @param {{ issues: any[] }} fetched
  * @param {import("./mapping.js").Customization} customization
+ * @param {boolean} pullRequests
  * @param {import("./progress.js").OutStream} [stream]
  */
-function warnTruncatedMilestones({ issues }, customization, stream) {
+function warnTruncatedMilestones({ issues }, customization, pullRequests, stream) {
   // Trimmed before the Set: two titles differing only in surrounding whitespace do
   // collapse into one epic, so counting them twice would over-report the merge.
   const long = new Set(
-    inScope(issues, customization)
+    inScope(issues, customization, pullRequests)
       .map((issue) => issue.milestone?.title)
       .filter((title) => typeof title === "string")
       .map((title) => title.trim())
@@ -236,15 +254,16 @@ function warnTruncatedMilestones({ issues }, customization, stream) {
  *
  * @param {{ issues: any[] }} fetched
  * @param {import("./mapping.js").Customization} customization
+ * @param {boolean} pullRequests
  * @param {import("./progress.js").OutStream} [stream]
  */
-function warnUnrecognisedIssueTypes({ issues }, customization, stream) {
+function warnUnrecognisedIssueTypes({ issues }, customization, pullRequests, stream) {
   const { storyType, states, milestones } = customization;
   if (storyType !== "infer") return;
   const count = issues.filter((issue) => {
     const name = issue.type?.name;
     return (
-      !issue.pull_request &&
+      mappableRow(issue, pullRequests) &&
       matchesStates(issue, states) &&
       matchesMilestones(issue, milestones) &&
       typeof name === "string" &&
@@ -257,6 +276,24 @@ function warnUnrecognisedIssueTypes({ issues }, customization, stream) {
     `warning: ${count} issue(s) carry an issue type this importer does not recognise ` +
       `(it knows ${ISSUE_TYPE_NAMES.join(", ")}) — those stories take their type from ` +
       "labels + title instead.\n",
+  );
+}
+
+/**
+ * A server without the links path drops every PR↔story URL silently, and an import never
+ * updates a story it already created — so the loss is permanent for those rows.
+ *
+ * @param {import("./writer.js").WritePlan} plan post-dedup
+ * @param {import("./progress.js").OutStream} [stream]
+ */
+function warnLinksNotWritten(plan, stream) {
+  const count = plan.stories.reduce((total, op) => total + (op.links?.length ?? 0), 0);
+  if (!count) return;
+  stream?.write(
+    `warning: this server does not accept story links, so ${count} pull-request link(s) are ` +
+      "not written — those stories still import, but a PR's URL reaches EAT only in the " +
+      "description; an import never adds one later, so delete them and re-run against a " +
+      "server that publishes the links endpoint to get them.\n",
   );
 }
 
@@ -298,7 +335,8 @@ function attachedPeople(plan) {
  *     => Promise<import("./mapping.js").Customization>,
  *   announce?: (fetched: { issues: any[], comments: any[], labels: any[] },
  *     customization: import("./mapping.js").Customization) => Promise<void>,
- *   github?: { fetchAll(options?: { releases?: boolean }): Promise<{ issues: any[],
+ *   github?: { fetchAll(options?: { releases?: boolean, pullRequests?: boolean }):
+ *     Promise<{ issues: any[],
  *     comments: any[], labels: any[], subIssues?: Map<string, string[]>,
  *     releases?: any[] }> } }} options `customize` (the wizard) runs at the
  *   fetch→map seam so its questions use real data; `announce` (the customized
@@ -317,8 +355,10 @@ export async function runDirect(client, projectId, owner, repo, options) {
   const releases = included.includes("releases");
   // Every issue row carries its own milestone, so the epic mapping costs no extra fetch.
   const epics = included.includes("milestones");
+  // PR rows ride the issues listing, merge state included, so this costs no extra fetch either.
+  const pullRequests = included.includes("prs");
   const fetched = await runWithProgress(
-    () => source.fetchAll({ releases }),
+    () => source.fetchAll({ releases, pullRequests }),
     `fetching ${owner}/${repo} from GitHub`,
     { stream },
   );
@@ -328,11 +368,11 @@ export async function runDirect(client, projectId, owner, repo, options) {
   const customization = customize
     ? await customize(fetched)
     : (options.customization ?? DEFAULT_CUSTOMIZATION);
-  warnFiltersMatchNothing(fetched, customization, stream);
-  warnUnrecognisedIssueTypes(fetched, customization, stream);
+  warnFiltersMatchNothing(fetched, customization, pullRequests, stream);
+  warnUnrecognisedIssueTypes(fetched, customization, pullRequests, stream);
   warnUnmappableReleases(fetched, stream);
-  if (epics) warnTruncatedMilestones(fetched, customization, stream);
-  else noteMilestonesNotImported(fetched, customization, included, stream);
+  if (epics) warnTruncatedMilestones(fetched, customization, pullRequests, stream);
+  else noteMilestonesNotImported(fetched, customization, included, pullRequests, stream);
   // The customized legend + confirm reflect those answers, so they land here —
   // a declined confirm throws, aborting before any prescan or write.
   if (announce) await announce(fetched, customization);
@@ -345,8 +385,11 @@ export async function runDirect(client, projectId, owner, repo, options) {
   // One probe gates requestor + owners[].external + the comment author (EAT #32773,
   // one change); degrades to false, which keeps the `@login` comment prefix.
   const sendPeople = await (client.supportsPersonAttribution?.() ?? false);
+  // An older server 404s the links path, which is terminal — probing keeps a PR run
+  // importing there instead of dying part-written.
+  const sendLinks = await (client.supportsStoryLinks?.() ?? false);
   const mapped = clampPlan(
-    mapRepo(fetched, customization, { sendDates, epics, sendPeople }),
+    mapRepo(fetched, customization, { sendDates, epics, sendPeople, pullRequests }),
     limits,
     {
       reserveDescription: (op) =>
@@ -378,6 +421,7 @@ export async function runDirect(client, projectId, owner, repo, options) {
   );
   const { plan, skipped } = applyDedup(mapped, imported, owner, repo);
   warnEpicsPruned(mapped, plan, imported, included, stream);
+  if (!sendLinks) warnLinksNotWritten(plan, stream);
 
   // The marker lands at story-create, before tasks/comments — a run that died
   // in that window left a skipped-but-incomplete story. Surface it, loudly.
@@ -419,6 +463,7 @@ export async function runDirect(client, projectId, owner, repo, options) {
     sendProvenance,
     sendDates,
     sendPeople,
+    sendLinks,
   });
   return {
     importedStories: written.stories,

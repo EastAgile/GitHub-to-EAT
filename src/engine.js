@@ -17,8 +17,11 @@ export const ENGINES = ["server", "direct"];
 /** @type {Engine} */
 export const DEFAULT_ENGINE = "server";
 
-/** Import types the direct engine supports today; PRs are still to come. */
-export const DIRECT_SUPPORTED_INCLUDES = ["issues", "milestones", "releases"];
+/**
+ * Import types the direct engine supports. Transcribed rather than derived from the
+ * registry, so a type added there has to be decided here instead of inheriting support.
+ */
+export const DIRECT_SUPPORTED_INCLUDES = ["issues", "prs", "milestones", "releases"];
 
 /**
  * Validate an `--engine` value against {@link ENGINES}.

@@ -38,6 +38,10 @@ function issueTypeLine() {
   return `issue type ${rules}; otherwise labels + title decide`;
 }
 
+/** The synthetic label every PR story carries, and the `link_type` its URL rides as. */
+export const PULL_REQUEST_LABEL = "pull-request";
+export const PULL_REQUEST_LINK_TYPE = "pull_request";
+
 // One definition of each opener, so the legend below and the description assembly
 // far below cannot drift apart.
 const SUB_ISSUE_OF_PREFIX = "Sub-issue of";
@@ -174,6 +178,32 @@ export function releasesLegend(engine = "server") {
 
 /** The default (server-engine) releases legend the MAPPINGS registry re-exports. */
 export const RELEASES_LEGEND = releasesLegend();
+
+const PR_STATE_LINE = `open PR → story (started); merged PR → story (accepted, '${PULL_REQUEST_LABEL}' label)`;
+const PR_REJECTED_LINE = "closed-unmerged PR → story (rejected)";
+const PR_FOLD_LINE = "a merged PR that closes an imported issue folds into that issue's story";
+// Direct-only, like the lines the other renderers add: naming these in the server legend
+// would change bytes it has always printed. Both quote the link_type the mapper writes.
+const PR_SELF_LINK_LINE = `the PR's own URL → a '${PULL_REQUEST_LINK_TYPE}' link on its story`;
+const PR_CROSS_LINK_LINE =
+  "a PR that closes an imported issue links onto that issue's story; the fold above " +
+  "needs that issue closed too";
+
+/**
+ * No customization flag reaches PRs — the filters select rows, they do not switch the PR
+ * mapping off — so only the engine shapes these lines.
+ *
+ * @param {import("./engine.js").Engine} [engine]
+ * @returns {string[]}
+ */
+export function prsLegend(engine = "server") {
+  const lines = [PR_STATE_LINE, PR_REJECTED_LINE, PR_FOLD_LINE];
+  if (engine === "direct") lines.push(PR_SELF_LINK_LINE, PR_CROSS_LINK_LINE);
+  return lines;
+}
+
+/** The default (server-engine) PR legend the MAPPINGS registry re-exports. */
+export const PRS_LEGEND = prsLegend();
 
 /**
  * One human-readable line per non-default choice, for the legend's `Customized:`
@@ -621,6 +651,118 @@ function closedReasonLabel(closed, stateReason) {
   return CLOSED_REASON_LABELS.get(stateReason) ?? null;
 }
 
+/**
+ * GitHub's auto-close keywords followed by a same-repo `#N`, mirroring `parse_closing_issue_refs`
+ * (github.rs:566-615): word-bounded before, no longer word after, `:`/whitespace tolerated.
+ */
+const CLOSING_ISSUE_REF =
+  /(?<![0-9a-z_])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)[ \t\n\r:]*#(\d+)/g;
+
+/**
+ * Issue numbers a PR body says it closes, deduplicated. Detection is keyword-only — the
+ * listing carries no structured closing reference — so it misses UI-panel and cross-repo links.
+ *
+ * @param {string} body
+ * @returns {string[]}
+ */
+function parseClosingIssueRefs(body) {
+  /** @type {string[]} */
+  const out = [];
+  for (const match of body.toLowerCase().matchAll(CLOSING_ISSUE_REF)) {
+    const number = Number(match[1]);
+    // Rust's `parse::<i64>()` refuses what does not fit; past 2^53 JS would merge two numbers.
+    if (!Number.isSafeInteger(number)) continue;
+    const external = String(number);
+    if (!out.includes(external)) out.push(external);
+  }
+  return out;
+}
+
+/**
+ * A row's `html_url` as a link target, or null when it carries none. Blank is dropped rather
+ * than sent: `POST .../links` requires a non-empty url, so an empty one would 400 the run.
+ *
+ * @param {any} row
+ * @returns {string | null}
+ */
+function linkUrl(row) {
+  const url = typeof row?.html_url === "string" ? row.html_url.trim() : "";
+  return url || null;
+}
+
+/**
+ * @param {any} row a PR listing row
+ * @returns {StoryOp["links"]}
+ */
+const selfLink = (row) => {
+  const url = linkUrl(row);
+  return url ? [{ url, link_type: PULL_REQUEST_LINK_TYPE }] : [];
+};
+
+/**
+ * @param {string[] | undefined} urls
+ * @returns {StoryOp["links"]}
+ */
+const referencingPrLinks = (urls) =>
+  (urls ?? []).map((url) => ({ url, link_type: PULL_REQUEST_LINK_TYPE }));
+
+/**
+ * Ghosts (null) drop out and the numeric GitHub id is the key, so a PR's creator listed as an
+ * assignee too is one owner rather than two.
+ *
+ * @param {(ExternalPerson | null)[]} people
+ * @returns {ExternalPerson[]}
+ */
+function dedupePeople(people) {
+  /** @type {Map<string, ExternalPerson>} */
+  const byId = new Map();
+  for (const person of people) {
+    if (person && !byId.has(person.external_id)) byId.set(person.external_id, person);
+  }
+  return [...byId.values()];
+}
+
+/**
+ * PR↔issue relationships, mirroring github.rs:434-472. Returns the PR numbers that fold into
+ * an issue's story (#26313) and, per issue number, the referencing PR URLs (#26528).
+ *
+ * @param {any[]} issues the fetched rows, PRs included
+ * @returns {{ folded: Set<string>, prLinks: Map<string, string[]> }}
+ */
+function pullRequestRefs(issues) {
+  /** @type {Set<string>} */
+  const imported = new Set();
+  /** @type {Set<string>} */
+  const closedIssues = new Set();
+  for (const row of issues) {
+    if (row.pull_request) continue;
+    const number = String(row.number);
+    imported.add(number);
+    if (String(row.state ?? "").toLowerCase() === "closed") closedIssues.add(number);
+  }
+
+  /** @type {Set<string>} */
+  const folded = new Set();
+  /** @type {Map<string, string[]>} */
+  const prLinks = new Map();
+  for (const row of issues) {
+    if (!row.pull_request) continue;
+    const url = linkUrl(row);
+    if (typeof row.body !== "string" || !url) continue;
+    const merged = row.pull_request.merged_at != null;
+    for (const referenced of parseClosingIssueRefs(row.body)) {
+      if (!imported.has(referenced)) continue;
+      const urls = prLinks.get(referenced) ?? [];
+      if (!urls.includes(url)) urls.push(url);
+      prLinks.set(referenced, urls);
+      // GitHub only auto-closes on merge, so a merged PR resolved an issue already closed
+      // here; a still-open one was not (a race, or a reopen), so that PR keeps its story.
+      if (merged && closedIssues.has(referenced)) folded.add(String(row.number));
+    }
+  }
+  return { folded, prLinks };
+}
+
 // The server importer namespaces a release's external id (`github.rs:896`) so a
 // release id can't collide with an issue / PR number in the #26483 dedup key.
 const RELEASE_ID_PREFIX = "release-";
@@ -726,13 +868,15 @@ const REJECTABLE_TYPES = new Set(["feature", "bug"]);
  *   `description` (empty when the issue is in no sub-issue relation). Carried so
  *   {@link clampPlan} can cut the body around it; the writer never sends it.
  * @property {"bug" | "chore" | "feature" | "release"} story_type
- * @property {"unstarted" | "accepted" | "rejected"} current_state
+ * @property {"unstarted" | "started" | "accepted" | "rejected"} current_state
  * @property {string | null} created_at
  * @property {string | null} completed_at the GitHub closed date, or a release's
  *   `published_at`, kept
  * @property {string[]} labels label names on this story
+ * @property {{ url: string, link_type: string }[]} [links] a PR's own URL, or the URLs of
+ *   the PRs that close this issue
  * @property {ExternalPerson | null} [requestor] the issue author, null for a ghost
- * @property {ExternalPerson[]} [owners] the assignees, ghosts dropped
+ * @property {ExternalPerson[]} [owners] the assignees, ghosts dropped, a PR's creator last
  * @property {{ description: string, complete: boolean }[]} tasks
  * @property {{ text: string, created_at: string | null,
  *   author?: ExternalPerson | null }[]} comments
@@ -740,24 +884,37 @@ const REJECTABLE_TYPES = new Set(["feature", "bug"]);
 
 /**
  * Map a fetched repo ({@link import("./github.js").GitHubClient#fetchAll}'s shape) to the direct
- * writer's plan. Joining comments by `issue_url` drops PR chatter — those numbers are unmapped PRs.
+ * writer's plan. Comments join by `issue_url`, so a PR's chatter lands only when its PR is mapped.
  *
  * @param {{ issues: any[], comments: any[], labels: any[],
  *   subIssues?: Map<string, string[]> | null, releases?: any[] | null }} repo
  * @param {Customization} [customization] per-run overrides; the default reproduces
  *   this profile unchanged (the filter/override stories consume the other fields)
- * @param {{ sendDates?: boolean, epics?: boolean, sendPeople?: boolean }} [options] `sendDates`
+ * @param {{ sendDates?: boolean, epics?: boolean, sendPeople?: boolean,
+ *   pullRequests?: boolean }} [options] `sendDates`
  *   sends the comment's date on the write (off, it stays in the `@login on <date>:` prefix);
  *   `epics` (`--include milestones`) maps each milestone to an epic; `sendPeople` maps the
- *   GitHub people onto `requestor`/`owners`/`author` (off, the `@login` prefix is all there is)
+ *   GitHub people onto `requestor`/`owners`/`author` (off, the `@login` prefix is all there is);
+ *   `pullRequests` (`--include prs`) maps PR rows to stories instead of dropping them
  * @returns {{ labels: LabelOp[], stories: StoryOp[], epics: EpicOp[] }}
  */
 export function mapRepo(
   { issues, comments, labels, subIssues, releases },
   customization = DEFAULT_CUSTOMIZATION,
-  { sendDates = false, epics = false, sendPeople = false } = {},
+  { sendDates = false, epics = false, sendPeople = false, pullRequests = false } = {},
 ) {
   const links = indexSubIssues(subIssues);
+  // Fed only the rows this run maps: the fold exists so a resolved issue is the single
+  // story, and a filter that keeps that issue out leaves no story to fold into.
+  const { folded, prLinks } = pullRequests
+    ? pullRequestRefs(
+        issues.filter(
+          (issue) =>
+            matchesStates(issue, customization.states) &&
+            matchesMilestones(issue, customization.milestones),
+        ),
+      )
+    : { folded: new Set(), prLinks: new Map() };
   /** @type {Map<string, string | null>} repo-level color authority, by lowercased name */
   const repoColors = new Map(
     labels.map((l) => [
@@ -777,7 +934,8 @@ export function mapRepo(
   /** @type {StoryOp[]} */
   const stories = [];
   for (const issue of issues) {
-    if (issue.pull_request) continue;
+    const isPr = Boolean(issue.pull_request);
+    if (isPr && (!pullRequests || folded.has(String(issue.number)))) continue;
     const state = String(issue.state ?? "").toLowerCase();
     if (!matchesStates(issue, customization.states)) continue;
     if (!matchesMilestones(issue, customization.milestones)) continue;
@@ -822,12 +980,23 @@ export function mapRepo(
         ? (storyTypeFromIssueType(issue.type) ?? inferStoryType(names, title))
         : customization.storyType;
 
+    // Also after typing, so the synthetic label can never reclassify the story.
+    if (isPr) addLabel(PULL_REQUEST_LABEL, null);
+
     const closed = state === "closed";
     // Abandoned work must stay out of velocity: `accepted` is a done state, `rejected`
-    // is not, so billing a wontfix as accepted credits work nobody did.
-    const abandoned = closedReasonLabel(closed, issue.state_reason);
+    // is not, so billing a wontfix as accepted credits work nobody did. A PR has its own
+    // merge mapping below, so `state_reason` never applies to one.
+    const abandoned = isPr ? null : closedReasonLabel(closed, issue.state_reason);
     addLabel(abandoned, null);
     const closedState = abandoned && REJECTABLE_TYPES.has(storyType) ? "rejected" : "accepted";
+    // Unlike the closed-reason branch this is ungated by type: the server writes a
+    // closed-unmerged chore PR `rejected` too (github.rs:1025-1030).
+    const prState = !closed
+      ? "started"
+      : issue.pull_request?.merged_at != null
+        ? "accepted"
+        : "rejected";
 
     // Also after typing, for the same reason. The epic's own label is the join, so the
     // title rides in `names` only — POST /epics creates that label itself.
@@ -855,15 +1024,20 @@ export function mapRepo(
       description: [body, crossLinks].filter(Boolean).join("\n\n") || null,
       crossLinks,
       story_type: storyType,
-      current_state: /** @type {"unstarted" | "accepted" | "rejected"} */ (
-        closed ? closedState : "unstarted"
+      current_state: /** @type {StoryOp["current_state"]} */ (
+        isPr ? prState : closed ? closedState : "unstarted"
       ),
       created_at: issue.created_at ?? null,
       completed_at: (closed ? issue.closed_at : null) ?? null,
       labels: names,
+      links: isPr ? selfLink(issue) : referencingPrLinks(prLinks.get(externalId)),
       requestor: person(issue.user),
-      owners: /** @type {ExternalPerson[]} */ (
-        (Array.isArray(issue.assignees) ? issue.assignees : []).map(person).filter(Boolean)
+      // A PR's creator authored the work, so they are an owner as well as the requestor —
+      // deduped by id when they are an assignee too.
+      owners: dedupePeople(
+        (Array.isArray(issue.assignees) ? issue.assignees : [])
+          .concat(isPr ? [issue.user] : [])
+          .map(person),
       ),
       tasks: customization.tasks ? parseChecklist(body) : [],
       comments: /** @type {StoryOp["comments"]} */ ([]),

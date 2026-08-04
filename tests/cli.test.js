@@ -21,16 +21,6 @@ function scriptedStdin(lines) {
   return Object.assign(Readable.from(lines.map((l) => `${l}\n`)), { isTTY: true });
 }
 
-/**
- * The `github-to-eat: error: …` line of a captured stderr buffer, isolated from
- * the USAGE synopsis above it (which legitimately names every flag).
- *
- * @param {string} buf
- */
-function errorLine(buf) {
-  return buf.split("\n").find((line) => line.startsWith("github-to-eat: error:")) ?? "";
-}
-
 /** @param {Partial<import("../src/preflight.js").PreflightResult>} [overrides] */
 function preflightResult(overrides = {}) {
   return { projectId: 91, projectTitle: "Demo", nonEmpty: false, ...overrides };
@@ -370,16 +360,26 @@ test("--engine direct names the active engine in the legend header", async () =>
   );
 });
 
-test("--engine direct with a non-issue type is a usage error", async () => {
-  const err = capture();
-  const code = await main(
-    ["--project", "91", "--repo", "o/r", "--engine", "direct", "--include", "issues,prs"],
-    { stdout: capture(), stderr: err },
+test("--engine direct accepts every --include type the registry offers", async () => {
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      const err = capture();
+      const code = await main(
+        [
+          ...["--project", "91", "--repo", "o/r", "--engine", "direct", "--dry-run"],
+          ...["--include", "issues,prs,milestones,releases"],
+        ],
+        {
+          stdout: capture(),
+          stderr: err,
+          preflight: async () => preflightResult(),
+          runDirect: async () => outcome({ dryRun: true }),
+        },
+      );
+      assert.equal(code, 0);
+      assert.ok(!err.buf.includes("not supported by the direct engine yet"), err.buf);
+    }),
   );
-  assert.equal(code, 2);
-  assert.ok(err.buf.includes("not supported by the direct engine yet"));
-  assert.ok(err.buf.includes("argument --engine:"));
-  assert.ok(!err.buf.includes("argument --customize:"));
 });
 
 test("--engine direct with --dry-run renders the same plan block as the server path", async () => {
@@ -577,40 +577,6 @@ test("--customize with non-TTY stdout is a usage error", async () => {
   assert.ok(err.buf.includes("interactive terminal"));
 });
 
-test("--customize with an unsupported --include blames --customize, not --engine", async () => {
-  const err = capture();
-  const code = await main(
-    ["--project", "91", "--repo", "o/r", "--customize", "--include", "issues,prs"],
-    { stdout: ttyCapture(), stderr: err, stdin: { isTTY: true } },
-  );
-  assert.equal(code, 2);
-  assert.ok(err.buf.includes("argument --customize:"));
-  assert.ok(err.buf.includes("not supported by the direct engine yet"));
-  assert.ok(!errorLine(err.buf).includes("--engine"), errorLine(err.buf));
-});
-
-test("--engine direct --customize with an unsupported --include blames the explicit --engine", async () => {
-  const err = capture();
-  const code = await main(
-    [
-      "--project",
-      "91",
-      "--repo",
-      "o/r",
-      "--engine",
-      "direct",
-      "--customize",
-      "--include",
-      "issues,prs",
-    ],
-    { stdout: ttyCapture(), stderr: err, stdin: { isTTY: true } },
-  );
-  assert.equal(code, 2);
-  assert.ok(err.buf.includes("argument --engine:"));
-  assert.ok(!err.buf.includes("argument --customize:"));
-  assert.ok(err.buf.includes("not supported by the direct engine yet"));
-});
-
 test("--engine server --customize conflict wins over an unsupported --include", async () => {
   const err = capture();
   const code = await main(
@@ -630,17 +596,6 @@ test("--engine server --customize conflict wins over an unsupported --include", 
   assert.equal(code, 2);
   assert.ok(err.buf.includes("--customize"));
   assert.ok(err.buf.includes("--engine server"));
-  assert.ok(!err.buf.includes("not supported by the direct engine yet"));
-});
-
-test("--customize TTY gate runs before the unsupported --include check", async () => {
-  const err = capture();
-  const code = await main(
-    ["--project", "91", "--repo", "o/r", "--customize", "--include", "issues,prs"],
-    { stdout: ttyCapture(), stderr: err, stdin: { isTTY: false } },
-  );
-  assert.equal(code, 2);
-  assert.ok(err.buf.includes("interactive terminal"));
   assert.ok(!err.buf.includes("not supported by the direct engine yet"));
 });
 
@@ -1273,38 +1228,6 @@ test("--engine direct with a customization flag is accepted, not a conflict", as
   );
 });
 
-test("an unsupported --include blames the customization flag that implied the engine", async () => {
-  const err = capture();
-  const code = await main(
-    ["--project", "91", "--repo", "o/r", "--include", "issues,prs", "--states", "open"],
-    { stdout: capture(), stderr: err },
-  );
-  assert.equal(code, 2);
-  assert.ok(err.buf.includes("argument --states:"));
-  assert.ok(!err.buf.includes("argument --engine:"));
-});
-
-test("an unsupported --include blames --customize when that implied the engine", async () => {
-  const err = capture();
-  const code = await main(
-    ["--project", "91", "--repo", "o/r", "--include", "issues,prs", "--customize"],
-    { stdout: ttyCapture(), stderr: err, stdin: { isTTY: true } },
-  );
-  assert.equal(code, 2);
-  assert.ok(err.buf.includes("argument --customize:"));
-  assert.ok(!err.buf.includes("argument --engine:"));
-});
-
-test("an unsupported --include still blames --engine when it was passed", async () => {
-  const err = capture();
-  const code = await main(
-    ["--project", "91", "--repo", "o/r", "--include", "issues,prs", "--engine", "direct"],
-    { stdout: capture(), stderr: err },
-  );
-  assert.equal(code, 2);
-  assert.ok(err.buf.includes("argument --engine:"));
-});
-
 test("a flag-driven run renders the Customized: block, and composes with --dry-run", async () => {
   const run = await runAgainstMock([
     ...["--project", "91", "--repo", "o/r", "--dry-run"],
@@ -1563,17 +1486,6 @@ test("--engine direct --include issues,releases runs and renders the direct rele
   );
 });
 
-test("--include issues,prs is still a usage error on the direct engine", async () => {
-  const err = capture();
-  const code = await main(
-    ["--project", "91", "--repo", "o/r", "--engine", "direct", "--include", "issues,prs"],
-    { stdout: capture(), stderr: err },
-  );
-  assert.equal(code, 2);
-  assert.ok(err.buf.includes("prs not supported by the direct engine yet"));
-  assert.ok(!err.buf.includes("releases not supported"));
-});
-
 // --- --include milestones on the direct engine (#31931) ----------------------
 
 test("--engine direct --include issues,milestones runs and renders the direct epic lines", async () => {
@@ -1688,4 +1600,107 @@ test("--engine server --include issues,milestones prints the one line it always 
       assert.equal(err.buf, "");
     }),
   );
+});
+
+// --- --include prs on the direct engine (#31933) -----------------------------
+
+test("--engine direct --include issues,prs imports PR stories end to end (mockserver)", async () => {
+  const fetched = {
+    issues: [
+      {
+        number: 3,
+        title: "an issue",
+        body: "",
+        state: "closed",
+        created_at: "2024-01-01T00:00:00Z",
+        closed_at: "2024-01-02T00:00:00Z",
+        labels: [],
+      },
+      {
+        number: 10,
+        title: "open PR",
+        body: "",
+        state: "open",
+        created_at: "2024-03-01T08:00:00Z",
+        html_url: "https://github.com/o/r/pull/10",
+        labels: [],
+        pull_request: { merged_at: null },
+      },
+      {
+        number: 12,
+        title: "abandoned PR",
+        body: "",
+        state: "closed",
+        created_at: "2024-03-04T08:00:00Z",
+        closed_at: "2024-03-05T08:00:00Z",
+        html_url: "https://github.com/o/r/pull/12",
+        labels: [],
+        pull_request: { merged_at: null },
+      },
+    ],
+    comments: [
+      {
+        issue_url: "https://api.github.com/repos/o/r/issues/10",
+        user: { id: 12, login: "alice" },
+        created_at: "2024-03-01T09:00:00Z",
+        body: "review ping",
+      },
+    ],
+    labels: [],
+  };
+
+  const mock = await startMockServer();
+  try {
+    await inTempDir(() =>
+      withEnv(
+        { EAT_AGENT_KEY: "key", EAT_API_BASE: mock.baseUrl, EAT_APP_BASE: "https://eat.example" },
+        async () => {
+          const out = ttyCapture();
+          const code = await main(
+            [
+              ...["--project", "91", "--repo", "o/r", "-y"],
+              ...["--engine", "direct", "--include", "issues,prs"],
+            ],
+            {
+              stdout: out,
+              stderr: capture(),
+              runDirect: (client, project, owner, repo, opts) =>
+                realRunDirect(client, project, owner, repo, {
+                  ...opts,
+                  github: { fetchAll: async () => fetched },
+                }),
+            },
+          );
+          assert.equal(code, 0);
+          // The legend names the PR block, including the direct-only link lines.
+          assert.ok(out.buf.includes("  prs:"));
+          assert.ok(out.buf.includes("    - closed-unmerged PR → story (rejected)"));
+          assert.ok(
+            out.buf.includes("    - the PR's own URL → a 'pull_request' link on its story"),
+          );
+
+          const rows = mock.state.stories[91];
+          assert.equal(rows.length, 3);
+          const by = (/** @type {string} */ t) =>
+            /** @type {any} */ (rows.find((/** @type {any} */ r) => r.title === t));
+          assert.equal(by("open PR").current_state, "started");
+          assert.equal(by("abandoned PR").current_state, "rejected");
+          assert.deepEqual(
+            by("open PR").labels.map((/** @type {any} */ l) => l.label_name),
+            ["pull-request"],
+          );
+          assert.deepEqual(
+            by("open PR").links.map((/** @type {any} */ l) => l.url),
+            ["https://github.com/o/r/pull/10"],
+          );
+          assert.deepEqual(
+            by("open PR").comments.map((/** @type {any} */ c) => c.comment_text),
+            ["review ping"],
+          );
+        },
+      ),
+    );
+  } finally {
+    await mock.close();
+  }
 });

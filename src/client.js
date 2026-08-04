@@ -281,6 +281,19 @@ export class EATClient {
   }
 
   /**
+   * True when the server publishes the story-links path (`POST .../stories/{id}/links`).
+   * An older server 404s it, which is not retryable and would abort a part-written run.
+   *
+   * @returns {Promise<boolean>}
+   */
+  async supportsStoryLinks() {
+    const spec = await this.#openapi();
+    return Object.keys(spec?.paths ?? {}).some(
+      (path) => path.includes("/stories/") && path.endsWith("/links"),
+    );
+  }
+
+  /**
    * The write fields' `maxLength` limits from the published spec, when any.
    *
    * Aliased request fields (`text`/`comment_text`, `description`/`task_desc`)
@@ -461,6 +474,29 @@ export class EATClient {
     const response = await this.#request(
       "POST",
       `/projects/${projectId}/stories/${storyId}/comments`,
+      { json, headers: { "Idempotency-Key": idempotencyKey } },
+    );
+    return response.json();
+  }
+
+  /**
+   * Attach a link to a story (direct engine). `link_type` is free server-side text, so the
+   * import writes `pull_request`; callers gate this on {@link supportsStoryLinks}.
+   *
+   * @param {number} projectId
+   * @param {number} storyId
+   * @param {{ url: string, link_type?: string | null, title?: string | null }} link
+   * @param {string} idempotencyKey
+   * @returns {Promise<any>}
+   */
+  async createLink(projectId, storyId, { url, link_type, title }, idempotencyKey) {
+    /** @type {Record<string, unknown>} */
+    const json = { url };
+    if (link_type != null) json.link_type = link_type;
+    if (title != null) json.title = title;
+    const response = await this.#request(
+      "POST",
+      `/projects/${projectId}/stories/${storyId}/links`,
       { json, headers: { "Idempotency-Key": idempotencyKey } },
     );
     return response.json();

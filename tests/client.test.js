@@ -561,3 +561,122 @@ test("a duplicate epic surfaces as ConflictError with the server's conflict code
     await mock.close();
   }
 });
+
+// --- story links (#31933) -----------------------------------------------------
+
+test("supportsStoryLinks is true when the spec advertises the links path, false otherwise", async () => {
+  const mock = await startMockServer();
+  try {
+    assert.equal(await new EATClient(mock.baseUrl, "tok").supportsStoryLinks(), true);
+  } finally {
+    await mock.close();
+  }
+  const older = await startMockServer(makeState({ storyLinks: false }));
+  try {
+    assert.equal(await new EATClient(older.baseUrl, "tok").supportsStoryLinks(), false);
+  } finally {
+    await older.close();
+  }
+});
+
+test("supportsStoryLinks is false when /openapi.json is absent", async () => {
+  const mock = await startMockServer(makeState({ serverDryRun: false }));
+  try {
+    assert.equal(await new EATClient(mock.baseUrl, "tok").supportsStoryLinks(), false);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("createLink posts url + link_type with an Idempotency-Key, omitting a blank title", async () => {
+  /** @type {any} */
+  let body = null;
+  /** @type {string | string[] | undefined} */
+  let key;
+  /** @type {string | undefined} */
+  let path;
+  await withServer(
+    async (req, res) => {
+      path = req.url;
+      key = req.headers["idempotency-key"];
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      body = JSON.parse(Buffer.concat(chunks).toString());
+      json(res, 200, {});
+    },
+    async (base) => {
+      await new EATClient(base, "t").createLink(
+        91,
+        5,
+        { url: "https://github.com/o/r/pull/10", link_type: "pull_request" },
+        "k",
+      );
+    },
+  );
+  assert.ok(path?.endsWith("/projects/91/stories/5/links"), String(path));
+  assert.equal(key, "k");
+  assert.deepEqual(body, { url: "https://github.com/o/r/pull/10", link_type: "pull_request" });
+});
+
+test("the mock server records a created link on its story", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const story = await client.createStory(91, { name: "a PR" }, "s1");
+    await client.createLink(
+      91,
+      story.story_id,
+      { url: "https://github.com/o/r/pull/10", link_type: "pull_request" },
+      "l1",
+    );
+    const row = mock.state.stories[91][0];
+    assert.equal(row.links.length, 1);
+    assert.equal(row.links[0].url, "https://github.com/o/r/pull/10");
+    assert.equal(row.links[0].link_type, "pull_request");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a link with no url is refused, like the server's required-field check", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const story = await client.createStory(91, { name: "a PR" }, "s1");
+    await assert.rejects(client.createLink(91, story.story_id, { url: "  " }, "l1"), (err) => {
+      assert.ok(err instanceof EATError);
+      assert.equal(err.status, 400);
+      return true;
+    });
+  } finally {
+    await mock.close();
+  }
+});
+
+// `rejected` carries no state_rank, so the create's done-state guard refuses a
+// completed_at on one — the mock must refuse it too, or the writer's omission is untested.
+test("a completed_at on a non-done create is refused", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await assert.rejects(
+      client.createStory(
+        91,
+        {
+          name: "abandoned PR",
+          current_state: "rejected",
+          created_at: "2024-03-01T00:00:00Z",
+          completed_at: "2024-03-05T00:00:00Z",
+        },
+        "s1",
+      ),
+      (err) => {
+        assert.ok(err instanceof EATError);
+        assert.equal(err.status, 400);
+        return true;
+      },
+    );
+  } finally {
+    await mock.close();
+  }
+});

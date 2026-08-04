@@ -73,6 +73,9 @@ import { parseArgs } from "node:util";
  *   and an `external`-only owner 400s the way serde-dropping the unknown key makes it
  * @property {boolean} [commentAuthor] overrides `people` for the comment `author` alone,
  *   so a test can prove each half of the single probe independently
+ * @property {boolean} storyLinks when true (default, mirroring prod), the openapi publishes
+ *   `POST /stories/{id}/links` and the route accepts links; false simulates a server
+ *   without it, where the route 404s
  * @property {boolean} asyncImport when true, POST /import/json answers the v2
  *   async accept — 202 `{ import_id, status:"pending" }` plus a pollable job at
  *   GET /imports/{import_id}; false (default) keeps today's synchronous 200
@@ -136,6 +139,7 @@ export function makeState(overrides = {}) {
     provenance: true,
     backdating: true,
     people: true,
+    storyLinks: true,
     asyncImport: false,
     asyncFail: false,
     jobs: {},
@@ -261,6 +265,15 @@ function openapiDoc(state) {
           ...((state.commentAuthor ?? state.people) ? { author: externalPerson } : {}),
         },
       ),
+      ...(state.storyLinks
+        ? {
+            "/api/v1/projects/{project_id}/stories/{story_id}/links": post({
+              url: 1000,
+              link_type: undefined,
+              title: 255,
+            }),
+          }
+        : {}),
     },
   };
 }
@@ -608,6 +621,9 @@ const NOT_FOUND = { status: 404, payload: { error: "not found" } };
 const LABEL_DEFAULT_BACKGROUND = "#3498db";
 const LABEL_DEFAULT_TEXT = "#ffffff";
 
+/** States at or past `state_rank` 2 — the create's `lands_done` test. `rejected` has no rank. */
+const DONE_STATES = new Set(["finished", "delivered", "accepted"]);
+
 /**
  * `comments` on a story row is bookkeeping for tests — the real read shape
  * never carries it (it isn't in the fields= allowlist either).
@@ -661,6 +677,9 @@ function routePost(state, path, body, idempotencyKey) {
 
   m = path.match(/^\/projects\/(\d+)\/stories\/(\d+)\/comments$/);
   if (m) return createComment(state, Number(m[1]), Number(m[2]), body);
+
+  m = path.match(/^\/projects\/(\d+)\/stories\/(\d+)\/links$/);
+  if (m && state.storyLinks) return createLink(state, Number(m[1]), Number(m[2]), body);
 
   return { status: 404, payload: { error: "unknown route" } };
 }
@@ -814,6 +833,21 @@ function createStory(state, projectId, body) {
     };
   }
 
+  // `rejected` carries no state_rank, so it is not a done landing and the create refuses a
+  // completion on it — the same guard that lets an open create omit the field entirely.
+  if (state.backdating && body.completed_at != null && !DONE_STATES.has(body.current_state)) {
+    return {
+      status: 400,
+      payload: {
+        code: "validation_failed",
+        details: { fields: ["completed_at"] },
+        error:
+          "completed_at is only valid when the story is created in a done state " +
+          "(finished, delivered, accepted)",
+      },
+    };
+  }
+
   // EAT #31427 owner-gates the pair and rejects a lone field (probed 2026-07-24).
   if (state.provenance) {
     const hasSource = body.import_source != null;
@@ -891,6 +925,7 @@ function createStory(state, projectId, body) {
     tasks_count: 0,
     comments: [],
     comment_count: 0,
+    links: [],
     created: now,
     updated_at: now,
   };
@@ -905,9 +940,8 @@ function createStory(state, projectId, body) {
   if (state.backdating && body.created_at != null) {
     story.created_at = body.created_at;
     story.created = body.created_at;
-    // completed_at is valid only on a done-state create and clamps forward to
-    // created_at (a completion before creation stores as the creation instant).
-    if (body.completed_at != null && story.current_state === "accepted") {
+    // Clamps forward to created_at: a completion before creation stores as the creation instant.
+    if (body.completed_at != null) {
       story.completed_at =
         body.completed_at < body.created_at ? body.created_at : body.completed_at;
     }
@@ -995,6 +1029,39 @@ function createComment(state, projectId, storyId, body) {
   story.comments.push(comment);
   story.comment_count = story.comments.length;
   return { status: 200, payload: comment };
+}
+
+/**
+ * @param {MockState} state
+ * @param {number} projectId
+ * @param {number} storyId
+ * @param {any} body
+ * @returns {MockResponse}
+ */
+function createLink(state, projectId, storyId, body) {
+  const story = findStory(state, projectId, storyId);
+  if (!story) return NOT_FOUND;
+  const url = String(body.url ?? "").trim();
+  if (!url) {
+    return {
+      status: 400,
+      payload: {
+        code: "invalid_parameter",
+        details: { constraint: "required", fields: ["url"] },
+        error: "This field is required.",
+      },
+    };
+  }
+  const link = {
+    link_id: state.nextId++,
+    story_id: storyId,
+    url,
+    link_type: body.link_type ?? null,
+    title: body.title ?? null,
+    created: new Date().toISOString(),
+  };
+  story.links.push(link);
+  return { status: 200, payload: link };
 }
 
 /**

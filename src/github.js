@@ -236,14 +236,15 @@ export class GitHubClient {
   }
 
   /**
-   * List the repo's issues (`state=all`), dropping pull requests — the GitHub
-   * `/issues` endpoint mixes PRs in, tagged with a `pull_request` key.
+   * List the repo's issues (`state=all`). The `/issues` endpoint mixes PRs in, tagged with a
+   * `pull_request` key whose `merged_at` means no per-PR fetch is ever needed to read merge state.
    *
+   * @param {{ pullRequests?: boolean }} [options]
    * @returns {Promise<any[]>}
    */
-  async listIssues() {
+  async listIssues({ pullRequests = false } = {}) {
     const issues = await this.#paginate("/issues?state=all&per_page=100");
-    return issues.filter((item) => !item.pull_request);
+    return pullRequests ? issues : issues.filter((item) => !item.pull_request);
   }
 
   /**
@@ -367,17 +368,18 @@ export class GitHubClient {
   /**
    * Fetch issues, comments, labels, and the sub-issue hierarchy in one call.
    *
-   * The repo-wide comments endpoint includes PR conversation comments; only
-   * comments on kept issues survive, so mapping never sees PR chatter.
+   * The repo-wide comments endpoint includes PR conversation comments; only comments on
+   * kept rows survive, so PR chatter reaches mapping exactly when its PR does.
    *
-   * @param {{ releases?: boolean }} [options] `releases` adds the releases listing
-   *   (`--include releases`); off, that endpoint is never requested
+   * @param {{ releases?: boolean, pullRequests?: boolean }} [options] `releases` adds the
+   *   releases listing (`--include releases`); off, that endpoint is never requested.
+   *   `pullRequests` (`--include prs`) keeps the PR rows the issues listing mixes in
    * @returns {Promise<{ issues: any[], comments: any[], labels: any[],
    *   subIssues: Map<string, string[]>, releases: any[] }>}
    */
-  async fetchAll({ releases = false } = {}) {
+  async fetchAll({ releases = false, pullRequests = false } = {}) {
     const [issues, comments, labels, releaseRows] = await Promise.all([
-      this.listIssues(),
+      this.listIssues({ pullRequests }),
       this.listComments(),
       this.listLabels(),
       releases ? this.listReleases() : [],

@@ -2196,3 +2196,42 @@ test("a padded milestone state or due date is trimmed into the epic description"
   );
   assert.equal(plan.epics[0].description, "GitHub milestone — State: open, Due: 2024-12-01");
 });
+
+// --- pull requests: the fold respects the run's filters (#31933) --------------
+
+// The fold exists so a resolved issue is the single story. When a filter keeps the issue
+// out of the run there is no such story, so dropping the PR too would import nothing.
+test("a PR is not folded into an issue this run's filters exclude", () => {
+  const repo = {
+    issues: [
+      ghIssue({ number: 7, state: "closed", closed_at: "2024-01-02T00:00:00Z" }),
+      ghIssue({
+        number: 10,
+        title: "the fix",
+        body: "Fixes #7",
+        state: "closed",
+        closed_at: "2024-03-05T00:00:00Z",
+        html_url: "https://github.com/o/r/pull/10",
+        milestone: { title: "v1.0", state: "open" },
+        pull_request: { merged_at: "2024-03-05T00:00:00Z" },
+      }),
+    ],
+    comments: [],
+    labels: [],
+  };
+  const all = mapRepo(repo, DEFAULT_CUSTOMIZATION, { pullRequests: true });
+  assert.deepEqual(
+    all.stories.map((s) => s.external_id),
+    ["7"],
+  );
+
+  const filtered = mapRepo(
+    repo,
+    { ...DEFAULT_CUSTOMIZATION, milestones: ["v1.0"] },
+    { pullRequests: true },
+  );
+  assert.deepEqual(
+    filtered.stories.map((s) => s.external_id),
+    ["10"],
+  );
+});

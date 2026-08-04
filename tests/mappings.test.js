@@ -411,3 +411,22 @@ test("the epic-note legend line and the description builder agree on one format"
   assert.ok(line?.includes(`('${rendered}')`), `legend quotes '${rendered}', got ${line}`);
   assert.match(rendered, /^GitHub milestone — State: open, Due: 2024-12-01$/);
 });
+
+// --- pull requests in the legend (#31933) ------------------------------------
+
+test("the direct legend documents the PR links; the server legend keeps its three lines", () => {
+  const direct = renderLegend(["issues", "prs"], "direct");
+  assert.match(direct, /- the PR's own URL → a 'pull_request' link on its story/);
+  assert.match(direct, /links onto that issue's story/);
+  // The server engine's block is exactly what it always printed.
+  assert.deepEqual(MAPPINGS.prs.render?.("server", null), MAPPINGS.prs.legend);
+  assert.doesNotMatch(renderLegend(["issues", "prs"], "server"), /pull_request' link/);
+});
+
+// The PR rule has no `--customize` off switch, so no override may drop its lines.
+test("the PR lines survive every customization field", () => {
+  for (const c of CUSTOMIZATIONS) {
+    assert.match(renderLegend(["issues", "prs"], "direct", c), /- closed-unmerged PR → /);
+    assert.match(renderLegend(["issues", "prs"], "direct", c), /'pull_request' link on its story/);
+  }
+});
