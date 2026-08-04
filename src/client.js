@@ -262,6 +262,25 @@ export class EATClient {
   }
 
   /**
+   * True when the story create accepts a `requestor` **and** the comment create an
+   * `author`: neither body rejects unknown fields, so half-support drops one silently.
+   *
+   * @returns {Promise<boolean>}
+   */
+  async supportsPersonAttribution() {
+    const spec = await this.#openapi();
+    let requestor = false;
+    let author = false;
+    for (const [path, ops] of Object.entries(spec?.paths ?? {})) {
+      if (!path.includes("/projects/")) continue;
+      const props = EATClient.#postProperties(spec, ops);
+      if (path.endsWith("/stories") && "requestor" in props) requestor = true;
+      if (path.endsWith("/comments") && "author" in props) author = true;
+    }
+    return requestor && author;
+  }
+
+  /**
    * The write fields' `maxLength` limits from the published spec, when any.
    *
    * Aliased request fields (`text`/`comment_text`, `description`/`task_desc`)
@@ -424,17 +443,21 @@ export class EATClient {
   /**
    * Create a comment on a story (direct engine). Pass `createdAt` (an RFC 3339
    * instant) to backdate it — owner-gated server-side; omit it for a v3-identical
-   * body. Callers gate this on {@link supportsBackdating}.
+   * body. Callers gate this on {@link supportsBackdating}. `author` attributes the
+   * comment to an imported GitHub person, gated on {@link supportsPersonAttribution}.
    *
    * @param {number} projectId
    * @param {number} storyId
    * @param {string} text
    * @param {string} idempotencyKey
-   * @param {{ createdAt?: string | null }} [options]
+   * @param {{ createdAt?: string | null,
+   *   author?: import("./mapping.js").ExternalPerson | null }} [options]
    * @returns {Promise<any>}
    */
-  async createComment(projectId, storyId, text, idempotencyKey, { createdAt } = {}) {
+  async createComment(projectId, storyId, text, idempotencyKey, { createdAt, author } = {}) {
+    /** @type {Record<string, unknown>} */
     const json = createdAt ? { text, created_at: createdAt } : { text };
+    if (author) json.author = author;
     const response = await this.#request(
       "POST",
       `/projects/${projectId}/stories/${storyId}/comments`,

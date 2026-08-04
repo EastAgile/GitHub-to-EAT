@@ -280,6 +280,79 @@ test("supportsBackdating is false when /openapi.json is absent", async () => {
   }
 });
 
+// --- person attribution feature detection (story #33465) ----------------------
+
+test("supportsPersonAttribution is true when the spec advertises requestor, false otherwise", async () => {
+  const mock = await startMockServer();
+  try {
+    assert.equal(await new EATClient(mock.baseUrl, "tok").supportsPersonAttribution(), true);
+  } finally {
+    await mock.close();
+  }
+  const older = await startMockServer(makeState({ people: false }));
+  try {
+    assert.equal(await new EATClient(older.baseUrl, "tok").supportsPersonAttribution(), false);
+  } finally {
+    await older.close();
+  }
+});
+
+// Neither CreateStory nor CreateComment uses deny_unknown_fields, so half-support
+// would be ignored silently — with the prefix dropped, attribution would vanish.
+for (const [label, overrides] of /** @type {[string, any][]} */ ([
+  ["the comment create does not advertise author", { commentAuthor: false }],
+  ["the story create does not advertise requestor", { people: false, commentAuthor: true }],
+])) {
+  test(`supportsPersonAttribution is false when ${label}`, async () => {
+    const mock = await startMockServer(makeState(overrides));
+    try {
+      assert.equal(await new EATClient(mock.baseUrl, "tok").supportsPersonAttribution(), false);
+    } finally {
+      await mock.close();
+    }
+  });
+}
+
+test("supportsPersonAttribution is false when /openapi.json is absent", async () => {
+  const mock = await startMockServer(makeState({ serverDryRun: false }));
+  try {
+    assert.equal(await new EATClient(mock.baseUrl, "tok").supportsPersonAttribution(), false);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("createComment sends the author only when one is passed", async () => {
+  /** @type {any[]} */
+  const bodies = [];
+  await withServer(
+    (req, res) => {
+      let raw = "";
+      req.on("data", (chunk) => {
+        raw += chunk;
+      });
+      req.on("end", () => {
+        bodies.push(JSON.parse(raw));
+        json(res, 200, {});
+      });
+    },
+    async (base) => {
+      const client = new EATClient(base, "tok");
+      /** @type {import("../src/mapping.js").ExternalPerson} */
+      const author = { source: "github", external_id: "5", username: "bob", display_name: "bob" };
+      await client.createComment(91, 1, "hi", "k1", { author });
+      await client.createComment(91, 1, "hi", "k2");
+    },
+  );
+  assert.deepEqual(bodies[0].author, {
+    source: "github",
+    external_id: "5",
+    username: "bob",
+    display_name: "bob",
+  });
+  assert.equal("author" in bodies[1], false);
+});
+
 test("supportsProvenanceDedup false when the pair is absent or the spec 404s", async () => {
   const noPair = await startMockServer(makeState({ provenance: false }));
   try {

@@ -276,7 +276,7 @@ test("comments join to their issue by issue_url with the @user-on-date prefix", 
     labels: [],
   });
   assert.deepEqual(plan.stories[0].comments, [
-    { text: "@bob on 2026-03-04:\n\nLooks good", created_at: "2026-03-04T05:06:07Z" },
+    { text: "@bob on 2026-03-04:\n\nLooks good", created_at: "2026-03-04T05:06:07Z", author: null },
   ]);
 });
 
@@ -316,7 +316,7 @@ test("empty comment bodies are skipped; deleted users prefix as @ghost", () => {
     labels: [],
   });
   assert.deepEqual(plan.stories[0].comments, [
-    { text: "@ghost on 2026-03-04:\n\nOrphaned", created_at: "2026-03-04T05:06:07Z" },
+    { text: "@ghost on 2026-03-04:\n\nOrphaned", created_at: "2026-03-04T05:06:07Z", author: null },
   ]);
 });
 
@@ -1027,6 +1027,187 @@ test("tasks: false produces no task ops; the checklist lines stay in the descrip
   assert.equal(plan.stories[0].description, body);
 });
 
+// --- person attribution (story #33465) ---------------------------------------
+
+const withPeople = (/** @type {any} */ repo) =>
+  mapRepo(repo, DEFAULT_CUSTOMIZATION, { sendDates: true, sendPeople: true });
+
+test("sendPeople maps the issue author to requestor and the assignees to owners", () => {
+  const plan = withPeople({
+    issues: [
+      ghIssue({
+        user: { id: 12, login: "alice", html_url: "https://github.com/alice" },
+        assignees: [
+          { id: 34, login: "bob", html_url: "https://github.com/bob" },
+          { id: 56, login: "carol" },
+        ],
+      }),
+    ],
+    comments: [],
+    labels: [],
+  });
+  assert.deepEqual(plan.stories[0].requestor, {
+    source: "github",
+    external_id: "12",
+    username: "alice",
+    display_name: "alice",
+    html_url: "https://github.com/alice",
+  });
+  assert.deepEqual(plan.stories[0].owners, [
+    {
+      source: "github",
+      external_id: "34",
+      username: "bob",
+      display_name: "bob",
+      html_url: "https://github.com/bob",
+    },
+    { source: "github", external_id: "56", username: "carol", display_name: "carol" },
+  ]);
+});
+
+test("sendPeople authors each comment and leaves the body verbatim — no @login prefix", () => {
+  const plan = withPeople({
+    issues: [ghIssue({ number: 7 })],
+    comments: [
+      {
+        issue_url: "https://api.github.com/repos/o/r/issues/7",
+        user: { id: 5, login: "bob", html_url: "https://github.com/bob" },
+        created_at: "2026-03-04T05:06:07Z",
+        body: "  Looks good  ",
+      },
+    ],
+    labels: [],
+  });
+  assert.deepEqual(plan.stories[0].comments, [
+    {
+      text: "Looks good",
+      created_at: "2026-03-04T05:06:07Z",
+      author: {
+        source: "github",
+        external_id: "5",
+        username: "bob",
+        display_name: "bob",
+        html_url: "https://github.com/bob",
+      },
+    },
+  ]);
+});
+
+test("sendPeople without sendDates keeps the dated prefix — the date has nowhere else to ride", () => {
+  const plan = mapRepo(
+    {
+      issues: [ghIssue({ number: 7 })],
+      comments: [
+        {
+          issue_url: "https://api.github.com/repos/o/r/issues/7",
+          user: { id: 5, login: "bob" },
+          created_at: "2026-03-04T05:06:07Z",
+          body: "Looks good",
+        },
+      ],
+      labels: [],
+    },
+    DEFAULT_CUSTOMIZATION,
+    { sendPeople: true, sendDates: false },
+  );
+  assert.equal(plan.stories[0].comments[0].text, "@bob on 2026-03-04:\n\nLooks good");
+  // The author still rides structurally — only the date needs the prefix.
+  assert.equal(plan.stories[0].comments[0].author?.username, "bob");
+});
+
+// github.rs `valid_gh_user`: both the numeric id and the login must be present.
+for (const [label, user] of /** @type {[string, any][]} */ ([
+  ["a null user (deleted account)", null],
+  ["a user with no id", { login: "ghosty" }],
+  ["a user whose id is 0", { id: 0, login: "ghosty" }],
+  ["a user with a blank login", { id: 9, login: "   " }],
+  ["a user with a non-numeric id", { id: "9", login: "ghosty" }],
+  // JS-only divergence from valid_gh_user: past 2^53 two ids stringify to one
+  // external_id, so the direct engine drops rather than merge two people.
+  ["a user whose id is past 2^53", { id: 2 ** 53, login: "ghosty" }],
+])) {
+  test(`ghost: ${label} is omitted entirely, never partially`, () => {
+    const plan = withPeople({
+      issues: [ghIssue({ number: 7, user, assignees: [user, { id: 4, login: "real" }] })],
+      comments: [
+        {
+          issue_url: "https://api.github.com/repos/o/r/issues/7",
+          user,
+          created_at: "2026-03-04T05:06:07Z",
+          body: "Orphaned",
+        },
+      ],
+      labels: [],
+    });
+    const story = plan.stories[0];
+    assert.equal(story.requestor, null);
+    // The ghost assignee simply disappears; the real one still becomes an owner.
+    assert.deepEqual(story.owners, [
+      { source: "github", external_id: "4", username: "real", display_name: "real" },
+    ]);
+    assert.deepEqual(story.comments, [
+      { text: "Orphaned", created_at: "2026-03-04T05:06:07Z", author: null },
+    ]);
+  });
+}
+
+test("sendPeople trims the login, and drops a blank html_url rather than sending it", () => {
+  const plan = withPeople({
+    issues: [ghIssue({ user: { id: 12, login: " alice ", html_url: "   " } })],
+    comments: [],
+    labels: [],
+  });
+  assert.deepEqual(plan.stories[0].requestor, {
+    source: "github",
+    external_id: "12",
+    username: "alice",
+    display_name: "alice",
+  });
+});
+
+test("a release carries no people — the server's release_to_record maps none either", () => {
+  const plan = mapRepo(
+    {
+      issues: [],
+      comments: [],
+      labels: [],
+      releases: [{ id: 900, tag_name: "v1.0", draft: false, published_at: "2024-03-02T00:00:00Z" }],
+    },
+    DEFAULT_CUSTOMIZATION,
+    { sendPeople: true },
+  );
+  assert.equal(plan.stories[0].requestor, null);
+  assert.deepEqual(plan.stories[0].owners, []);
+});
+
+test("sendPeople off keeps the @login prefix and maps nobody (older-server payloads)", () => {
+  const repo = {
+    issues: [
+      ghIssue({
+        number: 7,
+        user: { id: 12, login: "alice" },
+        assignees: [{ id: 4, login: "bob" }],
+      }),
+    ],
+    comments: [
+      {
+        issue_url: "https://api.github.com/repos/o/r/issues/7",
+        user: { id: 5, login: "bob" },
+        created_at: "2026-03-04T05:06:07Z",
+        body: "Looks good",
+      },
+    ],
+    labels: [],
+  };
+  const plan = mapRepo(repo, DEFAULT_CUSTOMIZATION);
+  assert.equal(plan.stories[0].requestor, null);
+  assert.deepEqual(plan.stories[0].owners, []);
+  assert.deepEqual(plan.stories[0].comments, [
+    { text: "@bob on 2026-03-04:\n\nLooks good", created_at: "2026-03-04T05:06:07Z", author: null },
+  ]);
+  assert.deepEqual(mapRepo(repo, DEFAULT_CUSTOMIZATION, { sendPeople: false }), plan);
+});
+
 // --- backdating: comment prefix + created_at carry (story #32427) --------------
 
 test("sendDates=true carries the comment date and collapses the prefix to @login:", () => {
@@ -1047,7 +1228,7 @@ test("sendDates=true carries the comment date and collapses the prefix to @login
     { sendDates: true },
   );
   assert.deepEqual(plan.stories[0].comments, [
-    { text: "@bob:\n\nLooks good", created_at: "2026-03-04T05:06:07Z" },
+    { text: "@bob:\n\nLooks good", created_at: "2026-03-04T05:06:07Z", author: null },
   ]);
 });
 
@@ -1067,7 +1248,7 @@ test("sendDates defaults to the older-server output (dated prefix) byte-for-byte
   const dflt = mapRepo(repo, DEFAULT_CUSTOMIZATION);
   const explicit = mapRepo(repo, DEFAULT_CUSTOMIZATION, { sendDates: false });
   assert.deepEqual(dflt.stories[0].comments, [
-    { text: "@bob on 2026-03-04:\n\nLooks good", created_at: "2026-03-04T05:06:07Z" },
+    { text: "@bob on 2026-03-04:\n\nLooks good", created_at: "2026-03-04T05:06:07Z", author: null },
   ]);
   assert.deepEqual(dflt, explicit);
 });

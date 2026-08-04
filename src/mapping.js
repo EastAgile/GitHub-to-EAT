@@ -539,8 +539,8 @@ function issueNumberFromUrl(issueUrl) {
 }
 
 /**
- * The API grew owner-gated comment-author attribution (server #32773) but this engine has not
- * adopted it yet (story #33465), so the author — and, off `sendDates`, the date — rides in a prefix.
+ * The textual fallback for a server that does not accept `ExternalPersonInput`: the author —
+ * and, off `sendDates`, the date — rides in a prefix instead of the write's own fields.
  *
  * @param {{ user?: { login?: string } | null, created_at?: string | null, body?: string | null }} comment
  * @param {boolean} sendDates
@@ -551,6 +551,42 @@ function commentText(comment, sendDates) {
   const date = (comment.created_at ?? "").slice(0, 10);
   const prefix = date && !sendDates ? `@${login} on ${date}:` : `@${login}:`;
   return `${prefix}\n\n${(comment.body ?? "").trim()}`;
+}
+
+/**
+ * @typedef {object} ExternalPerson one imported GitHub person, `ExternalPersonInput`-shaped
+ * @property {"github"} source
+ * @property {string} external_id the numeric GitHub user id, stringified
+ * @property {string} username the login
+ * @property {string} display_name the login again — GitHub payloads carry no profile name
+ * @property {string} [html_url] the profile URL, when the payload carried one
+ */
+
+/**
+ * Mirrors github.rs `valid_gh_user` + `to_person`: no numeric id (the rename-proof
+ * dedup key) or no login means no person is carried at all.
+ *
+ * @param {unknown} user
+ * @returns {ExternalPerson | null}
+ */
+function externalPerson(user) {
+  const row = /** @type {{ id?: unknown, login?: unknown, html_url?: unknown } | null} */ (
+    user ?? null
+  );
+  // Safe-integer, not merely non-zero: past 2^53 two GitHub ids stringify to one
+  // external_id, merging two people onto one external_member row.
+  const id = row?.id;
+  if (!Number.isSafeInteger(id) || id === 0) return null;
+  const login = typeof row?.login === "string" ? row.login.trim() : "";
+  if (!login) return null;
+  const htmlUrl = typeof row?.html_url === "string" ? row.html_url.trim() : "";
+  return {
+    source: /** @type {const} */ ("github"),
+    external_id: String(id),
+    username: login,
+    display_name: login,
+    ...(htmlUrl ? { html_url: htmlUrl } : {}),
+  };
 }
 
 /**
@@ -665,6 +701,9 @@ function releaseToStory(release) {
     created_at: sourceDate(release.created_at),
     completed_at: published ? publishedAt : null,
     labels: [],
+    // `release_to_record` maps no people either — a release has no author or assignees.
+    requestor: null,
+    owners: [],
     tasks: [],
     comments: [],
   };
@@ -692,8 +731,11 @@ const REJECTABLE_TYPES = new Set(["feature", "bug"]);
  * @property {string | null} completed_at the GitHub closed date, or a release's
  *   `published_at`, kept
  * @property {string[]} labels label names on this story
+ * @property {ExternalPerson | null} [requestor] the issue author, null for a ghost
+ * @property {ExternalPerson[]} [owners] the assignees, ghosts dropped
  * @property {{ description: string, complete: boolean }[]} tasks
- * @property {{ text: string, created_at: string | null }[]} comments
+ * @property {{ text: string, created_at: string | null,
+ *   author?: ExternalPerson | null }[]} comments
  */
 
 /**
@@ -704,16 +746,16 @@ const REJECTABLE_TYPES = new Set(["feature", "bug"]);
  *   subIssues?: Map<string, string[]> | null, releases?: any[] | null }} repo
  * @param {Customization} [customization] per-run overrides; the default reproduces
  *   this profile unchanged (the filter/override stories consume the other fields)
- * @param {{ sendDates?: boolean, epics?: boolean }} [options] `sendDates` sends the
- *   comment's date on the write, so its prefix collapses to `@login:` (off, it stays
- *   `@login on <date>:`, reproducing the older-server output byte-for-byte); `epics`
- *   (`--include milestones`) maps each milestone to an epic
+ * @param {{ sendDates?: boolean, epics?: boolean, sendPeople?: boolean }} [options] `sendDates`
+ *   sends the comment's date on the write (off, it stays in the `@login on <date>:` prefix);
+ *   `epics` (`--include milestones`) maps each milestone to an epic; `sendPeople` maps the
+ *   GitHub people onto `requestor`/`owners`/`author` (off, the `@login` prefix is all there is)
  * @returns {{ labels: LabelOp[], stories: StoryOp[], epics: EpicOp[] }}
  */
 export function mapRepo(
   { issues, comments, labels, subIssues, releases },
   customization = DEFAULT_CUSTOMIZATION,
-  { sendDates = false, epics = false } = {},
+  { sendDates = false, epics = false, sendPeople = false } = {},
 ) {
   const links = indexSubIssues(subIssues);
   /** @type {Map<string, string | null>} repo-level color authority, by lowercased name */
@@ -728,8 +770,9 @@ export function mapRepo(
   const labelOps = new Map();
   /** @type {Map<string, EpicOp>} keyed by lowercased title, like the server's epic cache */
   const epicOps = new Map();
-  /** @type {Map<string, { text: string, created_at: string | null }[]>} comments per issue number */
+  /** @type {Map<string, StoryOp["comments"]>} comments per issue number */
   const byIssue = new Map();
+  const person = (/** @type {unknown} */ user) => (sendPeople ? externalPerson(user) : null);
 
   /** @type {StoryOp[]} */
   const stories = [];
@@ -818,8 +861,12 @@ export function mapRepo(
       created_at: issue.created_at ?? null,
       completed_at: (closed ? issue.closed_at : null) ?? null,
       labels: names,
+      requestor: person(issue.user),
+      owners: /** @type {ExternalPerson[]} */ (
+        (Array.isArray(issue.assignees) ? issue.assignees : []).map(person).filter(Boolean)
+      ),
       tasks: customization.tasks ? parseChecklist(body) : [],
-      comments: /** @type {{ text: string, created_at: string | null }[]} */ ([]),
+      comments: /** @type {StoryOp["comments"]} */ ([]),
     };
     byIssue.set(story.external_id, story.comments);
     stories.push(story);
@@ -835,9 +882,13 @@ export function mapRepo(
     if (!(comment.body ?? "").trim()) continue;
     const target = byIssue.get(issueNumberFromUrl(comment.issue_url) ?? "");
     if (target) {
+      // Both probes, because they are independent: only `sendDates` puts the date on the
+      // write, so without it the prefix is still the date's only ride.
       target.push({
-        text: commentText(comment, sendDates),
+        text:
+          sendPeople && sendDates ? (comment.body ?? "").trim() : commentText(comment, sendDates),
         created_at: comment.created_at ?? null,
+        author: person(comment.user),
       });
     }
   }

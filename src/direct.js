@@ -12,6 +12,7 @@ import {
   unionImported,
 } from "./dedup.js";
 import { GitHubClient } from "./github.js";
+import { GITHUB_LOGIN } from "./importer.js";
 import {
   clampPlan,
   DEFAULT_CUSTOMIZATION,
@@ -42,7 +43,8 @@ import { writePlan } from "./writer.js";
  *   & import("./dedup.js").PrescanClient
  *   & { fieldLimits?: () => Promise<Partial<import("./mapping.js").FieldLimits>>,
  *       supportsProvenanceDedup?: () => Promise<boolean>,
- *       supportsBackdating?: () => Promise<boolean> }} DirectClient
+ *       supportsBackdating?: () => Promise<boolean>,
+ *       supportsPersonAttribution?: () => Promise<boolean> }} DirectClient
  */
 
 /**
@@ -259,6 +261,29 @@ function warnUnrecognisedIssueTypes({ issues }, customization, stream) {
 }
 
 /**
+ * The distinct logins this plan attaches — the roster touched, not the rows created (the
+ * creates carry no such signal). Filtered because these reach a terminal raw.
+ *
+ * @param {{ stories: import("./mapping.js").StoryOp[] }} plan
+ * @returns {string[]}
+ */
+function attachedPeople(plan) {
+  /** @type {Set<string>} */
+  const logins = new Set();
+  for (const story of plan.stories) {
+    for (const person of [
+      story.requestor,
+      ...(story.owners ?? []),
+      ...story.comments.map((c) => c.author),
+    ]) {
+      const login = person?.username;
+      if (typeof login === "string" && GITHUB_LOGIN.test(login)) logins.add(login);
+    }
+  }
+  return [...logins].sort();
+}
+
+/**
  * Run the client-side import pipeline and return the same
  * {@link import("./importer.js").ImportOutcome} shape the server engine yields.
  *
@@ -317,11 +342,18 @@ export async function runDirect(client, projectId, owner, repo, options) {
   // One probe gates all three backdated fields; degrades to false, so an older
   // server gets v3-identical payloads and the full-date comment prefix.
   const sendDates = await (client.supportsBackdating?.() ?? false);
-  const mapped = clampPlan(mapRepo(fetched, customization, { sendDates, epics }), limits, {
-    reserveDescription: (op) =>
-      Buffer.byteLength(markerFor(owner, repo, op.external_id), "utf8") + 2,
-    warn: (message) => stream?.write(message),
-  });
+  // One probe gates requestor + owners[].external + the comment author (EAT #32773,
+  // one change); degrades to false, which keeps the `@login` comment prefix.
+  const sendPeople = await (client.supportsPersonAttribution?.() ?? false);
+  const mapped = clampPlan(
+    mapRepo(fetched, customization, { sendDates, epics, sendPeople }),
+    limits,
+    {
+      reserveDescription: (op) =>
+        Buffer.byteLength(markerFor(owner, repo, op.external_id), "utf8") + 2,
+      warn: (message) => stream?.write(message),
+    },
+  );
 
   // One probe gates writing the pair and reading it back via the list filters.
   const sendProvenance = await (client.supportsProvenanceDedup?.() ?? false);
@@ -376,7 +408,7 @@ export async function runDirect(client, projectId, owner, repo, options) {
       errors: [],
       warnings: [],
       unmatched: {},
-      externalMembersCreated: [],
+      externalMembersCreated: attachedPeople(plan),
       dryRun: true,
     };
   }
@@ -386,6 +418,7 @@ export async function runDirect(client, projectId, owner, repo, options) {
     runId,
     sendProvenance,
     sendDates,
+    sendPeople,
   });
   return {
     importedStories: written.stories,
@@ -394,7 +427,7 @@ export async function runDirect(client, projectId, owner, repo, options) {
     errors: [],
     warnings: [],
     unmatched: {},
-    externalMembersCreated: [],
+    externalMembersCreated: attachedPeople(plan),
     dryRun: false,
   };
 }

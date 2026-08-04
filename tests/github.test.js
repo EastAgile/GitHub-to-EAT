@@ -600,6 +600,33 @@ test("fetchAll returns issues, comments, and labels together", async () => {
   );
 });
 
+// The mapper keys an external_member on the numeric id (story #33465), which no
+// projection here may quietly drop — the login alone renames, the id does not.
+test("fetchAll carries every person's id, login and html_url through to mapping", async () => {
+  const author = { id: 12, login: "alice", html_url: "https://github.com/alice" };
+  const assignee = { id: 34, login: "bob", html_url: "https://github.com/bob" };
+  await withGitHub(
+    (req, res) => {
+      const path = new URL(req.url ?? "", "http://x").pathname;
+      if (path.endsWith("/issues")) {
+        json(res, 200, [{ number: 1, user: author, assignees: [assignee] }]);
+      } else if (path.endsWith("/issues/comments")) {
+        json(res, 200, [
+          { id: 5, issue_url: "https://api.github.com/repos/o/r/issues/1", user: assignee },
+        ]);
+      } else {
+        json(res, 200, []);
+      }
+    },
+    async (base) => {
+      const repo = await new GitHubClient("o", "r", { apiBase: base }).fetchAll();
+      assert.deepEqual(repo.issues[0].user, author);
+      assert.deepEqual(repo.issues[0].assignees, [assignee]);
+      assert.deepEqual(repo.comments[0].user, assignee);
+    },
+  );
+});
+
 test("fetchAll drops comments whose issue_url points at a PR or unknown issue", async () => {
   await withGitHub(
     (req, res) => {

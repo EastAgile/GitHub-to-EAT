@@ -104,3 +104,100 @@ test("parity: a draft release imports to the backlog, and so does one with no pu
   assert.equal(oneRelease({ draft: false, published_at: null }).current_state, "unstarted");
   assert.equal(oneRelease({ body: "   " }).description, null);
 });
+
+// --- people (story #33465) ---------------------------------------------------
+// From github.rs `to_person` / `valid_gh_user`: the `(source, external_id)` rows the server writes.
+
+const PEOPLE_REPO = {
+  issues: [
+    issue({
+      number: 7,
+      user: { id: 12, login: "alice", html_url: "https://github.com/alice" },
+      assignees: [{ id: 34, login: "bob" }, { id: 0, login: "ghost-by-id" }, null],
+    }),
+    issue({ number: 8, user: null, assignees: [{ id: 56, login: " carol " }] }),
+  ],
+  comments: [
+    {
+      issue_url: "https://api.github.com/repos/o/r/issues/7",
+      user: { id: 34, login: "bob" },
+      created_at: "2026-03-04T05:06:07Z",
+      body: "verbatim body",
+    },
+    {
+      issue_url: "https://api.github.com/repos/o/r/issues/8",
+      user: { id: 78, login: "" },
+      created_at: "2026-03-05T05:06:07Z",
+      body: "from a ghost",
+    },
+  ],
+  labels: [],
+};
+
+const triple = (/** @type {any} */ p) =>
+  p === null ? null : [p.source, p.external_id, p.username];
+
+// Both probes on: the fully-supported path, the only one the server importer has.
+const mapPeople = () =>
+  mapRepo(PEOPLE_REPO, DEFAULT_CUSTOMIZATION, { sendPeople: true, sendDates: true });
+
+test("parity: the people triples the server importer would write", () => {
+  const { stories } = mapPeople();
+  const seven = /** @type {any} */ (stories.find((s) => s.external_id === "7"));
+  const eight = /** @type {any} */ (stories.find((s) => s.external_id === "8"));
+
+  assert.deepEqual(triple(seven.requestor), ["github", "12", "alice"]);
+  // A ghost assignee (id 0, or no user object at all) is dropped; the rest stay in order.
+  assert.deepEqual(seven.owners.map(triple), [["github", "34", "bob"]]);
+  assert.deepEqual(
+    seven.comments.map((/** @type {any} */ c) => triple(c.author)),
+    [["github", "34", "bob"]],
+  );
+
+  // A ghost issue author leaves no requestor — the server falls back to the caller.
+  assert.equal(eight.requestor, null);
+  assert.deepEqual(eight.owners.map(triple), [["github", "56", "carol"]]);
+  // A ghost comment author likewise: no author, and the body is still verbatim.
+  assert.deepEqual(eight.comments, [
+    { text: "from a ghost", created_at: "2026-03-05T05:06:07Z", author: null },
+  ]);
+});
+
+test("parity: the login is the display name too, and html_url rides along when GitHub sent one", () => {
+  const { stories } = mapPeople();
+  const seven = /** @type {any} */ (stories.find((s) => s.external_id === "7"));
+  assert.equal(seven.requestor.display_name, "alice");
+  assert.equal(seven.requestor.html_url, "https://github.com/alice");
+  // GhUser.html_url is Option<String>: absent stays absent.
+  assert.equal("html_url" in seven.owners[0], false);
+});
+
+// Two deliberate CLI-side normalisations, not server parity: `to_person` passes
+// html_url through untouched, and the importer stores the comment body untrimmed.
+test("cli-side: a blank html_url is dropped and the comment body is trimmed", () => {
+  const { stories } = mapRepo(
+    {
+      issues: [issue({ number: 7, user: { id: 12, login: "alice", html_url: "   " } })],
+      comments: [
+        {
+          issue_url: "https://api.github.com/repos/o/r/issues/7",
+          user: { id: 34, login: "bob" },
+          created_at: "2026-03-04T05:06:07Z",
+          body: "  padded body  ",
+        },
+      ],
+      labels: [],
+    },
+    DEFAULT_CUSTOMIZATION,
+    { sendPeople: true, sendDates: true },
+  );
+  const seven = /** @type {any} */ (stories[0]);
+  assert.equal("html_url" in seven.requestor, false);
+  assert.equal(seven.comments[0].text, "padded body");
+});
+
+test("parity: a comment body carries no '@login' prefix, like the server's", () => {
+  const { stories } = mapPeople();
+  const seven = /** @type {any} */ (stories.find((s) => s.external_id === "7"));
+  assert.equal(seven.comments[0].text, "verbatim body");
+});

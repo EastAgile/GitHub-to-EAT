@@ -68,6 +68,11 @@ import { parseArgs } from "node:util";
  *   openapi advertises `created_at`/`completed_at` on story creates and
  *   `created_at` on comment creates, and the handlers persist them; false
  *   simulates a server that predates backdating (fields absent + ignored)
+ * @property {boolean} people when true (default, mirroring the server tree), the openapi
+ *   advertises + the handlers persist the EAT #32773 person fields; false, absent + ignored,
+ *   and an `external`-only owner 400s the way serde-dropping the unknown key makes it
+ * @property {boolean} [commentAuthor] overrides `people` for the comment `author` alone,
+ *   so a test can prove each half of the single probe independently
  * @property {boolean} asyncImport when true, POST /import/json answers the v2
  *   async accept — 202 `{ import_id, status:"pending" }` plus a pollable job at
  *   GET /imports/{import_id}; false (default) keeps today's synchronous 200
@@ -130,6 +135,7 @@ export function makeState(overrides = {}) {
     serverDryRun: true,
     provenance: true,
     backdating: true,
+    people: true,
     asyncImport: false,
     asyncFail: false,
     jobs: {},
@@ -179,6 +185,7 @@ function openapiDoc(state) {
   const ml = state.maxLengths ?? {};
   // Backdated instants — advertised only when the server supports backdating.
   const dateTime = { type: ["string", "null"], format: "date-time" };
+  const externalPerson = { type: ["object", "null"] };
   /** @param {Record<string, number | undefined>} fields @param {Record<string, any>} [extra] */
   const post = (fields, extra = {}) => ({
     post: {
@@ -238,6 +245,9 @@ function openapiDoc(state) {
           // must be seen never to send it; a numeric type here would invite the wrong guess.
           estimate: { type: ["string", "null"] },
           ...(state.backdating ? { created_at: dateTime, completed_at: dateTime } : {}),
+          // `owners` is server story #199, not #32773 — every older server publishes it.
+          owners: { type: ["array", "null"] },
+          ...(state.people ? { requestor: externalPerson } : {}),
         },
       ),
       "/api/v1/projects/{project_id}/stories/{story_id}/tasks": post({
@@ -246,7 +256,10 @@ function openapiDoc(state) {
       }),
       "/api/v1/projects/{project_id}/stories/{story_id}/comments": post(
         { text: ml.comment_text, comment_text: ml.comment_text },
-        state.backdating ? { created_at: dateTime } : {},
+        {
+          ...(state.backdating ? { created_at: dateTime } : {}),
+          ...((state.commentAuthor ?? state.people) ? { author: externalPerson } : {}),
+        },
       ),
     },
   };
@@ -603,7 +616,7 @@ const LABEL_DEFAULT_TEXT = "#ffffff";
  * @returns {any}
  */
 function toStoryPayload(row) {
-  const { comments, ...payload } = row;
+  const { comments, people, ...payload } = row;
   return payload;
 }
 
@@ -817,6 +830,22 @@ function createStory(state, projectId, body) {
     }
   }
 
+  // Pre-#32773 `OwnerInput` has no `external` and no deny_unknown_fields, so serde drops
+  // the key and `as_target()` rejects the now-empty owner (stories.rs:472-478).
+  for (const owner of body.owners ?? []) {
+    const usable = state.people && owner?.external != null;
+    if (!usable && owner?.member_id == null && owner?.agent_id == null) {
+      return {
+        status: 400,
+        payload: {
+          code: "validation_failed",
+          details: { fields: ["owners"] },
+          error: "owners[*]: exactly one of member_id / agent_id is required",
+        },
+      };
+    }
+  }
+
   state.labels[projectId] ??= [];
   const projectLabels = state.labels[projectId];
   const labels = [];
@@ -865,6 +894,14 @@ function createStory(state, projectId, body) {
     created: now,
     updated_at: now,
   };
+  if (state.people) {
+    // Kept off the read payload (like `comments`): the real read side returns
+    // polymorphic actor blocks, not the input shape, and the CLI reads neither.
+    story.people = {
+      requestor: body.requestor ?? null,
+      owners: (body.owners ?? []).map((/** @type {any} */ o) => o?.external).filter(Boolean),
+    };
+  }
   if (state.backdating && body.created_at != null) {
     story.created_at = body.created_at;
     story.created = body.created_at;
@@ -954,6 +991,7 @@ function createComment(state, projectId, storyId, body) {
     comment.created_at = body.created_at;
     comment.created = body.created_at;
   }
+  if (state.people && body.author != null) comment.author = body.author;
   story.comments.push(comment);
   story.comment_count = story.comments.length;
   return { status: 200, payload: comment };

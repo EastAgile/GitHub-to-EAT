@@ -90,7 +90,7 @@ export async function pollImport(client, projectId, importId, { onProgress, poll
 
 // Logins are rendered raw to the user's terminal, so only GitHub's login
 // grammar is trusted; anything else (ANSI escapes, newlines) is garbage.
-const GITHUB_LOGIN = /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$/;
+export const GITHUB_LOGIN = /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$/;
 
 /**
  * Perform the GitHub import and return a normalized outcome.

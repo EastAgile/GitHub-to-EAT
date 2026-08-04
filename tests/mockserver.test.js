@@ -776,6 +776,72 @@ test("async import returns 202 then a job that progresses to done with a result"
   }
 });
 
+test("a person-attributing server persists the requestor, the external owners and the author", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    /** @type {import("../src/mapping.js").ExternalPerson} */
+    const bob = { source: "github", external_id: "34", username: "bob", display_name: "bob" };
+    const story = await client.createStory(
+      91,
+      { name: "s", requestor: bob, owners: [{ external: bob }] },
+      "k",
+    );
+    await client.createComment(91, story.story_id, "hi", "k2", { author: bob });
+    const row = mock.state.stories[91][0];
+    assert.deepEqual(row.people.requestor, bob);
+    assert.deepEqual(row.people.owners, [bob]);
+    assert.deepEqual(row.comments[0].author, bob);
+    // The real read side returns polymorphic actor blocks; the mock does not model
+    // them, so it must not echo the input shape back and imply it does.
+    assert.equal("requestor" in story, false);
+    assert.equal("owners" in story, false);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a server with no person support 400s an external owner and ignores requestor / author", async () => {
+  const mock = await startMockServer(makeState({ people: false }));
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    /** @type {import("../src/mapping.js").ExternalPerson} */
+    const bob = { source: "github", external_id: "34", username: "bob", display_name: "bob" };
+    // Pre-#32773 OwnerInput has no `external` (and no deny_unknown_fields), so
+    // serde drops it and `as_target()` rejects the now-empty owner.
+    await assert.rejects(
+      () => client.createStory(91, { name: "s", owners: [{ external: bob }] }, "k0"),
+      /exactly one of member_id \/ agent_id/,
+    );
+    const story = await client.createStory(91, { name: "s", requestor: bob }, "k");
+    await client.createComment(91, story.story_id, "hi", "k2", { author: bob });
+    const row = mock.state.stories[91][0];
+    assert.ok(!("people" in row));
+    assert.ok(!("author" in row.comments[0]));
+  } finally {
+    await mock.close();
+  }
+});
+
+test("owners on story create predate person support — always advertised, unlike requestor", async () => {
+  const mock = await startMockServer(makeState({ people: false }));
+  try {
+    const res = await fetch(`${mock.baseUrl}/openapi.json`, {
+      headers: { "x-trackertoken": "ea_token" },
+    });
+    const spec = /** @type {any} */ (await res.json());
+    const props =
+      spec.paths["/api/v1/projects/{project_id}/stories"].post.requestBody.content[
+        "application/json"
+      ].schema.properties;
+    // Story #199, not #32773: an older server still takes member/agent owners.
+    assert.ok("owners" in props);
+    assert.ok(!("requestor" in props));
+  } finally {
+    await mock.close();
+  }
+});
+
 test("a non-backdating server ignores created_at on story creates", async () => {
   const mock = await startMockServer(makeState({ backdating: false }));
   try {
