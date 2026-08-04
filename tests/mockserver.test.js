@@ -427,6 +427,16 @@ test("POST tasks and comments append to the story", async () => {
     ).json();
     assert.ok(!("comments" in listed[0]));
     assert.equal(listed[0].comment_count, 1);
+    // `links` is the same kind of bookkeeping and is absent from STORY_FIELDS, so no
+    // read shape may carry it either — the real list returns links from its own endpoint.
+    assert.ok(!("links" in story));
+    assert.ok(!("links" in listed[0]));
+    const paged = await (
+      await fetch(`${mock.baseUrl}/projects/91/stories?limit=50`, {
+        headers: { "X-TrackerToken": "ea_token" },
+      })
+    ).json();
+    assert.ok(!("links" in paged.items[0]));
   } finally {
     await mock.close();
   }

@@ -445,6 +445,20 @@ test("a rejected create sends no completed_at, even though the op carries one", 
   assert.ok(!("completed_at" in rejected), JSON.stringify(rejected));
 });
 
+// writePlan is a general plan executor, not a GitHub-only one: the guard is the server's
+// done-state set (state_rank >= FINISHED_RANK), not the one state mapRepo happens to emit.
+for (const state of ["finished", "delivered", "accepted"]) {
+  test(`a ${state} create carries its completed_at`, async () => {
+    const { client, stories } = recordingClient();
+    const plan = datedPlan();
+    plan.stories[0].current_state = /** @type {any} */ (state);
+    await writePlan(client, 91, plan, { stream: capture(), sendDates: true });
+
+    const done = stories.find((s) => s.name === "closed");
+    assert.equal(done.completed_at, "2020-02-01T00:00:00Z", JSON.stringify(done));
+  });
+}
+
 /**
  * @param {import("../src/mapping.js").StoryOp["links"]} links
  * @returns {import("../src/writer.js").WritePlan}

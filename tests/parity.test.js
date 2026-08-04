@@ -185,6 +185,9 @@ test("parity: a chore-typed closed-unmerged PR is still rejected", () => {
 // Pushed after `infer_story_type` has read the author's own labels (github.rs:992-994), so
 // the synthetic label can never reclassify the story.
 test("parity: the pull-request label lands after type inference, never before it", () => {
+  // Position, not just outcome: `inferStoryType` matches none of "pull-request"'s
+  // substrings, so asserting the story_type alone would pass however it were ordered.
+  assert.deepEqual(onePr({ labels: [{ name: "chore" }] }).labels, ["chore", "pull-request"]);
   assert.equal(onePr({ title: "Fix the parser" }).story_type, "bug");
   assert.equal(inferStoryType(["pull-request"], "Add feature X"), "feature");
   // Already carrying the label: it is deduped, not doubled.

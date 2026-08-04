@@ -579,6 +579,48 @@ test("supportsStoryLinks is true when the spec advertises the links path, false 
   }
 });
 
+// Every sibling probe requires the project scope AND inspects the POST body; a spec
+// publishing a GET-only or unscoped `…/stories/{id}/links` would otherwise probe true and
+// then die part-written on exactly the 404/405 the probe exists to prevent.
+test("supportsStoryLinks needs a project-scoped POST that takes a url", async () => {
+  /** @param {any} paths */
+  const withSpec = async (paths) => {
+    /** @type {boolean | undefined} */
+    let answer;
+    await withServer(
+      (_req, res) => json(res, 200, { paths }),
+      async (base) => {
+        answer = await new EATClient(base, "t").supportsStoryLinks();
+      },
+    );
+    return answer;
+  };
+  const body = {
+    requestBody: {
+      content: { "application/json": { schema: { properties: { url: { type: "string" } } } } },
+    },
+  };
+  const scoped = "/api/v1/projects/{project_id}/stories/{story_id}/links";
+  assert.equal(await withSpec({ [scoped]: { post: body } }), true);
+  // GET-only: the path is published, but nothing accepts a create.
+  assert.equal(await withSpec({ [scoped]: { get: {} } }), false);
+  // Unscoped: a links path outside /projects/ is not the endpoint the writer posts to.
+  assert.equal(await withSpec({ "/api/v1/stories/{story_id}/links": { post: body } }), false);
+  // POST that takes no url: half-support, and the writer's only required field.
+  assert.equal(
+    await withSpec({
+      [scoped]: {
+        post: {
+          requestBody: {
+            content: { "application/json": { schema: { properties: { title: {} } } } },
+          },
+        },
+      },
+    }),
+    false,
+  );
+});
+
 test("supportsStoryLinks is false when /openapi.json is absent", async () => {
   const mock = await startMockServer(makeState({ serverDryRun: false }));
   try {
@@ -648,6 +690,102 @@ test("a link with no url is refused, like the server's required-field check", as
       assert.equal(err.status, 400);
       return true;
     });
+  } finally {
+    await mock.close();
+  }
+});
+
+// `link_type` is NOT free text: handlers/story_links.rs allowlists exactly these seven
+// and 400s anything else, so a future link_type must fail here rather than in production.
+test("the mock accepts every allowlisted link_type and refuses one that is not", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const story = await client.createStory(91, { name: "a PR" }, "s1");
+    const allowed = [
+      "relates_to",
+      "duplicates",
+      "blocks",
+      "is_blocked_by",
+      "pull_request",
+      "branch",
+      "other",
+    ];
+    for (const [i, link_type] of allowed.entries()) {
+      const row = await client.createLink(
+        91,
+        story.story_id,
+        { url: "https://github.com/o/r/pull/10", link_type },
+        `ok${i}`,
+      );
+      assert.equal(row.link_type, link_type);
+    }
+    for (const bad of ["pull-request", "PULL_REQUEST", "commit", ""]) {
+      await assert.rejects(
+        client.createLink(
+          91,
+          story.story_id,
+          { url: "https://github.com/o/r/pull/10", link_type: bad },
+          `bad-${bad}`,
+        ),
+        (err) => {
+          assert.ok(err instanceof EATError, `${bad} was accepted`);
+          assert.equal(err.status, 400);
+          return true;
+        },
+      );
+    }
+  } finally {
+    await mock.close();
+  }
+});
+
+// validate_link_url: http(s) only (any other scheme is an XSS/SSRF primitive), no null
+// bytes, and the varchar widths limits::LINK_URL / LINK_TITLE.
+test("the mock refuses a non-http url, a null byte, and an over-long url or title", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const story = await client.createStory(91, { name: "a PR" }, "s1");
+    const refused = [
+      { url: "javascript:alert(1)" },
+      { url: "file:///etc/passwd" },
+      { url: "ftp://example.com/x" },
+      { url: "github.com/o/r/pull/10" },
+      { url: `https://example.com/\0x` },
+      { url: `https://example.com/${"a".repeat(1000)}` },
+      { url: "https://example.com/x", title: "t".repeat(256) },
+    ];
+    for (const [i, link] of refused.entries()) {
+      await assert.rejects(
+        client.createLink(91, story.story_id, link, `refuse${i}`),
+        (err) => {
+          assert.ok(err instanceof EATError, `accepted ${JSON.stringify(link)}`);
+          assert.equal(err.status, 400);
+          return true;
+        },
+        JSON.stringify(link),
+      );
+    }
+    // Case-insensitive scheme check, matching the server's to_ascii_lowercase.
+    const row = await client.createLink(91, story.story_id, { url: "HTTPS://x.test/a" }, "ok");
+    assert.equal(row.url, "HTTPS://x.test/a");
+  } finally {
+    await mock.close();
+  }
+});
+
+// Omitted link_type is derived server-side by detect_link_type, never stored null.
+test("the mock derives link_type from the url when the caller omits it", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const story = await client.createStory(91, { name: "a PR" }, "s1");
+    const derived = async (/** @type {string} */ url, /** @type {string} */ key) =>
+      (await client.createLink(91, story.story_id, { url }, key)).link_type;
+    assert.equal(await derived("https://github.com/o/r/pull/10", "d1"), "pull_request");
+    assert.equal(await derived("https://github.com/o/r/tree/main", "d2"), "branch");
+    assert.equal(await derived("https://example.com/x", "d3"), "other");
   } finally {
     await mock.close();
   }

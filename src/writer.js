@@ -5,7 +5,7 @@
 
 import { randomUUID } from "node:crypto";
 import { AuthError, ConflictError, EATError, EATTimeout, NotFoundError } from "./client.js";
-import { epicTitleKey, stripControls } from "./mapping.js";
+import { DONE_STATES, epicTitleKey, stripControls } from "./mapping.js";
 import { runWithProgress } from "./progress.js";
 
 /**
@@ -263,7 +263,7 @@ export async function writePlan(client, projectId, plan, options = {}) {
             body.created_at = op.created_at;
             // completed_at is valid only on a done-state create, and `rejected` is
             // off that axis (no state_rank), so a closed-unmerged PR sends none.
-            if (op.completed_at != null && op.current_state === "accepted") {
+            if (op.completed_at != null && DONE_STATES.has(op.current_state)) {
               body.completed_at = op.completed_at;
             }
           }

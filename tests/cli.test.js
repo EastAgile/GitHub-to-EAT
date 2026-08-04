@@ -377,7 +377,6 @@ test("--engine direct accepts every --include type the registry offers", async (
         },
       );
       assert.equal(code, 0);
-      assert.ok(!err.buf.includes("not supported by the direct engine yet"), err.buf);
     }),
   );
 });
@@ -596,7 +595,6 @@ test("--engine server --customize conflict wins over an unsupported --include", 
   assert.equal(code, 2);
   assert.ok(err.buf.includes("--customize"));
   assert.ok(err.buf.includes("--engine server"));
-  assert.ok(!err.buf.includes("not supported by the direct engine yet"));
 });
 
 test("--customize implies the direct engine and names it in the legend", async () => {
@@ -1477,7 +1475,6 @@ test("--engine direct --include issues,releases runs and renders the direct rele
         },
       );
       assert.equal(code, 0);
-      assert.ok(!err.buf.includes("not supported by the direct engine yet"), err.buf);
       assert.deepEqual(seen.included, ["issues", "releases"]);
       assert.ok(out.buf.includes("  releases:"));
       assert.ok(out.buf.includes("    - release → release-type story"));
@@ -1518,7 +1515,6 @@ test("--engine direct --include issues,milestones runs and renders the direct ep
         },
       );
       assert.equal(code, 0);
-      assert.ok(!err.buf.includes("not supported by the direct engine yet"), err.buf);
       assert.deepEqual(seen.included, ["issues", "milestones"]);
       assert.ok(out.buf.includes("  milestones:"));
       assert.ok(out.buf.includes("    - milestone → epic (an issue keeps its milestone"));

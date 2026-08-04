@@ -183,7 +183,8 @@ const PR_STATE_LINE = `open PR → story (started); merged PR → story (accepte
 const PR_REJECTED_LINE = "closed-unmerged PR → story (rejected)";
 const PR_FOLD_LINE = "a merged PR that closes an imported issue folds into that issue's story";
 // Direct-only, like the lines the other renderers add: naming these in the server legend
-// would change bytes it has always printed. Both quote the link_type the mapper writes.
+// would change bytes it has always printed. Byte-compatibility only — the server importer
+// writes the same link rows (github.rs:501-513, 1084-1097); its block just never said so.
 const PR_SELF_LINK_LINE = `the PR's own URL → a '${PULL_REQUEST_LINK_TYPE}' link on its story`;
 const PR_CROSS_LINK_LINE =
   "a PR that closes an imported issue links onto that issue's story; the fold above " +
@@ -772,6 +773,41 @@ export const RELEASE_EXTERNAL_ID = new RegExp(`^${RELEASE_ID_PREFIX}(\\d+)$`);
 export const releaseExternalId = (/** @type {string | number} */ id) => `${RELEASE_ID_PREFIX}${id}`;
 
 /**
+ * A row this run maps at all: a PR only under `--include prs`. Exported so {@link mapRepo},
+ * the pipeline's warnings and the wizard's questions share one gate rather than three.
+ *
+ * @param {any} row an issues-listing row, PR or issue
+ * @param {boolean} pullRequests
+ * @returns {boolean}
+ */
+export const mappableRow = (row, pullRequests) => pullRequests || !row.pull_request;
+
+/**
+ * The rows past both selection filters. The fold and the PR links are computed over these:
+ * a filter that keeps an issue out leaves no story to fold a PR into.
+ *
+ * @param {any[]} issues
+ * @param {Customization} customization
+ * @returns {any[]}
+ */
+const selectedRows = (issues, { states, milestones }) =>
+  issues.filter((row) => matchesStates(row, states) && matchesMilestones(row, milestones));
+
+/**
+ * The PR rows {@link mapRepo} folds into an imported issue's story. They write no story of
+ * their own, so anything counting the rows a run imports has to subtract them.
+ *
+ * @param {any[]} issues
+ * @param {Customization} customization
+ * @param {boolean} pullRequests
+ * @returns {Set<string>} folded PR numbers
+ */
+export function foldedPullRequests(issues, customization, pullRequests) {
+  if (!pullRequests) return new Set();
+  return pullRequestRefs(selectedRows(issues, customization)).folded;
+}
+
+/**
  * Safe-integer, not merely integer: past 2^53 two GitHub ids collapse onto one JS number
  * (so onto one `external_id` and one Idempotency-Key — the second create replays the first
  * and a release is lost), and from 1e21 `String()` goes exponential, which the marker
@@ -859,6 +895,12 @@ function releaseToStory(release) {
 const REJECTABLE_TYPES = new Set(["feature", "bug"]);
 
 /**
+ * States at or past `state_rank` 2 — the server's create-time `completed_at` guard.
+ * `rejected` is off that axis (it has no rank), so it is not one of them.
+ */
+export const DONE_STATES = new Set(["finished", "delivered", "accepted"]);
+
+/**
  * @typedef {object} StoryOp one EAT story to create, with its sub-resources
  * @property {string} external_id the GitHub issue number, or `release-<id>` for a release
  * @property {string} name EAT's create-body title field
@@ -904,16 +946,8 @@ export function mapRepo(
   { sendDates = false, epics = false, sendPeople = false, pullRequests = false } = {},
 ) {
   const links = indexSubIssues(subIssues);
-  // Fed only the rows this run maps: the fold exists so a resolved issue is the single
-  // story, and a filter that keeps that issue out leaves no story to fold into.
   const { folded, prLinks } = pullRequests
-    ? pullRequestRefs(
-        issues.filter(
-          (issue) =>
-            matchesStates(issue, customization.states) &&
-            matchesMilestones(issue, customization.milestones),
-        ),
-      )
+    ? pullRequestRefs(selectedRows(issues, customization))
     : { folded: new Set(), prLinks: new Map() };
   /** @type {Map<string, string | null>} repo-level color authority, by lowercased name */
   const repoColors = new Map(
@@ -985,18 +1019,24 @@ export function mapRepo(
 
     const closed = state === "closed";
     // Abandoned work must stay out of velocity: `accepted` is a done state, `rejected`
-    // is not, so billing a wontfix as accepted credits work nobody did. A PR has its own
-    // merge mapping below, so `state_reason` never applies to one.
+    // is not, so billing a wontfix as accepted credits work nobody did.
     const abandoned = isPr ? null : closedReasonLabel(closed, issue.state_reason);
     addLabel(abandoned, null);
-    const closedState = abandoned && REJECTABLE_TYPES.has(storyType) ? "rejected" : "accepted";
-    // Unlike the closed-reason branch this is ungated by type: the server writes a
-    // closed-unmerged chore PR `rejected` too (github.rs:1025-1030).
-    const prState = !closed
-      ? "started"
-      : issue.pull_request?.merged_at != null
-        ? "accepted"
-        : "rejected";
+    /** @type {StoryOp["current_state"]} */
+    let currentState;
+    if (isPr) {
+      // Unlike the closed-reason branch this is ungated by type: the server writes a
+      // closed-unmerged chore PR `rejected` too (github.rs:1025-1030).
+      currentState = !closed
+        ? "started"
+        : issue.pull_request?.merged_at != null
+          ? "accepted"
+          : "rejected";
+    } else if (closed) {
+      currentState = abandoned && REJECTABLE_TYPES.has(storyType) ? "rejected" : "accepted";
+    } else {
+      currentState = "unstarted";
+    }
 
     // Also after typing, for the same reason. The epic's own label is the join, so the
     // title rides in `names` only — POST /epics creates that label itself.
@@ -1024,9 +1064,7 @@ export function mapRepo(
       description: [body, crossLinks].filter(Boolean).join("\n\n") || null,
       crossLinks,
       story_type: storyType,
-      current_state: /** @type {StoryOp["current_state"]} */ (
-        isPr ? prState : closed ? closedState : "unstarted"
-      ),
+      current_state: currentState,
       created_at: issue.created_at ?? null,
       completed_at: (closed ? issue.closed_at : null) ?? null,
       labels: names,

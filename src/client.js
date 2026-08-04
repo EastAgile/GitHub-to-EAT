@@ -281,16 +281,21 @@ export class EATClient {
   }
 
   /**
-   * True when the server publishes the story-links path (`POST .../stories/{id}/links`).
-   * An older server 404s it, which is not retryable and would abort a part-written run.
+   * True when the server publishes the story-links **create** the writer posts to
+   * (`POST /projects/{id}/stories/{id}/links`, body carrying `url`). An older server 404s
+   * it, which is not retryable and would abort a part-written run — and a spec matched on
+   * path shape alone would probe true for a GET-only or unscoped path and die anyway.
    *
    * @returns {Promise<boolean>}
    */
   async supportsStoryLinks() {
     const spec = await this.#openapi();
-    return Object.keys(spec?.paths ?? {}).some(
-      (path) => path.includes("/stories/") && path.endsWith("/links"),
-    );
+    for (const [path, ops] of Object.entries(spec?.paths ?? {})) {
+      if (!path.includes("/projects/") || !path.includes("/stories/")) continue;
+      if (!path.endsWith("/links")) continue;
+      if ("url" in EATClient.#postProperties(spec, ops)) return true;
+    }
+    return false;
   }
 
   /**
@@ -480,8 +485,11 @@ export class EATClient {
   }
 
   /**
-   * Attach a link to a story (direct engine). `link_type` is free server-side text, so the
-   * import writes `pull_request`; callers gate this on {@link supportsStoryLinks}.
+   * Attach a link to a story (direct engine). `link_type` is allowlisted server-side —
+   * `relates_to`, `duplicates`, `blocks`, `is_blocked_by`, `pull_request`, `branch`,
+   * `other`; anything else 400s "link_type is not permitted" and omitting it lets the
+   * server derive one from the URL. The import writes `pull_request`. `url` must be
+   * http(s) and ≤ 1000 bytes, `title` ≤ 255. Gated on {@link supportsStoryLinks}.
    *
    * @param {number} projectId
    * @param {number} storyId
