@@ -236,9 +236,8 @@ test("parity: `#[serde(default)]` means an absent title maps to the empty string
 });
 
 test("parity: rows with number <= 0 are skipped and the rest keep GitHub's order", () => {
-  // `if row.number <= 0 || seen.contains(...) { continue }` — `#[serde(default)]`
-  // turns a *missing* number into 0, which the same guard drops. (A wrong-typed
-  // one is a serde error server-side, costing that page; the CLI drops just the row.)
+  // `#[serde(default)]` turns a *missing* number into 0, which the server's own
+  // `row.number <= 0` guard drops; a wrong-typed one is a serde error, not a 0.
   const rows = [
     { number: 90, title: "Upstream fix" },
     { number: 0, title: "defaulted" },
@@ -312,9 +311,8 @@ test("parity: a release carries no blockers — release_to_record leaves the lis
 // claim cannot rot into prose (see "Engine parity" — a divergence ships with a test).
 
 test("divergence: the CLI clamps a blocker in bytes where the importer takes 255 chars", () => {
-  // `POST /blockers` validates with `validate_length` → Rust's `str::len()` (bytes),
-  // so the CLI must cut earlier than common.rs's `desc.chars().take(255)` — server
-  // ask #35629 (/s/y9q8ea68) tracks reconciling the two.
+  // `POST /blockers` validates in bytes (`str::len()`), so the CLI must cut earlier
+  // than common.rs's `chars().take(255)` — server ask #35629 (/s/y9q8ea68) tracks it.
   const title = "é".repeat(238); // 255 chars once wrapped, 493 bytes
   const desc = blockedByDesc(90, title);
   assert.equal([...desc].length, 255, "exactly the server importer's char cut");
@@ -339,9 +337,8 @@ test("divergence: the CLI clamps a blocker in bytes where the importer takes 255
 });
 
 test("divergence: the CLI cannot set blocker_display_order; the importer writes the index", () => {
-  // `CreateBlocker` is `{ blocker_desc, resolved }` — no order field — so every row
-  // the direct engine writes keeps the column's NOT NULL DEFAULT 0, where
-  // common.rs pushes `idx as i64`. Insertion order is all the writer controls.
+  // `CreateBlocker` has no order field, so every direct-engine row keeps the
+  // column's DEFAULT 0 where common.rs pushes `idx as i64`.
   const { stories } = mapRepo({
     issues: [issue({ number: 7 })],
     comments: [],
