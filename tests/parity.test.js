@@ -204,8 +204,7 @@ test("parity: a comment body carries no '@login' prefix, like the server's", () 
 });
 
 // --- issue dependencies → blockers (story #31934 / EAT #35491) ----------------
-// From github.rs `blocked_by_desc` and `list_blocked_by`, whose own tests are
-// `test_github_import_maps_blocked_by_to_story_blockers` and friends.
+// From github.rs `blocked_by_desc` / `list_blocked_by` and their own tests.
 
 /** One story, mapped with `rows` as its `blocked_by` listing. */
 const withBlockers = (/** @type {any[]} */ rows) =>

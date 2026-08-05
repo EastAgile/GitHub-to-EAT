@@ -1069,9 +1069,8 @@ test("the release page cap is the server importer's MAX_PAGES", () => {
 // --- issue dependencies -> blockers (#31934) ---------------------------------
 
 /**
- * A GitHub stand-in serving `issues` on the list endpoint and
- * `deps[n]` on each `/issues/{n}/dependencies/blocked_by`, recording every
- * request's path and API-version header.
+ * A GitHub stand-in serving `issues` on the list endpoint and `deps[n]` on each
+ * `/issues/{n}/dependencies/blocked_by`, recording every request's path and API version.
  *
  * @param {{ issues: any[], deps?: Record<string, any[]>,
  *   depStatus?: Record<string, number>, rateRemaining?: string }} repo

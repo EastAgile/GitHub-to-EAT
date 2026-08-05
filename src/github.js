@@ -163,9 +163,8 @@ export class GitHubClient {
     } catch (err) {
       throw this.#transportError(err);
     }
-    // Tracked on every response, success or not, so an opt-in per-issue stage can
-    // check what an anonymous run has left before spending it. `Number(null)` is 0,
-    // so a host that sends no header must not read as an exhausted budget.
+    // Tracked so an opt-in per-issue stage can price itself before spending. The
+    // null guard matters: `Number(null)` is 0, i.e. a missing header reads as exhausted.
     const remaining = response.headers.get("x-ratelimit-remaining");
     if (remaining !== null && Number.isFinite(Number(remaining))) {
       this.#remaining = Number(remaining);
@@ -413,10 +412,8 @@ export class GitHubClient {
   }
 
   /**
-   * Refuse the stage before it spends a request, rather than dying partway with
-   * half a repo's blockers written. Only anonymous runs are gated: 60/h is the
-   * ceiling a per-issue stage can realistically cross, and a host that publishes
-   * no budget header cannot be second-guessed.
+   * Refuse the stage before it spends a request, rather than dying partway with half a
+   * repo's blockers written. Only anonymous runs (60/h) are gated; a headerless host cannot be.
    *
    * @param {number} cost one request per issue — the listing carries no rollup to gate on
    */
@@ -430,9 +427,8 @@ export class GitHubClient {
   }
 
   /**
-   * Issue number → its `blocked_by` rows, in GitHub's own order. Sequential, at
-   * least one request per issue. Enrichment-only, like github.rs
-   * `fetch_blocked_by_for_issues`: any failure costs that issue its blockers, never the run.
+   * Issue number → its `blocked_by` rows, in GitHub's own order. Enrichment-only, like
+   * github.rs `fetch_blocked_by_for_issues`: a failure costs that issue its blockers, never the run.
    *
    * @param {any[]} issues
    * @returns {Promise<Map<string, any[]>>}
