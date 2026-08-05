@@ -22,6 +22,10 @@ import { runWithProgress } from "./progress.js";
  * @property {(projectId: number, storyId: number, text: string,
  *   idempotencyKey: string, options?: { createdAt?: string | null,
  *   author?: import("./mapping.js").ExternalPerson | null }) => Promise<any>} createComment
+ * @property {(projectId: number, storyId: number,
+ *   blocker: import("./mapping.js").BlockerOp,
+ *   idempotencyKey: string) => Promise<any>} [createBlocker] absent on a stub that
+ *   writes no blockers; a plan carrying one needs it
  * @property {(projectId: number) => Promise<any[]>} listEpics
  * @property {(projectId: number, epic: { name: string, description?: string | null },
  *   idempotencyKey: string) => Promise<any>} createEpic
@@ -43,6 +47,7 @@ import { runWithProgress } from "./progress.js";
  * @property {number} stories
  * @property {number} tasks
  * @property {number} comments
+ * @property {number} blockers
  */
 
 /**
@@ -146,6 +151,7 @@ export async function writePlan(client, projectId, plan, options = {}) {
     stories: 0,
     tasks: 0,
     comments: 0,
+    blockers: 0,
   };
 
   const epics = plan.epics ?? [];
@@ -278,6 +284,21 @@ export async function writePlan(client, projectId, plan, options = {}) {
               ),
             );
             result.tasks += 1;
+          }
+          // Written sequentially so `blocker_display_order` lands in plan order,
+          // which is GitHub's own `blocked_by` order.
+          for (const [i, blocker] of (op.blockers ?? []).entries()) {
+            await retrying(() =>
+              // Non-null: only a plan built with `--include deps` carries blockers,
+              // and that path always runs against the real client.
+              /** @type {NonNullable<WriterClient["createBlocker"]>} */ (client.createBlocker)(
+                projectId,
+                created.story_id,
+                blocker,
+                `${runId}:blocker:${op.external_id}:${i}`,
+              ),
+            );
+            result.blockers += 1;
           }
           for (const [i, comment] of op.comments.entries()) {
             const extras = {

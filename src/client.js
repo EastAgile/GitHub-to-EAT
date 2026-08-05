@@ -300,7 +300,7 @@ export class EATClient {
     };
     /** @type {Partial<import("./mapping.js").FieldLimits>} */
     const limits = {};
-    /** @param {"storyName" | "storyDescription" | "taskDescription" | "commentText"} key
+    /** @param {keyof import("./mapping.js").FieldLimits} key
      * @param {number | undefined} value */
     const set = (key, value) => {
       if (value !== undefined && limits[key] === undefined) limits[key] = value;
@@ -316,6 +316,8 @@ export class EATClient {
         set("taskDescription", minLength(props, ["description", "task_desc"]));
       } else if (inStories && path.endsWith("/comments")) {
         set("commentText", minLength(props, ["text", "comment_text"]));
+      } else if (inStories && path.endsWith("/blockers")) {
+        set("blockerDesc", minLength(props, ["blocker_desc"]));
       }
     }
     return limits;
@@ -462,6 +464,28 @@ export class EATClient {
       "POST",
       `/projects/${projectId}/stories/${storyId}/comments`,
       { json, headers: { "Idempotency-Key": idempotencyKey } },
+    );
+    return response.json();
+  }
+
+  /**
+   * Create a blocker on a story (direct engine). `blocker_desc` is capped at
+   * `limits::BLOCKER_DESC` server-side; callers clamp before sending.
+   *
+   * @param {number} projectId
+   * @param {number} storyId
+   * @param {import("./mapping.js").BlockerOp} blocker
+   * @param {string} idempotencyKey
+   * @returns {Promise<any>}
+   */
+  async createBlocker(projectId, storyId, { desc, resolved }, idempotencyKey) {
+    const response = await this.#request(
+      "POST",
+      `/projects/${projectId}/stories/${storyId}/blockers`,
+      {
+        json: { blocker_desc: desc, resolved: resolved === true },
+        headers: { "Idempotency-Key": idempotencyKey },
+      },
     );
     return response.json();
   }

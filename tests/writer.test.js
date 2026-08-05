@@ -64,6 +64,7 @@ test("writePlan writes labels, then stories oldest-first with their subresources
       stories: 2,
       tasks: 2,
       comments: 1,
+      blockers: 0,
     });
 
     const labels = mock.state.labels[91];
@@ -808,6 +809,81 @@ test("an epic the listing already names is never POSTed at all", async () => {
       mock.state.requests.filter((r) => r.includes("/epics")),
       ["GET /projects/91/epics"],
     );
+  } finally {
+    await mock.close();
+  }
+});
+
+// --- blockers (#31934) -------------------------------------------------------
+
+test("writePlan creates one blocker per op, in order, after the story's tasks", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const plan = samplePlan();
+    plan.stories[1].blockers = [
+      { desc: "Blocked by #12 (Second)", resolved: false },
+      { desc: "Blocked by #90 (Upstream fix)", resolved: false },
+    ];
+    const result = await writePlan(client, 91, plan, { stream: capture() });
+
+    assert.equal(result.blockers, 2);
+    const story = mock.state.stories[91].find((s) => s.title === "older closed issue");
+    assert.deepEqual(
+      story.blockers.map((/** @type {any} */ b) => [b.blocker_desc, b.resolved]),
+      [
+        ["Blocked by #12 (Second)", false],
+        ["Blocked by #90 (Upstream fix)", false],
+      ],
+    );
+    assert.deepEqual(
+      story.blockers.map((/** @type {any} */ b) => b.blocker_display_order),
+      [0, 1],
+    );
+    assert.equal(story.blocker_count, 2);
+    // The other story asked for none and got none.
+    assert.deepEqual(
+      mock.state.stories[91].find((s) => s.title === "newer open issue").blockers,
+      [],
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("writePlan sends no blockers request for a plan with none", async () => {
+  const mock = await startMockServer();
+  try {
+    const result = await writePlan(new EATClient(mock.baseUrl, "ea_token"), 91, samplePlan(), {
+      stream: capture(),
+    });
+    assert.equal(result.blockers, 0);
+    assert.deepEqual(
+      mock.state.requests.filter((r) => r.endsWith("/blockers")),
+      [],
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a blocker write is idempotency-keyed per story and index, so a replay never doubles", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const plan = samplePlan();
+    plan.stories[1].blockers = [{ desc: "Blocked by #90 (Upstream fix)", resolved: false }];
+    // One runId, two passes: the ledger must replay the create, not repeat it.
+    await writePlan(client, 91, plan, { stream: capture(), runId: "run-1" });
+    const story = mock.state.stories[91].find((s) => s.title === "older closed issue");
+    const before = story.blockers.length;
+    await client.createBlocker(
+      91,
+      story.story_id,
+      { desc: "Blocked by #90 (Upstream fix)", resolved: false },
+      "run-1:blocker:3:0",
+    );
+    assert.equal(story.blockers.length, before, "the keyed replay wrote no second row");
   } finally {
     await mock.close();
   }

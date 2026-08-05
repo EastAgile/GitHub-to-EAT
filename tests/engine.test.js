@@ -29,15 +29,18 @@ for (const bad of ["", "SERVER", "local", "srever", "both"]) {
   });
 }
 
-test("DIRECT_SUPPORTED_INCLUDES is issues plus milestones plus releases", () => {
-  assert.deepEqual(DIRECT_SUPPORTED_INCLUDES, ["issues", "milestones", "releases"]);
+// deps joined the list once the server ask (EAT #35491) landed — the direct
+// engine mirrors it rather than diverging.
+test("DIRECT_SUPPORTED_INCLUDES is issues plus milestones plus releases plus deps", () => {
+  assert.deepEqual(DIRECT_SUPPORTED_INCLUDES, ["issues", "milestones", "releases", "deps"]);
 });
 
 for (const selected of [
   ["issues"],
   ["issues", "milestones"],
   ["issues", "releases"],
-  ["issues", "milestones", "releases"],
+  ["issues", "deps"],
+  ["issues", "milestones", "releases", "deps"],
 ]) {
   test(`assertDirectSupportsIncludes allows ${selected.join(",")}`, () => {
     assert.doesNotThrow(() => assertDirectSupportsIncludes(selected));
@@ -63,7 +66,7 @@ test("assertDirectSupportsIncludes names the engine and its real scope, not a fl
       assert.ok(err instanceof Error);
       assert.equal(
         err.message,
-        "the direct engine imports issues + milestones + releases; " +
+        "the direct engine imports issues + milestones + releases + deps; " +
           "prs not supported by the direct engine yet",
       );
       assert.ok(!err.message.includes("--"), `message names a flag: ${err.message}`);

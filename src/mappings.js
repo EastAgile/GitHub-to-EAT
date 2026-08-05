@@ -8,6 +8,8 @@
  */
 
 import {
+  DEPS_LEGEND,
+  depsLegend,
   describeCustomization,
   ISSUES_LEGEND,
   issuesLegend,
@@ -54,6 +56,11 @@ export const MAPPINGS = {
     requestField: "include_releases",
     legend: RELEASES_LEGEND,
     render: releasesLegend,
+  },
+  deps: {
+    requestField: "include_dependencies",
+    legend: DEPS_LEGEND,
+    render: depsLegend,
   },
 };
 

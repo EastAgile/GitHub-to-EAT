@@ -18,7 +18,7 @@ export const ENGINES = ["server", "direct"];
 export const DEFAULT_ENGINE = "server";
 
 /** Import types the direct engine supports today; PRs are still to come. */
-export const DIRECT_SUPPORTED_INCLUDES = ["issues", "milestones", "releases"];
+export const DIRECT_SUPPORTED_INCLUDES = ["issues", "milestones", "releases", "deps"];
 
 /**
  * Validate an `--engine` value against {@link ENGINES}.

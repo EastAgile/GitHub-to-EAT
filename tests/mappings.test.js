@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  blockedByDesc,
   DEFAULT_CUSTOMIZATION,
   ISSUE_TYPE_STORY_TYPES,
   MILESTONES_LEGEND,
@@ -410,4 +411,41 @@ test("the epic-note legend line and the description builder agree on one format"
   const rendered = String(milestoneEpicDescription({ state: "open", due_on: "2024-12-01" }));
   assert.ok(line?.includes(`('${rendered}')`), `legend quotes '${rendered}', got ${line}`);
   assert.match(rendered, /^GitHub milestone — State: open, Due: 2024-12-01$/);
+});
+
+// --- deps (#31934) -----------------------------------------------------------
+
+test("deps is a registry type wired to the server's include_dependencies", () => {
+  assert.equal(MAPPINGS.deps.requestField, "include_dependencies");
+  assert.ok(MAPPINGS.deps.legend.length > 0);
+});
+
+test("parseInclude accepts deps and keeps registry order", () => {
+  assert.deepEqual(parseInclude("issues,deps"), ["issues", "deps"]);
+  assert.deepEqual(parseInclude("deps,releases,issues"), ["issues", "releases", "deps"]);
+});
+
+test("requestFlags maps deps to include_dependencies", () => {
+  assert.deepEqual(requestFlags(["issues", "deps"]), { include_dependencies: true });
+  assert.deepEqual(requestFlags(["issues", "prs", "deps"]), {
+    include_pull_requests: true,
+    include_dependencies: true,
+  });
+});
+
+test("the deps legend names the blocker text both engines write", () => {
+  const legend = renderLegend(["issues", "deps"], "server");
+  assert.match(legend, /^ {2}deps:$/m);
+  // Rendered by blockedByDesc itself, so the legend cannot drift from the write.
+  assert.ok(legend.includes(blockedByDesc(90, "Upstream fix")), legend);
+});
+
+test("only the direct engine's deps legend names the request budget it spends", () => {
+  assert.match(renderLegend(["issues", "deps"], "direct"), /--token/);
+  // The server holds the platform PAT — a 60/h note there would be a lie.
+  assert.ok(!renderLegend(["issues", "deps"], "server").includes("--token"));
+});
+
+test("a run without deps prints no dependency line", () => {
+  assert.ok(!renderLegend(["issues"], "direct").includes("Blocked by"));
 });

@@ -298,9 +298,11 @@ function attachedPeople(plan) {
  *     => Promise<import("./mapping.js").Customization>,
  *   announce?: (fetched: { issues: any[], comments: any[], labels: any[] },
  *     customization: import("./mapping.js").Customization) => Promise<void>,
- *   github?: { fetchAll(options?: { releases?: boolean }): Promise<{ issues: any[],
- *     comments: any[], labels: any[], subIssues?: Map<string, string[]>,
- *     releases?: any[] }> } }} options `customize` (the wizard) runs at the
+ *   github?: { fetchAll(options?: { releases?: boolean, dependencies?: boolean }):
+ *     Promise<{ issues: any[], comments: any[], labels: any[],
+ *     subIssues?: Map<string, string[]>, releases?: any[],
+ *     blockedBy?: Map<string, any[]>, dependencyRequests?: number }> } }} options
+ *   `customize` (the wizard) runs at the
  *   fetch→map seam so its questions use real data; `announce` (the customized
  *   legend + confirm) runs right after, and may throw to abort before any
  *   write; `github` is a test seam
@@ -317,8 +319,9 @@ export async function runDirect(client, projectId, owner, repo, options) {
   const releases = included.includes("releases");
   // Every issue row carries its own milestone, so the epic mapping costs no extra fetch.
   const epics = included.includes("milestones");
+  const dependencies = included.includes("deps");
   const fetched = await runWithProgress(
-    () => source.fetchAll({ releases }),
+    () => source.fetchAll({ releases, dependencies }),
     `fetching ${owner}/${repo} from GitHub`,
     { stream },
   );
@@ -397,6 +400,14 @@ export async function runDirect(client, projectId, owner, repo, options) {
   }
 
   if (dryRun) {
+    // The stage has no rollup to gate on, so its price is per-issue and only a
+    // finished run can state it — the preview is where that lands.
+    if (dependencies) {
+      stream?.write(
+        `note: --include deps cost ${fetched.dependencyRequests ?? 0} extra GitHub request(s) ` +
+          "(one per issue); an anonymous run has 60/h, a --token run 5000/h.\n",
+      );
+    }
     // Epics are written first, so a GitHub label sharing a milestone's name arrives as the
     // epic's backing label and 409s into *existing* — unsubtracted, the preview over-reports.
     const epicNames = new Set((plan.epics ?? []).map((epic) => epicTitleKey(epic.title)));

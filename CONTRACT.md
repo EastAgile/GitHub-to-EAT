@@ -24,8 +24,9 @@ truth for what the tool does and what it depends on from the East Agile Tracker
    - `POST /projects/{id}/import/json` with body
      `{ "source": "github", "owner": "...", "repo": "..." }`.
    - **Type selection** — `--include` adds optional boolean fields:
-     `include_pull_requests`, `include_milestones`, `include_releases`
-     (issues are always imported; the flags only add types).
+     `include_pull_requests`, `include_milestones`, `include_releases`,
+     `include_dependencies` (issues are always imported; the flags only add
+     types).
    - **Dry run** — `--dry-run` sends `dry_run: true`: the server fetches
      GitHub and runs dedup but writes nothing, returning the would-import /
      would-skip plan (response echoes `dry_run: true`). The CLI only sends
@@ -281,9 +282,9 @@ v3 adds a second import engine selectable with `--engine server|direct`
 
 ### v3 scope
 
-- **Issues, milestones and releases.** `--engine direct` composes with
-  `--include`; it supports `issues` (always imported), `milestones` and
-  `releases`. `prs` exits with a usage error ("not supported by the direct
+- **Issues, milestones, releases and deps.** `--engine direct` composes with
+  `--include`; it supports `issues` (always imported), `milestones`, `releases`
+  and `deps`. `prs` exits with a usage error ("not supported by the direct
   engine yet"). The message names the supported set straight from the engine
   module's own list, so it cannot go on advertising a narrower scope than the
   engine has.
@@ -510,6 +511,40 @@ with `Link`-header pagination:
   repo read anonymously or with a read-only token — no draft is visible, the
   draft mapping below is unreachable, and the CLI cannot tell that any draft was
   omitted (an invisible draft is indistinguishable from a repo with none).
+
+- `GET /repos/{owner}/{repo}/issues/{n}/dependencies/blocked_by` — one issue's
+  blockers, requested **only** under `--include …,deps`. Without that flag the
+  endpoint is never touched and every written row is byte-identical to a
+  pre-`deps` run. Unlike the sub-issue listing there is **no rollup field to gate
+  on** — the issue row carries no dependency count — so an opted-in run pays one
+  request per issue, sequentially, after the three list endpoints. It follows
+  `Link` at `per_page=100` up to 20 pages, the server importer's own
+  `MAX_DEPENDENCY_PAGES`.
+
+  **These routes ship under their own REST API version.** The request sends
+  `X-GitHub-Api-Version: 2026-03-10`; every other endpoint above keeps
+  `2022-11-28`, which these routes answer `415`. Both engines do this — the
+  server grew a version-explicit `send_with_api_version` sibling for the same
+  reason.
+
+  **This stage degrades; it never fails the run**, matching the server's
+  enrichment-only contract (`fetch_blocked_by_for_issues` logs a warning and
+  yields an empty list for that issue). A `404` (a GHES without the route), a
+  `415` (a host that refuses the API version), or a `5xx` costs *that issue* its
+  blockers and nothing else; a rate limit stops the stage where it stands and
+  keeps what it has. Both warn on stderr, aggregated into one line however many
+  issues failed, so a host-wide refusal reports a count rather than 200 lines.
+
+  **An anonymous run is refused up front when it cannot afford the stage.**
+  Before spending a single dependency request the fetcher compares the issue
+  count against the `x-ratelimit-remaining` its earlier responses reported; an
+  anonymous run short of that budget fails with a `RateBudgetError` naming
+  `--token`, rather than dying halfway with an arbitrary half of the repo's
+  blockers written and no way to repair them (an import never updates a story it
+  already created). A tokenised run is never gated (5000/h), and neither is a
+  host that publishes no budget header. This preflight is **CLI-only and not an
+  engine divergence**: the server always holds the platform PAT, so it has no
+  60/h ceiling to cross.
 
 There is deliberately **no** milestones endpoint: every issue row already embeds
 the milestone fields the mapping reads, so `--include …,milestones` adds no
@@ -905,6 +940,40 @@ mirroring the server importer's `release_to_record` (agile-tracker
   off. `--story-type` reads "all issues &lt;type&gt;" in the `Customized:` block,
   not "all": the override retypes issues and never touches a release.
 
+### Issue dependencies → story blockers (both engines)
+
+Under `--include …,deps` each issue's GitHub "blocked by" dependencies become
+`blocker` rows on its story. This is a **both-engines** type: the server ask
+(EAT #35491) shipped before this CLI story, so the direct engine mirrors
+`github.rs` rather than inventing anything, and there is no divergence to track.
+`tests/parity.test.js` pins every rule below against the server's own.
+
+- **Text** — `Blocked by #<number> (<title>)`, the blocking issue's title
+  **trimmed**, and `resolved: false`. Byte-identical to `blocked_by_desc`. A
+  dependency row's `number` and `title` are both `#[serde(default)]` server-side,
+  so a row with no title renders `Blocked by #90 ()` rather than being dropped.
+- **Selection** — one blocker per `blocked_by` entry, in GitHub's own listing
+  order. Rows whose `number` is not a positive integer are skipped (a missing or
+  unparseable number defaults to 0, which the same guard drops), and repeats are
+  deduplicated by number across pages, the first title winning.
+- **Scope** — a blocker is recorded whether or not the blocking issue is itself
+  imported: the server never intersects `blocked_by` with the import set, so
+  neither does the CLI. An issue with an empty listing, or one whose listing
+  degraded, gets no blockers at all — indistinguishable, by design. Releases
+  carry none: `release_to_record` leaves the list empty.
+- **Re-runs add nothing.** Blockers hang off the story create, and a re-import
+  skips an already-imported story entirely, so its blockers are never written a
+  second time — the same guarantee the server's own re-import test asserts. Since
+  an import never *updates*, a dependency added on GitHub after the first import
+  never reaches EAT; delete the story and re-run to pick it up.
+- **Counting** — blockers are not stories, so no import total moves. The result
+  line's story and label counts are identical with and without the flag.
+- **Legend** — the `deps` block is rendered by the same registry entry both
+  engines use, from `blockedByDesc` itself, so the legend cannot drift from what
+  is written. `--engine direct` adds two lines the server engine must not print:
+  the unimported-blocker note and the per-issue request cost, since only the
+  direct engine spends a caller's own GitHub budget.
+
 ### Write surface (direct engine)
 
 The writer stage targets this EAT API surface, all under
@@ -983,6 +1052,14 @@ real server 2026-07-16 and mirrored by `src/mockserver.js`):
   `{ comment_id, story_comment_id, story_id, comment_text, created }`.
   Optional `created_at` and `author` (`ExternalPersonInput`) are both
   owner-gated by the same check (server stories #31425 / #32773).
+- **`POST /stories/{id}/blockers`** — body `{ "blocker_desc": "...",
+  "resolved": bool }` (`resolved` is `Option<bool>`, defaulting false; a blank
+  or whitespace-only description is `400 invalid_parameter`; `blocker_desc`
+  ≤ 255) → 200 `{ blocker_id, story_id, blocker_desc, blocker_display_order,
+  resolved, created, expired }`. Written after the story's tasks, one sequential
+  request per blocker, so `blocker_display_order` lands in plan order — which is
+  GitHub's own `blocked_by` order. Member-gated, not owner-gated. Used only under
+  `--include …,deps`; a plan carrying no blockers never touches the route.
 - **Idempotency** — every `POST` replays on same key + same body and returns
   `409 idempotency_conflict` on same key + different body (see the v1 import
   note). The ledger is keyed by key + body only: a same-key + same-body
@@ -1014,7 +1091,9 @@ before writing:
   server that publishes none: story name 255; story description, task
   description, and comment text 16,000 bytes each — chosen between the longest
   comment a real server accepted (13,101) and one it rejected (46,411). Tune
-  the fallbacks if such a server still rejects.
+  the fallbacks if such a server still rejects. `blocker_desc` falls back to
+  **255** — `limits::BLOCKER_DESC`, the column width — and production publishes
+  that same number on the blockers path.
 - **Clamp shape** — block text is cut and suffixed with a visible notice
   (`[truncated by github-to-eat: …]`), total within the limit; names are cut
   with a trailing ellipsis whose own 3 bytes come out of the budget. Story
@@ -1023,7 +1102,9 @@ before writing:
   row and field
   (`warning: issue #64: comment 1 truncated to 16000 bytes (server limit)`; a
   release names itself `release #100`, off the numeric half of its key, rather
-  than reading `issue #release-100`).
+  than reading `issue #release-100`). A **blocker is the exception**: it is cut
+  plainly, with no notice, because the notice is 76 bytes of a 255-byte
+  one-liner — the server's own writer truncates blockers bare for the same reason.
 - **Guarantee** — because the clamp measures the server's own unit, a clamped
   plan cannot produce a `too_long` 400; one over-long GitHub issue can never
   abort the run.

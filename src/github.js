@@ -22,6 +22,11 @@ const MAX_SUB_ISSUE_PAGES = 20;
 // The server importer's own release cap (github.rs MAX_PAGES), so no repo it
 // accepts is refused here. Exported so the bound is testable without guessing.
 export const MAX_RELEASE_PAGES = 200;
+// github.rs MAX_DEPENDENCY_PAGES, for the same reason as the sub-issue bound.
+export const MAX_DEPENDENCY_PAGES = 20;
+// The issue-dependencies routes ship under their own REST API version and 415
+// under the 2022-11-28 default the rest of this surface sends (github.rs).
+export const DEPENDENCIES_API_VERSION = "2026-03-10";
 // A repo-wide failure would otherwise render one line per advertised parent.
 const MAX_NAMED_FAILURES = 10;
 
@@ -36,6 +41,9 @@ export class RateLimitError extends GitHubError {}
 
 /** The supplied token was rejected (HTTP 401). */
 export class GitHubAuthError extends GitHubError {}
+
+/** An anonymous run cannot afford an opt-in per-issue stage (`--include deps`). */
+export class RateBudgetError extends GitHubError {}
 
 /**
  * Extract the `rel="next"` URL from a `Link` response header, if present.
@@ -86,6 +94,15 @@ export class GitHubClient {
   /** @type {(message: string) => void} */
   #warn;
 
+  /** @type {boolean} a token was supplied, so the budget is 5000/h, not 60/h */
+  #authenticated;
+
+  /** @type {number | null} `x-ratelimit-remaining` from the newest response */
+  #remaining = null;
+
+  /** @type {number} dependency requests issued this run (reported by the dry run) */
+  #dependencyRequests = 0;
+
   /**
    * @param {string} owner
    * @param {string} repo
@@ -99,6 +116,7 @@ export class GitHubClient {
     this.repo = repo;
     this.timeout = timeout;
     this.#warn = warn ?? ((message) => void process.stderr.write(message));
+    this.#authenticated = Boolean(token);
     this.apiBase = apiBase.replace(/\/+$/, "");
     this.#headers = {
       Accept: "application/vnd.github+json",
@@ -132,17 +150,25 @@ export class GitHubClient {
    * GET one absolute URL, mapping GitHub's error statuses to the error hierarchy.
    *
    * @param {string} url
+   * @param {Record<string, string>} [extraHeaders] per-request header overrides
    * @returns {Promise<Response>}
    */
-  async #get(url) {
+  async #get(url, extraHeaders) {
     let response;
     try {
       response = await fetch(url, {
-        headers: this.#headers,
+        headers: extraHeaders ? { ...this.#headers, ...extraHeaders } : this.#headers,
         signal: AbortSignal.timeout(this.timeout * 1000),
       });
     } catch (err) {
       throw this.#transportError(err);
+    }
+    // Tracked on every response, success or not, so an opt-in per-issue stage can
+    // check what an anonymous run has left before spending it. `Number(null)` is 0,
+    // so a host that sends no header must not read as an exhausted budget.
+    const remaining = response.headers.get("x-ratelimit-remaining");
+    if (remaining !== null && Number.isFinite(Number(remaining))) {
+      this.#remaining = Number(remaining);
     }
 
     if (response.status === 404) {
@@ -188,16 +214,19 @@ export class GitHubClient {
    *
    * @param {string} path repo-relative path with query (e.g. `/issues?state=all`)
    * @param {number} [maxPages] refuse to follow `Link` past this many pages
+   * @param {Record<string, string>} [headers] per-request header overrides
+   * @param {() => void} [onPage] called once per request, so a stage can price itself
    * @returns {Promise<any[]>}
    */
-  async #paginate(path, maxPages = Number.POSITIVE_INFINITY) {
+  async #paginate(path, maxPages = Number.POSITIVE_INFINITY, headers, onPage) {
     /** @type {any[]} */
     const out = [];
     let pages = 0;
     let url = `${this.apiBase}/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}${path}`;
     while (url) {
       pages += 1;
-      const response = await this.#get(url);
+      onPage?.();
+      const response = await this.#get(url, headers);
       /** @type {unknown} */
       let page;
       try {
@@ -365,17 +394,128 @@ export class GitHubClient {
   }
 
   /**
+   * List one issue's blockers (`GET /issues/{n}/dependencies/blocked_by`).
+   *
+   * @param {string} number
+   * @returns {Promise<any[]>}
+   */
+  async #listBlockedBy(number) {
+    return this.#paginate(
+      `/issues/${encodeURIComponent(number)}/dependencies/blocked_by?per_page=100`,
+      MAX_DEPENDENCY_PAGES,
+      { "X-GitHub-Api-Version": DEPENDENCIES_API_VERSION },
+      // Counted per page, not per issue: an issue past 100 dependencies costs
+      // more than one request, and the dry run must not understate the budget.
+      () => {
+        this.#dependencyRequests += 1;
+      },
+    );
+  }
+
+  /**
+   * Refuse the stage before it spends a request, rather than dying partway with
+   * half a repo's blockers written. Only anonymous runs are gated: 60/h is the
+   * ceiling a per-issue stage can realistically cross, and a host that publishes
+   * no budget header cannot be second-guessed.
+   *
+   * @param {number} cost one request per issue — the listing carries no rollup to gate on
+   */
+  #assertBudgetFor(cost) {
+    if (this.#authenticated || this.#remaining === null || this.#remaining >= cost) return;
+    throw new RateBudgetError(
+      `--include deps needs ${cost} more GitHub request(s) (one per issue) and this anonymous ` +
+        `run has ${this.#remaining} left of GitHub's 60/h budget. Pass --token / GITHUB_TOKEN ` +
+        "to raise the limit (5000/h), or drop deps from --include.",
+    );
+  }
+
+  /**
+   * Issue number → its `blocked_by` rows, in GitHub's own order. Sequential, at
+   * least one request per issue. Enrichment-only, like github.rs
+   * `fetch_blocked_by_for_issues`: any failure costs that issue its blockers, never the run.
+   *
+   * @param {any[]} issues
+   * @returns {Promise<Map<string, any[]>>}
+   */
+  async #fetchBlockedBy(issues) {
+    const numbers = /** @type {string[]} */ (
+      issues.map(issueNumberFromRow).filter((n) => n !== null)
+    );
+    this.#assertBudgetFor(numbers.length);
+    /** @type {Map<string, any[]>} */
+    const blockedBy = new Map();
+    /** @type {string[]} */
+    const failed = [];
+    /** @type {RateLimitError | null} */
+    let limited = null;
+    for (const number of numbers) {
+      /** @type {any[]} */
+      let rows;
+      try {
+        rows = await this.#listBlockedBy(number);
+      } catch (err) {
+        // A limit stops the stage — every remaining listing would fail the same way.
+        if (err instanceof RateLimitError) {
+          limited = err;
+          break;
+        }
+        if (!(err instanceof GitHubError)) throw err;
+        failed.push(number);
+        continue;
+      }
+      if (rows.length) blockedBy.set(number, rows);
+    }
+    this.#warnBlockedByLoss(failed, limited);
+    return blockedBy;
+  }
+
+  /**
+   * Report what a degraded dependency stage cost, in one line however many issues failed.
+   *
+   * @param {string[]} failed issues whose listing could not be read
+   * @param {RateLimitError | null} limited the limit that stopped the stage, if any
+   */
+  #warnBlockedByLoss(failed, limited) {
+    if (failed.length === 1) {
+      this.#warn(
+        `warning: could not list issue #${failed[0]}'s dependencies — issue #${failed[0]} is ` +
+          "imported without its 'Blocked by #n' blockers.\n",
+      );
+    } else if (failed.length > 1) {
+      const named = failed
+        .slice(0, MAX_NAMED_FAILURES)
+        .map((n) => `#${n}`)
+        .join(", ");
+      const rest = failed.length - MAX_NAMED_FAILURES;
+      this.#warn(
+        `warning: could not list dependencies for ${failed.length} issues: ${named}` +
+          `${rest > 0 ? `, and ${rest} more` : ""} — those stories are imported without their ` +
+          "'Blocked by #n' blockers. A failure this wide usually means the host does not serve " +
+          `the issue-dependencies API (version ${DEPENDENCIES_API_VERSION}).\n`,
+      );
+    }
+    if (limited) {
+      this.#warn(
+        `warning: ${limited.message} Dependency blockers stop here; the rest of the import ` +
+          "continues without them, and an import never updates a story it already created.\n",
+      );
+    }
+  }
+
+  /**
    * Fetch issues, comments, labels, and the sub-issue hierarchy in one call.
    *
    * The repo-wide comments endpoint includes PR conversation comments; only
    * comments on kept issues survive, so mapping never sees PR chatter.
    *
-   * @param {{ releases?: boolean }} [options] `releases` adds the releases listing
-   *   (`--include releases`); off, that endpoint is never requested
+   * @param {{ releases?: boolean, dependencies?: boolean }} [options] `releases` adds
+   *   the releases listing (`--include releases`) and `dependencies` the per-issue
+   *   `blocked_by` listings (`--include deps`); off, neither endpoint is requested
    * @returns {Promise<{ issues: any[], comments: any[], labels: any[],
-   *   subIssues: Map<string, string[]>, releases: any[] }>}
+   *   subIssues: Map<string, string[]>, releases: any[],
+   *   blockedBy: Map<string, any[]>, dependencyRequests: number }>}
    */
-  async fetchAll({ releases = false } = {}) {
+  async fetchAll({ releases = false, dependencies = false } = {}) {
     const [issues, comments, labels, releaseRows] = await Promise.all([
       this.listIssues(),
       this.listComments(),
@@ -392,6 +532,8 @@ export class GitHubClient {
       labels,
       subIssues: await this.#fetchSubIssues(issues),
       releases: releaseRows,
+      blockedBy: dependencies ? await this.#fetchBlockedBy(issues) : new Map(),
+      dependencyRequests: this.#dependencyRequests,
     };
   }
 }

@@ -208,9 +208,49 @@ test("write methods create against the mock and 409 maps to ConflictError", asyn
   }
 });
 
+test("createBlocker posts blocker_desc + resolved to the story's blockers route", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const story = await client.createStory(91, { name: "s" }, "k-story-b");
+    const blocker = await client.createBlocker(
+      91,
+      story.story_id,
+      { desc: "Blocked by #90 (Upstream fix)", resolved: false },
+      "k-blocker",
+    );
+    assert.equal(blocker.blocker_desc, "Blocked by #90 (Upstream fix)");
+    assert.equal(blocker.resolved, false);
+    assert.equal(blocker.story_id, story.story_id);
+    assert.ok(mock.state.requests.includes(`POST /projects/91/stories/${story.story_id}/blockers`));
+  } finally {
+    await mock.close();
+  }
+});
+
+test("createBlocker on a missing story maps to NotFoundError", async () => {
+  const mock = await startMockServer();
+  try {
+    await assert.rejects(
+      new EATClient(mock.baseUrl, "ea_token").createBlocker(91, 9999, { desc: "b" }, "k-404"),
+      (err) => err instanceof NotFoundError,
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
 test("fieldLimits reads maxLength from the published spec, min across aliases", async () => {
   const mock = await startMockServer(
-    makeState({ maxLengths: { name: 60, description: 500, task_desc: 120, comment_text: 150 } }),
+    makeState({
+      maxLengths: {
+        name: 60,
+        description: 500,
+        task_desc: 120,
+        comment_text: 150,
+        blocker_desc: 255,
+      },
+    }),
   );
   try {
     const client = new EATClient(mock.baseUrl, "key");
@@ -219,6 +259,7 @@ test("fieldLimits reads maxLength from the published spec, min across aliases", 
       storyDescription: 500,
       taskDescription: 120,
       commentText: 150,
+      blockerDesc: 255,
     });
   } finally {
     await mock.close();

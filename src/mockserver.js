@@ -14,6 +14,7 @@
  *     POST /projects/{id}/stories
  *     POST /projects/{id}/stories/{id}/tasks
  *     POST /projects/{id}/stories/{id}/comments
+ *     POST /projects/{id}/stories/{id}/blockers
  *
  * Every POST honours Idempotency-Key like the real server (verified 2026-07-16):
  * same key + same body replays; same key + different body → 409 idempotency_conflict.
@@ -81,7 +82,7 @@ import { parseArgs } from "node:util";
  * @property {Record<string, { phases: any[], idx: number }>} jobs async import
  *   jobs by import_id; each GET serves the current phase then advances
  * @property {{ name?: number, description?: number, task_desc?: number,
- *   comment_text?: number }} maxLengths per-field write limits — when set,
+ *   comment_text?: number, blocker_desc?: number }} maxLengths per-field write limits — when set,
  *   over-long values are rejected `400 too_long` and the limits are published
  *   as `maxLength` in /openapi.json (default: none, so the fallback path stays covered —
  *   production does publish them)
@@ -261,6 +262,10 @@ function openapiDoc(state) {
           ...((state.commentAuthor ?? state.people) ? { author: externalPerson } : {}),
         },
       ),
+      "/api/v1/projects/{project_id}/stories/{story_id}/blockers": post(
+        { blocker_desc: ml.blocker_desc },
+        { resolved: { type: ["boolean", "null"] } },
+      ),
     },
   };
 }
@@ -272,7 +277,7 @@ function openapiDoc(state) {
  * on ASCII are not silently let through on multi-byte text.
  *
  * @param {MockState} state
- * @param {"name" | "description" | "task_desc" | "comment_text"} field
+ * @param {"name" | "description" | "task_desc" | "comment_text" | "blocker_desc"} field
  * @param {string} value
  * @returns {MockResponse | null}
  */
@@ -662,6 +667,9 @@ function routePost(state, path, body, idempotencyKey) {
   m = path.match(/^\/projects\/(\d+)\/stories\/(\d+)\/comments$/);
   if (m) return createComment(state, Number(m[1]), Number(m[2]), body);
 
+  m = path.match(/^\/projects\/(\d+)\/stories\/(\d+)\/blockers$/);
+  if (m) return createBlocker(state, Number(m[1]), Number(m[2]), body);
+
   return { status: 404, payload: { error: "unknown route" } };
 }
 
@@ -891,6 +899,10 @@ function createStory(state, projectId, body) {
     tasks_count: 0,
     comments: [],
     comment_count: 0,
+    // Unlike `comments`, both ride the read payload — they are in the real
+    // server's `fields=` allowlist (STORY_FIELDS).
+    blockers: [],
+    blocker_count: 0,
     created: now,
     updated_at: now,
   };
@@ -995,6 +1007,43 @@ function createComment(state, projectId, storyId, body) {
   story.comments.push(comment);
   story.comment_count = story.comments.length;
   return { status: 200, payload: comment };
+}
+
+/**
+ * @param {MockState} state
+ * @param {number} projectId
+ * @param {number} storyId
+ * @param {any} body
+ * @returns {MockResponse}
+ */
+function createBlocker(state, projectId, storyId, body) {
+  const story = findStory(state, projectId, storyId);
+  if (!story) return NOT_FOUND;
+  const desc = String(body.blocker_desc ?? "");
+  if (!desc.trim()) {
+    return {
+      status: 400,
+      payload: {
+        code: "invalid_parameter",
+        details: { constraint: "required", fields: ["blocker_desc"] },
+        error: "This field is required.",
+      },
+    };
+  }
+  const overLong = tooLong(state, "blocker_desc", desc);
+  if (overLong) return overLong;
+  const blocker = {
+    blocker_id: state.nextId++,
+    story_id: storyId,
+    blocker_desc: desc,
+    blocker_display_order: story.blockers.length,
+    resolved: body.resolved === true,
+    created: new Date().toISOString(),
+    expired: null,
+  };
+  story.blockers.push(blocker);
+  story.blocker_count = story.blockers.length;
+  return { status: 200, payload: blocker };
 }
 
 /**
