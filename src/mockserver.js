@@ -74,6 +74,9 @@ import { parseArgs } from "node:util";
  *   and an `external`-only owner 400s the way serde-dropping the unknown key makes it
  * @property {boolean} [commentAuthor] overrides `people` for the comment `author` alone,
  *   so a test can prove each half of the single probe independently
+ * @property {boolean} dependencyImport when true (default, mirroring the server tree),
+ *   the openapi advertises `include_dependencies` on POST /import/json (EAT #35491);
+ *   false simulates a server that predates it and silently ignores the flag
  * @property {boolean} asyncImport when true, POST /import/json answers the v2
  *   async accept — 202 `{ import_id, status:"pending" }` plus a pollable job at
  *   GET /imports/{import_id}; false (default) keeps today's synchronous 200
@@ -137,6 +140,7 @@ export function makeState(overrides = {}) {
     provenance: true,
     backdating: true,
     people: true,
+    dependencyImport: true,
     asyncImport: false,
     asyncFail: false,
     jobs: {},
@@ -225,7 +229,14 @@ function openapiDoc(state) {
           requestBody: {
             content: {
               "application/json": {
-                schema: { properties: { dry_run: { type: ["boolean", "null"] } } },
+                schema: {
+                  properties: {
+                    dry_run: { type: ["boolean", "null"] },
+                    ...(state.dependencyImport
+                      ? { include_dependencies: { type: ["boolean", "null"] } }
+                      : {}),
+                  },
+                },
               },
             },
           },
@@ -1036,7 +1047,9 @@ function createBlocker(state, projectId, storyId, body) {
     blocker_id: state.nextId++,
     story_id: storyId,
     blocker_desc: desc,
-    blocker_display_order: story.blockers.length,
+    // `blockers.rs` INSERTs (story_id, blocker_desc, resolved) only: the public
+    // route binds no order, so the column stays at its `NOT NULL DEFAULT 0`.
+    blocker_display_order: 0,
     resolved: body.resolved === true,
     created: new Date().toISOString(),
     expired: null,

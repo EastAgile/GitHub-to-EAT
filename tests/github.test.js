@@ -1194,35 +1194,6 @@ test("a dependency listing sends per_page=100 and follows its Link pagination", 
   assert.equal(seen.length, 2);
 });
 
-test("a dependency listing stops following Link at the page cap", async () => {
-  let pages = 0;
-  let base = "";
-  await withGitHub(
-    (req, res) => {
-      const { pathname } = new URL(req.url ?? "", "http://x");
-      if (pathname === "/repos/o/r/issues") return json(res, 200, [{ number: 7 }]);
-      if (pathname !== "/repos/o/r/issues/7/dependencies/blocked_by") return json(res, 200, []);
-      pages += 1;
-      json(res, 200, [{ number: 1000 + pages, title: "x" }], {
-        link: `<${base}/repos/o/r/issues/7/dependencies/blocked_by?page=${pages + 1}>; rel="next"`,
-      });
-    },
-    async (started) => {
-      base = started;
-      /** @type {string[]} */
-      const warnings = [];
-      // Enrichment-only: the runaway costs #7 its blockers, never the run.
-      const fetched = await new GitHubClient("o", "r", {
-        apiBase: base,
-        warn: (m) => warnings.push(m),
-      }).fetchAll({ dependencies: true });
-      assert.equal(fetched.blockedBy.has("7"), false);
-      assert.ok(warnings.join("").includes("#7"), warnings.join(""));
-    },
-  );
-  assert.equal(pages, MAX_DEPENDENCY_PAGES);
-});
-
 // github.rs `fetch_blocked_by_for_issues` logs a warning and yields an empty
 // list for that issue whatever the failure was — the run never fails.
 for (const status of [404, 415, 500]) {
@@ -1266,19 +1237,6 @@ test("an anonymous run that cannot afford the dependency stage fails fast naming
   assert.deepEqual(blockedPaths(seen), [], "fails before spending a single dependency request");
 });
 
-test("a token lifts the budget, so the same run proceeds", async () => {
-  const { seen, handler } = dependencyHandler({
-    issues: [{ number: 7 }, { number: 12 }, { number: 20 }],
-    rateRemaining: "2",
-  });
-  await withGitHub(handler, async (base) => {
-    await new GitHubClient("o", "r", { apiBase: base, token: "t" }).fetchAll({
-      dependencies: true,
-    });
-  });
-  assert.equal(blockedPaths(seen).length, 3);
-});
-
 test("an anonymous run with headroom, or a host that sends no budget header, proceeds", async () => {
   for (const rateRemaining of ["3", undefined]) {
     const { seen, handler } = dependencyHandler({
@@ -1297,4 +1255,159 @@ test("an anonymous run with headroom, or a host that sends no budget header, pro
 test("the dependency page cap and API version are the server importer's", () => {
   assert.equal(MAX_DEPENDENCY_PAGES, 20);
   assert.equal(DEPENDENCIES_API_VERSION, "2026-03-10");
+});
+
+// --- what the dependency stage swallows, and what it must not (review #62) ----
+
+test("a 401 on a dependency listing fails the run instead of being reported as a host quirk", async () => {
+  const { seen, handler } = dependencyHandler({
+    issues: [{ number: 7 }, { number: 12 }, { number: 20 }],
+    depStatus: { 7: 401, 12: 401, 20: 401 },
+  });
+  await withGitHub(handler, async (base) => {
+    /** @type {string[]} */
+    const warnings = [];
+    await assert.rejects(
+      () =>
+        new GitHubClient("o", "r", { apiBase: base, warn: (m) => warnings.push(m) }).fetchAll({
+          dependencies: true,
+        }),
+      (/** @type {any} */ err) => {
+        assert.ok(err instanceof GitHubAuthError, `got ${err?.constructor?.name}`);
+        return true;
+      },
+    );
+    assert.equal(warnings.join(""), "", "a revoked token is not a degraded stage");
+  });
+  assert.equal(blockedPaths(seen).length, 1, "stops at the first 401, not once per issue");
+});
+
+test("a transport failure stops the dependency stage instead of retrying every issue", async () => {
+  /** @type {string[]} */
+  const paths = [];
+  await withGitHub(
+    (req, res) => {
+      const { pathname } = new URL(req.url ?? "", "http://x");
+      if (pathname === "/repos/o/r/issues") {
+        return json(
+          res,
+          200,
+          [1, 2, 3, 4, 5, 6, 7, 8].map((number) => ({ number })),
+        );
+      }
+      if (!pathname.endsWith("/dependencies/blocked_by")) return json(res, 200, []);
+      paths.push(pathname);
+      req.destroy();
+    },
+    async (base) => {
+      /** @type {string[]} */
+      const warnings = [];
+      const fetched = await new GitHubClient("o", "r", {
+        apiBase: base,
+        warn: (m) => warnings.push(m),
+      }).fetchAll({ dependencies: true });
+      assert.equal(fetched.blockedBy.size, 0);
+      const text = warnings.join("");
+      // The cause it actually saw, not a diagnosis it never established.
+      assert.match(text, /could not reach GitHub/);
+      assert.ok(
+        !text.includes("does not serve the issue-dependencies API"),
+        `a network fault is not a capability fact: ${text}`,
+      );
+    },
+  );
+  assert.ok(paths.length < 8, `stopped early, attempted ${paths.length} of 8`);
+});
+
+test("a route-level failure still degrades, and only 404/415 earns the API-version hint", async () => {
+  for (const [status, hinted] of /** @type {[number, boolean][]} */ ([
+    [404, true],
+    [415, true],
+    [500, false],
+  ])) {
+    const { handler } = dependencyHandler({
+      issues: [{ number: 7 }, { number: 12 }, { number: 20 }],
+      depStatus: { 7: status, 12: status, 20: status },
+    });
+    await withGitHub(handler, async (base) => {
+      /** @type {string[]} */
+      const warnings = [];
+      const fetched = await new GitHubClient("o", "r", {
+        apiBase: base,
+        warn: (m) => warnings.push(m),
+      }).fetchAll({ dependencies: true });
+      assert.equal(fetched.blockedBy.size, 0);
+      const text = warnings.join("");
+      assert.equal(
+        text.includes(`version ${DEPENDENCIES_API_VERSION}`),
+        hinted,
+        `${status}: ${text}`,
+      );
+      assert.match(text, /#7, #12, #20/);
+    });
+  }
+});
+
+test("a dependency listing keeps the pages it collected when it hits the page cap", async () => {
+  let pages = 0;
+  let base = "";
+  await withGitHub(
+    (req, res) => {
+      const { pathname } = new URL(req.url ?? "", "http://x");
+      if (pathname === "/repos/o/r/issues") return json(res, 200, [{ number: 7 }]);
+      if (pathname !== "/repos/o/r/issues/7/dependencies/blocked_by") return json(res, 200, []);
+      pages += 1;
+      json(res, 200, [{ number: 1000 + pages, title: "x" }], {
+        link: `<${base}/repos/o/r/issues/7/dependencies/blocked_by?page=${pages + 1}>; rel="next"`,
+      });
+    },
+    async (started) => {
+      base = started;
+      /** @type {string[]} */
+      const warnings = [];
+      // github.rs `list_blocked_by` breaks at the cap and keeps what it fetched.
+      const fetched = await new GitHubClient("o", "r", {
+        apiBase: base,
+        warn: (m) => warnings.push(m),
+      }).fetchAll({ dependencies: true });
+      assert.equal((fetched.blockedBy.get("7") ?? []).length, MAX_DEPENDENCY_PAGES);
+      assert.equal(warnings.join(""), "", "truncation is not a degraded listing");
+    },
+  );
+  assert.equal(pages, MAX_DEPENDENCY_PAGES);
+});
+
+test("a tokenised run short of the budget is refused too, without the --token advice", async () => {
+  const { seen, handler } = dependencyHandler({
+    issues: [{ number: 7 }, { number: 12 }, { number: 20 }],
+    rateRemaining: "2",
+  });
+  await withGitHub(handler, async (base) => {
+    await assert.rejects(
+      () =>
+        new GitHubClient("o", "r", { apiBase: base, token: "t" }).fetchAll({
+          dependencies: true,
+        }),
+      (/** @type {any} */ err) => {
+        assert.ok(err instanceof RateBudgetError, `got ${err?.constructor?.name}`);
+        assert.ok(!err.message.includes("--token"), err.message);
+        assert.match(err.message, /\b2\b/);
+        return true;
+      },
+    );
+  });
+  assert.deepEqual(blockedPaths(seen), [], "a near-ceiling PAT spends nothing either");
+});
+
+test("a tokenised run with headroom proceeds", async () => {
+  const { seen, handler } = dependencyHandler({
+    issues: [{ number: 7 }, { number: 12 }, { number: 20 }],
+    rateRemaining: "3000",
+  });
+  await withGitHub(handler, async (base) => {
+    await new GitHubClient("o", "r", { apiBase: base, token: "t" }).fetchAll({
+      dependencies: true,
+    });
+  });
+  assert.equal(blockedPaths(seen).length, 3);
 });

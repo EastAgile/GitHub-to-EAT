@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   blockedByDesc,
+  clampPlan,
   DEFAULT_CUSTOMIZATION,
+  FALLBACK_LIMITS,
   inferStoryType,
   mapRepo,
   milestoneEpicDescription,
@@ -234,8 +236,9 @@ test("parity: `#[serde(default)]` means an absent title maps to the empty string
 });
 
 test("parity: rows with number <= 0 are skipped and the rest keep GitHub's order", () => {
-  // `if row.number <= 0 || seen.contains(...) { continue }` — serde defaults a
-  // missing/unparseable number to 0, which the same guard drops.
+  // `if row.number <= 0 || seen.contains(...) { continue }` — `#[serde(default)]`
+  // turns a *missing* number into 0, which the same guard drops. (A wrong-typed
+  // one is a serde error server-side, costing that page; the CLI drops just the row.)
   const rows = [
     { number: 90, title: "Upstream fix" },
     { number: 0, title: "defaulted" },
@@ -303,4 +306,67 @@ test("parity: a release carries no blockers — release_to_record leaves the lis
     blockedBy: new Map([["release-900", [{ number: 90, title: "Upstream fix" }]]]),
   });
   assert.deepEqual(stories[0].blockers, []);
+});
+
+// The two dependency divergences CONTRACT.md's deps section names, pinned so the
+// claim cannot rot into prose (see "Engine parity" — a divergence ships with a test).
+
+test("divergence: the CLI clamps a blocker in bytes where the importer takes 255 chars", () => {
+  // `POST /blockers` validates with `validate_length` → Rust's `str::len()` (bytes),
+  // so the CLI must cut earlier than common.rs's `desc.chars().take(255)` — server
+  // ask #35629 (/s/y9q8ea68) tracks reconciling the two.
+  const title = "é".repeat(238); // 255 chars once wrapped, 493 bytes
+  const desc = blockedByDesc(90, title);
+  assert.equal([...desc].length, 255, "exactly the server importer's char cut");
+  assert.ok(Buffer.byteLength(desc, "utf8") > 255, "and past the public route's byte limit");
+
+  const op = mapRepo({
+    issues: [issue({ number: 7 })],
+    comments: [],
+    labels: [],
+    blockedBy: new Map([["7", [{ number: 90, title }]]]),
+  }).stories[0];
+  const clamped = /** @type {any} */ (
+    clampPlan({ labels: [], stories: [op] }, FALLBACK_LIMITS).stories[0]
+  ).blockers[0].desc;
+  // 254, not 255: the cut never splits a character, so the last é does not fit.
+  assert.ok(Buffer.byteLength(clamped, "utf8") <= 255, "inside the route's byte limit");
+  assert.ok(
+    [...clamped].length < 255,
+    `the CLI keeps fewer characters by design, got ${[...clamped].length}`,
+  );
+  assert.ok(desc.startsWith(clamped), "a prefix of what the importer would write");
+});
+
+test("divergence: the CLI cannot set blocker_display_order; the importer writes the index", () => {
+  // `CreateBlocker` is `{ blocker_desc, resolved }` — no order field — so every row
+  // the direct engine writes keeps the column's NOT NULL DEFAULT 0, where
+  // common.rs pushes `idx as i64`. Insertion order is all the writer controls.
+  const { stories } = mapRepo({
+    issues: [issue({ number: 7 })],
+    comments: [],
+    labels: [],
+    blockedBy: new Map([
+      [
+        "7",
+        [
+          { number: 12, title: "Second" },
+          { number: 90, title: "Upstream fix" },
+        ],
+      ],
+    ]),
+  });
+  const blockers = /** @type {any} */ (stories[0]).blockers;
+  assert.deepEqual(
+    blockers.map((/** @type {any} */ b) => Object.keys(b).sort()),
+    [
+      ["desc", "resolved"],
+      ["desc", "resolved"],
+    ],
+    "nothing order-shaped to send",
+  );
+  assert.deepEqual(
+    blockers.map((/** @type {any} */ b) => b.desc),
+    ["Blocked by #12 (Second)", "Blocked by #90 (Upstream fix)"],
+  );
 });

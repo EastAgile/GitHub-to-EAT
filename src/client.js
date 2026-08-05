@@ -225,6 +225,26 @@ export class EATClient {
   }
 
   /**
+   * True when the server's import endpoint accepts `include_dependencies`
+   * (EAT #35491, the server half of issue-dependency import).
+   *
+   * Feature-detected like `dry_run`: the import body rejects no unknown field,
+   * so sending the flag to a server that predates it imports zero blockers and
+   * still reports success. Any error (404, auth, parse) counts as "not
+   * supported". See CONTRACT.md "Issue dependencies → story blockers".
+   *
+   * @returns {Promise<boolean>}
+   */
+  async supportsDependencyImport() {
+    const spec = await this.#openapi();
+    for (const [path, ops] of Object.entries(spec?.paths ?? {})) {
+      if (!path.endsWith("/import/json")) continue;
+      if ("include_dependencies" in EATClient.#postProperties(spec, ops)) return true;
+    }
+    return false;
+  }
+
+  /**
    * True when the project-scoped story-create endpoint accepts the re-import
    * dedup pair (`import_source` + `import_external_id`, EAT #31427). The pair
    * ships together, so one probe of `import_source` gates both writing it and

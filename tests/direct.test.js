@@ -2164,6 +2164,10 @@ test("a deps dry run reports the extra GitHub requests the flag cost, and writes
     assert.equal(plan.dryRun, true);
     assert.match(out.buf, /--include deps/);
     assert.match(out.buf, /2 extra GitHub request/);
+    // The count is per page, so "one per issue" would contradict the number it annotates.
+    assert.match(out.buf, /at least one per issue/);
+    // The preview is not free: `fetchAll` runs before the dry-run branch.
+    assert.match(out.buf, /a real run spends them again/);
     assert.equal(mock.state.stories[91], undefined);
   } finally {
     await mock.close();
@@ -2207,6 +2211,69 @@ test("a re-run posts no duplicate blocker rows", async () => {
       ["Blocked by #7 (newer open issue)", "Blocked by #90 (Upstream fix)"],
     );
     assert.equal(mock.state.requests.filter((r) => r.endsWith("/blockers")).length, 2);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a story left with half its blockers by an interrupted run warns on the re-run", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    // #7 carries no comments, so only a blocker count can reveal the interruption:
+    // blockers are written between the tasks and the comments.
+    const github = {
+      fetchAll: async () => ({
+        ...fetchedRepo(),
+        blockedBy: new Map([
+          [
+            "7",
+            [
+              { number: 90, title: "Upstream fix" },
+              { number: 91, title: "Other fix" },
+            ],
+          ],
+        ]),
+        dependencyRequests: 2,
+      }),
+    };
+    let writes = 0;
+    const failing = {
+      createLabel: client.createLabel.bind(client),
+      createStory: client.createStory.bind(client),
+      createTask: client.createTask.bind(client),
+      createComment: client.createComment.bind(client),
+      listStoryPage: client.listStoryPage.bind(client),
+      listEpics: client.listEpics.bind(client),
+      createEpic: client.createEpic.bind(client),
+      createBlocker: async (/** @type {any[]} */ ...args) => {
+        writes += 1;
+        if (writes > 1) throw new AuthError("simulated mid-blocker failure");
+        // @ts-expect-error — forwarding the real client's own argument list
+        return client.createBlocker(...args);
+      },
+    };
+    await assert.rejects(
+      runDirect(failing, 91, "o", "r", {
+        included: ["issues", "deps"],
+        stream: capture(),
+        github,
+      }),
+      AuthError,
+    );
+    const half = mock.state.stories[91].find((s) => s.title === "newer open issue");
+    assert.equal(half.blockers.length, 1, "one blocker landed before the failure");
+    assert.equal(half.comments.length, 0, "and no comment count can betray the gap");
+
+    const out = capture();
+    const rerun = await runDirect(client, 91, "o", "r", {
+      included: ["issues", "deps"],
+      stream: out,
+      github,
+    });
+    assert.equal(rerun.skipped, 2, "the half-written story stays skipped");
+    assert.match(out.buf, /warning: issue #7 .*blockers 1\/2/);
+    assert.match(out.buf, /delete that story in EAT and re-run/);
   } finally {
     await mock.close();
   }

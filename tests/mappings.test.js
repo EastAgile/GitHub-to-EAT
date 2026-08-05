@@ -449,3 +449,21 @@ test("only the direct engine's deps legend names the request budget it spends", 
 test("a run without deps prints no dependency line", () => {
   assert.ok(!renderLegend(["issues"], "direct").includes("Blocked by"));
 });
+
+test("both engines' deps legends state the unimported-blocker rule", () => {
+  // `github.rs` never intersects `blocked_by` with the import set either, so the
+  // server legend that omitted this under-informed; only the cost line is engine-shaped.
+  for (const engine of /** @type {const} */ (["server", "direct"])) {
+    assert.match(
+      renderLegend(["issues", "deps"], engine),
+      /whether or not the blocking issue is itself imported/,
+      engine,
+    );
+  }
+});
+
+test("the deps cost line is a lower bound, and direct-only", () => {
+  const direct = renderLegend(["issues", "deps"], "direct");
+  assert.match(direct, /at least one extra GitHub request per issue/);
+  assert.ok(!renderLegend(["issues", "deps"], "server").includes("extra GitHub request"));
+});

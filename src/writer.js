@@ -37,6 +37,9 @@ import { runWithProgress } from "./progress.js";
  *   epics?: import("./mapping.js").EpicOp[] }} WritePlan
  */
 
+/** The plan carries blockers but this client cannot write them (`createBlocker` absent). */
+export class BlockerWriteUnsupported extends EATError {}
+
 /**
  * @typedef {object} WriteResult
  * @property {number} epicsCreated
@@ -141,6 +144,17 @@ export async function writePlan(client, projectId, plan, options = {}) {
   } = options;
   /** @template T @param {() => Promise<T>} fn */
   const retrying = (fn) => withRetry(fn, retryAttempts, retryDelayMs);
+
+  // Checked before the first write: the same miss discovered mid-plan is a bare
+  // TypeError, and an import never updates the stories it already created.
+  if (
+    typeof client.createBlocker !== "function" &&
+    plan.stories.some((op) => (op.blockers ?? []).length > 0)
+  ) {
+    throw new BlockerWriteUnsupported(
+      "this client cannot write blockers (no createBlocker), but the plan carries them",
+    );
+  }
 
   const result = {
     epicsCreated: 0,
@@ -285,12 +299,12 @@ export async function writePlan(client, projectId, plan, options = {}) {
             );
             result.tasks += 1;
           }
-          // Written sequentially so `blocker_display_order` lands in plan order,
-          // which is GitHub's own `blocked_by` order.
+          // Written sequentially, in GitHub's own `blocked_by` order: the public
+          // route sets no display order, so insertion order is all the CLI controls.
           for (const [i, blocker] of (op.blockers ?? []).entries()) {
             await retrying(() =>
-              // Non-null: only a plan built with `--include deps` carries blockers,
-              // and that path always runs against the real client.
+              // Non-null: the guard at the top refused this whole plan if the
+              // method were missing, before a single write.
               /** @type {NonNullable<WriterClient["createBlocker"]>} */ (client.createBlocker)(
                 projectId,
                 created.story_id,

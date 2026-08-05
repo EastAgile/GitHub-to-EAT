@@ -602,3 +602,31 @@ test("a duplicate epic surfaces as ConflictError with the server's conflict code
     await mock.close();
   }
 });
+
+// --- dependency-import feature detection (story #31934) -----------------------
+
+test("supportsDependencyImport is true when the import body advertises the field", async () => {
+  const mock = await startMockServer();
+  try {
+    assert.equal(await new EATClient(mock.baseUrl, "tok").supportsDependencyImport(), true);
+  } finally {
+    await mock.close();
+  }
+  // A server that predates EAT #35491: the field is absent and, since the import
+  // body rejects no unknown field, sending it anyway would import zero blockers.
+  const older = await startMockServer(makeState({ dependencyImport: false }));
+  try {
+    assert.equal(await new EATClient(older.baseUrl, "tok").supportsDependencyImport(), false);
+  } finally {
+    await older.close();
+  }
+});
+
+test("supportsDependencyImport is false when /openapi.json is absent", async () => {
+  const mock = await startMockServer(makeState({ serverDryRun: false }));
+  try {
+    assert.equal(await new EATClient(mock.baseUrl, "tok").supportsDependencyImport(), false);
+  } finally {
+    await mock.close();
+  }
+});

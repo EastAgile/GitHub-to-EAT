@@ -4,10 +4,12 @@
  * Pulls a repo's issues, their comments, and labels from the repo-wide list
  * endpoints (`per_page=100`, `Link`-header pagination), which keeps a mid-sized flat
  * repo inside the anonymous 60 req/h budget; a token (`--token` / `GITHUB_TOKEN`)
- * lifts the ceiling to 5000/h and reaches private repos. The one per-issue call is the
- * sub-issue listing, charged only to rows that advertise one — a hierarchy-heavy repo
- * is the term that can push a run past the anonymous budget, so that stage degrades
- * rather than failing the run. Zero runtime deps: global `fetch` only.
+ * lifts the ceiling to 5000/h and reaches private repos. Two stages are per-issue: the
+ * sub-issue listing, charged only to rows that advertise one, and — under
+ * `--include deps` — the dependency listing, which has no rollup to gate on and so
+ * bills every issue, making it the dominant budget term. Both degrade rather than
+ * failing the run; the dependency stage refuses up front when the observed budget
+ * cannot cover it. Zero runtime deps: global `fetch` only.
  */
 
 import { scrubControl } from "./progress.js";
@@ -29,9 +31,18 @@ export const MAX_DEPENDENCY_PAGES = 20;
 export const DEPENDENCIES_API_VERSION = "2026-03-10";
 // A repo-wide failure would otherwise render one line per advertised parent.
 const MAX_NAMED_FAILURES = 10;
+// A partition would otherwise cost one doomed request per issue, each armed with
+// the full per-request timeout — hours under a spinner on a large repo.
+const MAX_CONSECUTIVE_TRANSPORT_FAILURES = 3;
 
 /** Base class for GitHub fetcher errors (kept distinct from the EAT errors). */
-export class GitHubError extends Error {}
+export class GitHubError extends Error {
+  /** @type {number | undefined} the HTTP status behind it, when a response caused it */
+  status;
+}
+
+/** A request never reached a response: connection failure, reset, or timeout. */
+export class GitHubTransportError extends GitHubError {}
 
 /** The repo does not exist, or the token can't see it (HTTP 404). */
 export class RepoNotFoundError extends GitHubError {}
@@ -141,9 +152,13 @@ export class GitHubClient {
       err
     );
     if (e?.name === "TimeoutError" || e?.name === "AbortError") {
-      return new GitHubError(`GitHub request timed out after ${Math.round(this.timeout)}s`);
+      return new GitHubTransportError(
+        `GitHub request timed out after ${Math.round(this.timeout)}s`,
+      );
     }
-    return new GitHubError(`could not reach GitHub: ${e?.cause?.message ?? e?.message ?? err}`);
+    return new GitHubTransportError(
+      `could not reach GitHub: ${e?.cause?.message ?? e?.message ?? err}`,
+    );
   }
 
   /**
@@ -171,9 +186,11 @@ export class GitHubClient {
     }
 
     if (response.status === 404) {
-      throw new RepoNotFoundError(
+      const notFound = new RepoNotFoundError(
         `repo ${this.owner}/${this.repo} not found (private, renamed, or no access with this token)`,
       );
+      notFound.status = 404;
+      throw notFound;
     }
     // Rate limits arrive as 429, primary-limit 403 (remaining 0), or
     // secondary-limit 403 (retry-after with budget left).
@@ -203,7 +220,11 @@ export class GitHubClient {
       // An unreadable or hostile error body must not upgrade a clean HTTP error
       // into a crash, nor reach the terminal with control characters intact.
       const text = await response.text().catch(() => "");
-      throw new GitHubError(`GitHub request failed (${response.status}): ${scrubControl(text)}`);
+      const failed = new GitHubError(
+        `GitHub request failed (${response.status}): ${scrubControl(text)}`,
+      );
+      failed.status = response.status;
+      throw failed;
     }
     return response;
   }
@@ -212,12 +233,16 @@ export class GitHubClient {
    * Follow `Link` pagination from `path`, concatenating every JSON array page.
    *
    * @param {string} path repo-relative path with query (e.g. `/issues?state=all`)
-   * @param {number} [maxPages] refuse to follow `Link` past this many pages
-   * @param {Record<string, string>} [headers] per-request header overrides
-   * @param {() => void} [onPage] called once per request, so a stage can price itself
+   * @param {{ maxPages?: number, headers?: Record<string, string>, onPage?: () => void,
+   *   truncateAtCap?: boolean }} [options] `maxPages` refuses to follow `Link` past that
+   *   many pages; `onPage` is called once per request, so a stage can price itself;
+   *   `truncateAtCap` returns the pages already collected instead of throwing there
    * @returns {Promise<any[]>}
    */
-  async #paginate(path, maxPages = Number.POSITIVE_INFINITY, headers, onPage) {
+  async #paginate(
+    path,
+    { maxPages = Number.POSITIVE_INFINITY, headers, onPage, truncateAtCap = false } = {},
+  ) {
     /** @type {any[]} */
     const out = [];
     let pages = 0;
@@ -254,6 +279,7 @@ export class GitHubClient {
         );
       }
       if (next && pages >= maxPages) {
+        if (truncateAtCap) break;
         throw new GitHubError(
           `GitHub kept paginating ${path.split("?")[0]} past ${maxPages} pages; refusing to follow further`,
         );
@@ -298,7 +324,7 @@ export class GitHubClient {
    * @returns {Promise<any[]>}
    */
   async listReleases() {
-    return this.#paginate("/releases?per_page=100", MAX_RELEASE_PAGES);
+    return this.#paginate("/releases?per_page=100", { maxPages: MAX_RELEASE_PAGES });
   }
 
   /**
@@ -308,10 +334,9 @@ export class GitHubClient {
    * @returns {Promise<any[]>}
    */
   async #listSubIssues(number) {
-    return this.#paginate(
-      `/issues/${encodeURIComponent(number)}/sub_issues?per_page=100`,
-      MAX_SUB_ISSUE_PAGES,
-    );
+    return this.#paginate(`/issues/${encodeURIComponent(number)}/sub_issues?per_page=100`, {
+      maxPages: MAX_SUB_ISSUE_PAGES,
+    });
   }
 
   /**
@@ -401,28 +426,36 @@ export class GitHubClient {
   async #listBlockedBy(number) {
     return this.#paginate(
       `/issues/${encodeURIComponent(number)}/dependencies/blocked_by?per_page=100`,
-      MAX_DEPENDENCY_PAGES,
-      { "X-GitHub-Api-Version": DEPENDENCIES_API_VERSION },
-      // Counted per page, not per issue: an issue past 100 dependencies costs
-      // more than one request, and the dry run must not understate the budget.
-      () => {
-        this.#dependencyRequests += 1;
+      {
+        maxPages: MAX_DEPENDENCY_PAGES,
+        headers: { "X-GitHub-Api-Version": DEPENDENCIES_API_VERSION },
+        // Counted per page, not per issue: an issue past 100 dependencies costs
+        // more than one request, and the dry run must not understate the budget.
+        onPage: () => {
+          this.#dependencyRequests += 1;
+        },
+        // github.rs `list_blocked_by` breaks at the cap and keeps the rows it has;
+        // throwing here would cost that issue every blocker already fetched.
+        truncateAtCap: true,
       },
     );
   }
 
   /**
    * Refuse the stage before it spends a request, rather than dying partway with half a
-   * repo's blockers written. Only anonymous runs (60/h) are gated; a headerless host cannot be.
+   * repo's blockers written. Gated on the budget actually observed, not on auth: a
+   * near-ceiling PAT is exactly the case this exists to catch. A headerless host cannot be gated.
    *
-   * @param {number} cost one request per issue — the listing carries no rollup to gate on
+   * @param {number} cost a lower bound — one request per issue, more where a listing paginates
    */
   #assertBudgetFor(cost) {
-    if (this.#authenticated || this.#remaining === null || this.#remaining >= cost) return;
+    if (this.#remaining === null || this.#remaining >= cost) return;
     throw new RateBudgetError(
-      `--include deps needs ${cost} more GitHub request(s) (one per issue) and this anonymous ` +
-        `run has ${this.#remaining} left of GitHub's 60/h budget. Pass --token / GITHUB_TOKEN ` +
-        "to raise the limit (5000/h), or drop deps from --include.",
+      `--include deps needs at least ${cost} more GitHub request(s) (at least one per issue) ` +
+        `and this run has ${this.#remaining} left of GitHub's rate limit. ` +
+        (this.#authenticated
+          ? "Wait for the limit to reset, or drop deps from --include."
+          : "Pass --token / GITHUB_TOKEN to raise the limit (5000/h), or drop deps from --include."),
     );
   }
 
@@ -442,26 +475,47 @@ export class GitHubClient {
     const blockedBy = new Map();
     /** @type {string[]} */
     const failed = [];
-    /** @type {RateLimitError | null} */
-    let limited = null;
+    /** @type {GitHubError | null} */
+    let firstFailure = null;
+    // Only a route-level refusal is evidence about the route; anything else must not
+    // be reported as one.
+    let allRouteRefusals = true;
+    /** @type {GitHubError | null} */
+    let stopped = null;
+    let consecutiveTransport = 0;
     for (const number of numbers) {
       /** @type {any[]} */
       let rows;
       try {
         rows = await this.#listBlockedBy(number);
       } catch (err) {
+        // A revoked token is not a degraded stage: every later write would fail too,
+        // and reporting it as a missing route would send the reader after the wrong thing.
+        if (err instanceof GitHubAuthError) throw err;
+        if (!(err instanceof GitHubError)) throw err;
         // A limit stops the stage — every remaining listing would fail the same way.
         if (err instanceof RateLimitError) {
-          limited = err;
+          stopped = err;
           break;
         }
-        if (!(err instanceof GitHubError)) throw err;
         failed.push(number);
+        firstFailure ??= err;
+        if (err.status !== 404 && err.status !== 415) allRouteRefusals = false;
+        if (err instanceof GitHubTransportError) {
+          consecutiveTransport += 1;
+          if (consecutiveTransport >= MAX_CONSECUTIVE_TRANSPORT_FAILURES) {
+            stopped = err;
+            break;
+          }
+        } else {
+          consecutiveTransport = 0;
+        }
         continue;
       }
+      consecutiveTransport = 0;
       if (rows.length) blockedBy.set(number, rows);
     }
-    this.#warnBlockedByLoss(failed, limited);
+    this.#warnBlockedByLoss(failed, { firstFailure, allRouteRefusals, stopped });
     return blockedBy;
   }
 
@@ -469,13 +523,16 @@ export class GitHubClient {
    * Report what a degraded dependency stage cost, in one line however many issues failed.
    *
    * @param {string[]} failed issues whose listing could not be read
-   * @param {RateLimitError | null} limited the limit that stopped the stage, if any
+   * @param {{ firstFailure: GitHubError | null, allRouteRefusals: boolean,
+   *   stopped: GitHubError | null }} context `stopped` is the limit or outage that ended
+   *   the stage early; the API-version hint rides only on `allRouteRefusals`
    */
-  #warnBlockedByLoss(failed, limited) {
+  #warnBlockedByLoss(failed, { firstFailure, allRouteRefusals, stopped }) {
+    const cause = firstFailure ? ` (${firstFailure.message})` : "";
     if (failed.length === 1) {
       this.#warn(
-        `warning: could not list issue #${failed[0]}'s dependencies — issue #${failed[0]} is ` +
-          "imported without its 'Blocked by #n' blockers.\n",
+        `warning: could not list issue #${failed[0]}'s dependencies${cause} — issue #${failed[0]} ` +
+          "is imported without its 'Blocked by #n' blockers.\n",
       );
     } else if (failed.length > 1) {
       const named = failed
@@ -486,20 +543,25 @@ export class GitHubClient {
       this.#warn(
         `warning: could not list dependencies for ${failed.length} issues: ${named}` +
           `${rest > 0 ? `, and ${rest} more` : ""} — those stories are imported without their ` +
-          "'Blocked by #n' blockers. A failure this wide usually means the host does not serve " +
-          `the issue-dependencies API (version ${DEPENDENCIES_API_VERSION}).\n`,
+          `'Blocked by #n' blockers. First failure${cause || ": unknown"}.` +
+          (allRouteRefusals
+            ? " A failure this wide usually means the host does not serve the " +
+              `issue-dependencies API (version ${DEPENDENCIES_API_VERSION}).`
+            : "") +
+          "\n",
       );
     }
-    if (limited) {
+    if (stopped) {
       this.#warn(
-        `warning: ${limited.message} Dependency blockers stop here; the rest of the import ` +
+        `warning: ${stopped.message} Dependency blockers stop here; the rest of the import ` +
           "continues without them, and an import never updates a story it already created.\n",
       );
     }
   }
 
   /**
-   * Fetch issues, comments, labels, and the sub-issue hierarchy in one call.
+   * Fetch issues, comments, labels and the sub-issue hierarchy in one call, plus the
+   * releases (`--include releases`) and each issue's blockers (`--include deps`).
    *
    * The repo-wide comments endpoint includes PR conversation comments; only
    * comments on kept issues survive, so mapping never sees PR chatter.

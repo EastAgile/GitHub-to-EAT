@@ -8,7 +8,7 @@ import { AuthError } from "../src/client.js";
 import { runDirect as realRunDirect } from "../src/direct.js";
 import { GitHubClient, GitHubError } from "../src/github.js";
 import { MAPPINGS } from "../src/mappings.js";
-import { startMockServer } from "../src/mockserver.js";
+import { makeState, startMockServer } from "../src/mockserver.js";
 import { VERSION } from "../src/version.js";
 import { capture, inTempDir, withEnv } from "./helpers.js";
 
@@ -1688,4 +1688,124 @@ test("--engine server --include issues,milestones prints the one line it always 
       assert.equal(err.buf, "");
     }),
   );
+});
+
+// --- deps against a server that cannot import them (story #31934) -------------
+
+/**
+ * Run `main` against a mock built from `state`, with no direct-engine seam —
+ * the server engine's own path, so the capability gate is what is under test.
+ *
+ * @param {string[]} argv
+ * @param {import("../src/mockserver.js").MockState} state
+ */
+async function runServerEngine(argv, state) {
+  const mock = await startMockServer(state);
+  try {
+    return await inTempDir(() =>
+      withEnv(
+        { EAT_AGENT_KEY: "key", EAT_API_BASE: mock.baseUrl, EAT_APP_BASE: "https://eat.example" },
+        async () => {
+          const out = capture();
+          const err = capture();
+          const code = await main(argv, { confirm: null, stdout: out, stderr: err });
+          return { code, stdout: out.buf, stderr: err.buf, imports: mock.state.imports.length };
+        },
+      ),
+    );
+  } finally {
+    await mock.close();
+  }
+}
+
+test("--include deps is refused on a server whose import body has no include_dependencies", async () => {
+  const { code, stdout, stderr, imports } = await runServerEngine(
+    ["--project", "91", "--repo", "o/r", "--include", "issues,deps", "-y"],
+    makeState({ dependencyImport: false }),
+  );
+  assert.equal(code, 1);
+  assert.equal(imports, 0, "refused before the import request");
+  assert.match(stderr, /include_dependencies/);
+  assert.match(stderr, /--engine direct/);
+  // The legend must not promise blockers a run is about to be refused for.
+  assert.ok(!stdout.includes("Import mapping (GitHub"), stdout);
+  assert.ok(!stdout.includes("Blocked by"), stdout);
+});
+
+test("--include deps proceeds when the server advertises include_dependencies", async () => {
+  const { code, stdout, imports } = await runServerEngine(
+    ["--project", "91", "--repo", "o/r", "--include", "issues,deps", "-y"],
+    makeState(),
+  );
+  assert.equal(code, 0);
+  assert.equal(imports, 1);
+  assert.match(stdout, /Blocked by/, "the legend still promises what the server will write");
+});
+
+test("a run without deps never probes the server's dependency support", async () => {
+  const { code, imports } = await runServerEngine(
+    ["--project", "91", "--repo", "o/r", "-y"],
+    makeState({ dependencyImport: false }),
+  );
+  assert.equal(code, 0);
+  assert.equal(imports, 1);
+});
+
+test("--dry-run does not soften the deps refusal — the plan would be a promise too", async () => {
+  const { code, stdout } = await runServerEngine(
+    ["--project", "91", "--repo", "o/r", "--include", "issues,deps", "--dry-run"],
+    makeState({ dependencyImport: false }),
+  );
+  assert.equal(code, 1);
+  assert.ok(!stdout.includes("Dry run:"), stdout);
+});
+
+test("a dependency budget refusal reaches the CLI as exit 1 with the --token advice (AC 3)", async () => {
+  // AC 3 end to end: RateBudgetError must stay inside the GitHubError hierarchy
+  // cli.main catches, or the refusal becomes an unhandled rejection.
+  const server = http.createServer((req, res) => {
+    const { pathname } = new URL(req.url ?? "", "http://x");
+    const body = pathname === "/repos/o/r/issues" ? [{ number: 7 }, { number: 12 }] : [];
+    res.writeHead(200, { "Content-Type": "application/json", "x-ratelimit-remaining": "1" });
+    res.end(JSON.stringify(body));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(undefined)));
+  const { port } = /** @type {import("node:net").AddressInfo} */ (server.address());
+  try {
+    await inTempDir(() =>
+      withEnv({ EAT_AGENT_KEY: "key", EAT_API_BASE: "http://127.0.0.1:9/api/v1" }, async () => {
+        const err = capture();
+        const code = await main(
+          [
+            "--project",
+            "91",
+            "--repo",
+            "o/r",
+            "--engine",
+            "direct",
+            "--include",
+            "issues,deps",
+            "-y",
+          ],
+          {
+            stdout: capture(),
+            stderr: err,
+            preflight: async () => preflightResult(),
+            runDirect: (client, project, owner, repo, opts) =>
+              realRunDirect(client, project, owner, repo, {
+                ...opts,
+                github: new GitHubClient(owner, repo, { apiBase: `http://127.0.0.1:${port}` }),
+              }),
+          },
+        );
+        assert.equal(code, 1);
+        assert.match(err.buf, /error: --include deps needs at least 2 more GitHub request/);
+        assert.match(err.buf, /--token/);
+        assert.doesNotMatch(err.buf, /\n\s+at /, "no stack trace");
+      }),
+    );
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(() => resolve(undefined)));
+  }
 });

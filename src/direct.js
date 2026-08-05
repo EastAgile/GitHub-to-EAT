@@ -382,17 +382,24 @@ export async function runDirect(client, projectId, owner, repo, options) {
   const { plan, skipped } = applyDedup(mapped, imported, owner, repo);
   warnEpicsPruned(mapped, plan, imported, included, stream);
 
-  // The marker lands at story-create, before tasks/comments — a run that died
-  // in that window left a skipped-but-incomplete story. Surface it, loudly.
+  // The marker lands at story-create, before tasks/blockers/comments — a run that
+  // died in that window left a skipped-but-incomplete story. Surface it, loudly.
   for (const op of mapped.stories) {
     const row = imported.get(op.external_id);
     if (!row) continue;
     const tasksCount = Number(row.tasks_count ?? 0);
+    const blockerCount = Number(row.blocker_count ?? 0);
     const commentCount = Number(row.comment_count ?? 0);
-    if (tasksCount < op.tasks.length || commentCount < op.comments.length) {
+    const blockers = op.blockers ?? [];
+    if (
+      tasksCount < op.tasks.length ||
+      blockerCount < blockers.length ||
+      commentCount < op.comments.length
+    ) {
       stream?.write(
-        `warning: ${describeOp(op.external_id)} has fewer tasks/comments in EAT than on GitHub ` +
-          `(tasks ${tasksCount}/${op.tasks.length}, comments ${commentCount}/${op.comments.length}) — ` +
+        `warning: ${describeOp(op.external_id)} has fewer tasks/blockers/comments in EAT than on ` +
+          `GitHub (tasks ${tasksCount}/${op.tasks.length}, blockers ${blockerCount}/${blockers.length}, ` +
+          `comments ${commentCount}/${op.comments.length}) — ` +
           "an earlier run may have been interrupted, or the issue changed since import; " +
           "it stays skipped — delete that story in EAT and re-run to repair.\n",
       );
@@ -405,7 +412,8 @@ export async function runDirect(client, projectId, owner, repo, options) {
     if (dependencies) {
       stream?.write(
         `note: --include deps cost ${fetched.dependencyRequests ?? 0} extra GitHub request(s) ` +
-          "(one per issue); an anonymous run has 60/h, a --token run 5000/h.\n",
+          "(at least one per issue, more where a listing paginates); an anonymous run has 60/h, " +
+          "a --token run 5000/h — and a real run spends them again, this preview did not save them.\n",
       );
     }
     // Epics are written first, so a GitHub label sharing a milestone's name arrives as the

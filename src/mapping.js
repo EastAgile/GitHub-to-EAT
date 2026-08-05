@@ -179,10 +179,9 @@ export const RELEASES_LEGEND = releasesLegend();
 const DEPENDENCY_LINE =
   "issue 'blocked by' dependency → a blocker on its story " +
   `('${blockedByDesc(90, "Upstream fix")}', unresolved)`;
+// A lower bound: a listing past 100 dependencies pages, and each page is a request.
 const DEPENDENCY_COST_LINE =
-  "costs one extra GitHub request per issue — an anonymous run (60/h) may need --token";
-// Direct-only: naming a request budget the server never spends would be a lie
-// on the server legend, which holds the platform PAT.
+  "costs at least one extra GitHub request per issue — an anonymous run (60/h) may need --token";
 const DEPENDENCY_UNIMPORTED_LINE =
   "a blocker is recorded whether or not the blocking issue is itself imported";
 
@@ -194,8 +193,10 @@ const DEPENDENCY_UNIMPORTED_LINE =
  * @returns {string[]}
  */
 export function depsLegend(engine = "server") {
-  const lines = [DEPENDENCY_LINE];
-  if (engine === "direct") lines.push(DEPENDENCY_UNIMPORTED_LINE, DEPENDENCY_COST_LINE);
+  // The scope rule holds on both engines; only the request budget is the caller's,
+  // and naming it on the server legend — which holds the platform PAT — would be a lie.
+  const lines = [DEPENDENCY_LINE, DEPENDENCY_UNIMPORTED_LINE];
+  if (engine === "direct") lines.push(DEPENDENCY_COST_LINE);
   return lines;
 }
 

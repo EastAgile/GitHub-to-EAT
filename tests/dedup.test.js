@@ -83,7 +83,7 @@ test("prescanImported walks every cursor page and keeps the matched rows", () =>
     assert.deepEqual([...imported.keys()].sort(), ["3", "7"]);
     assert.equal(imported.get("3").tasks_count, 2);
     assert.equal(calls.length, 2);
-    assert.equal(calls[0].fields, "story_id,description,tasks_count,comment_count");
+    assert.equal(calls[0].fields, "story_id,description,tasks_count,blocker_count,comment_count");
     assert.equal(calls[0].limit, 1);
     assert.equal(calls[1].cursor, "1");
   });
@@ -113,7 +113,10 @@ test("prescanProvenance filters by import_source and keys off import_external_id
     assert.deepEqual([...imported.keys()].sort(), ["3", "7"]);
     assert.equal(imported.get("3").tasks_count, 2);
     assert.equal(calls[0].importSource, "github");
-    assert.equal(calls[0].fields, "story_id,import_external_id,tasks_count,comment_count");
+    assert.equal(
+      calls[0].fields,
+      "story_id,import_external_id,tasks_count,blocker_count,comment_count",
+    );
     assert.equal(calls[1].cursor, "1");
   });
 });
@@ -386,9 +389,9 @@ test("the prescans request labels only when asked, and both do it the same way",
   await prescanProvenance(client, 91);
   await prescanProvenance(client, 91, "github", { withLabels: true });
   assert.deepEqual(fields, [
-    "story_id,description,tasks_count,comment_count",
-    "story_id,description,tasks_count,comment_count,labels",
-    "story_id,import_external_id,tasks_count,comment_count",
-    "story_id,import_external_id,tasks_count,comment_count,labels",
+    "story_id,description,tasks_count,blocker_count,comment_count",
+    "story_id,description,tasks_count,blocker_count,comment_count,labels",
+    "story_id,import_external_id,tasks_count,blocker_count,comment_count",
+    "story_id,import_external_id,tasks_count,blocker_count,comment_count,labels",
   ]);
 });
