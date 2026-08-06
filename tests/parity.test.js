@@ -105,6 +105,212 @@ test("parity: a draft release imports to the backlog, and so does one with no pu
   assert.equal(oneRelease({ body: "   " }).description, null);
 });
 
+// --- pull requests (story #31933) --------------------------------------------
+// From github.rs `issue_to_record`'s `is_pr` branches, expectations copied from its own tests.
+
+const pr = (/** @type {object} */ over = {}) =>
+  issue({
+    number: 10,
+    title: "Add feature X",
+    body: "PR body",
+    html_url: "https://github.com/o/r/pull/10",
+    created_at: "2024-03-01T08:00:00Z",
+    pull_request: { merged_at: null },
+    ...over,
+  });
+const onePr = (/** @type {object} */ over = {}) =>
+  mapRepo({ issues: [pr(over)], comments: [], labels: [] }, DEFAULT_CUSTOMIZATION, {
+    pullRequests: true,
+  }).stories[0];
+
+test("parity: an open PR maps to started and carries the pull-request label", () => {
+  const s = onePr();
+  assert.equal(s.current_state, "started");
+  assert.equal(s.completed_at, null);
+  assert.ok(s.labels.includes("pull-request"));
+  // Type inference runs for PRs too (feature title → feature).
+  assert.equal(s.story_type, "feature");
+  // The PR's own URL rides as a first-class `pull_request` link (story #30751).
+  assert.deepEqual(s.links, [{ url: "https://github.com/o/r/pull/10", link_type: "pull_request" }]);
+});
+
+test("parity: a merged PR maps to accepted, a closed-unmerged one to rejected", () => {
+  const merged = onePr({
+    state: "closed",
+    closed_at: "2024-03-05T12:00:00Z",
+    title: "Fix the thing",
+    pull_request: { merged_at: "2024-03-05T12:00:00Z" },
+  });
+  assert.equal(merged.current_state, "accepted");
+  assert.equal(merged.completed_at, "2024-03-05T12:00:00Z");
+  // Inference applies to PR rows as well: a "Fix …" title is a bug.
+  assert.equal(merged.story_type, "bug");
+
+  const unmerged = onePr({ state: "closed", closed_at: "2024-03-05T12:00:00Z" });
+  assert.equal(unmerged.current_state, "rejected");
+  assert.equal(unmerged.completed_at, "2024-03-05T12:00:00Z");
+  assert.ok(unmerged.labels.includes("pull-request"));
+});
+
+// `closed_reason` is computed `if closed && !is_pr` (github.rs:999), so a PR never earns a
+// reason label and its `state_reason` cannot move it off the merge mapping, in either direction.
+for (const [reason, merged_at, state] of /** @type {[string, string | null, string][]} */ ([
+  ["not_planned", null, "rejected"],
+  ["duplicate", "2024-03-05T12:00:00Z", "accepted"],
+])) {
+  test(`parity: state_reason '${reason}' on a PR row is ignored`, () => {
+    const s = onePr({
+      state: "closed",
+      closed_at: "2024-03-05T12:00:00Z",
+      state_reason: reason,
+      pull_request: { merged_at },
+    });
+    assert.equal(s.current_state, state);
+    assert.deepEqual(s.labels, ["pull-request"]);
+  });
+}
+
+// The PR branch of `current_state` (github.rs:1025-1030) is ungated, where the closed-reason
+// branch below it checks `type_accepts_rejected` — so a chore PR closed unmerged is rejected.
+test("parity: a chore-typed closed-unmerged PR is still rejected", () => {
+  const s = onePr({
+    state: "closed",
+    closed_at: "2024-03-05T12:00:00Z",
+    labels: [{ name: "chore" }],
+  });
+  assert.equal(s.story_type, "chore");
+  assert.equal(s.current_state, "rejected");
+});
+
+// Pushed after `infer_story_type` has read the author's own labels (github.rs:992-994), so
+// the synthetic label can never reclassify the story.
+test("parity: the pull-request label lands after type inference, never before it", () => {
+  // Position, not just outcome: `inferStoryType` matches none of "pull-request"'s
+  // substrings, so asserting the story_type alone would pass however it were ordered.
+  assert.deepEqual(onePr({ labels: [{ name: "chore" }] }).labels, ["chore", "pull-request"]);
+  assert.equal(onePr({ title: "Fix the parser" }).story_type, "bug");
+  assert.equal(inferStoryType(["pull-request"], "Add feature X"), "feature");
+  // Already carrying the label: it is deduped, not doubled.
+  assert.deepEqual(onePr({ labels: [{ name: "pull-request" }] }).labels, ["pull-request"]);
+});
+
+test("parity: a PR's creator is an owner as well as its requestor", () => {
+  const { stories } = mapRepo(
+    {
+      issues: [
+        pr({
+          user: { id: 12, login: "alice" },
+          assignees: [{ id: 34, login: "bob" }],
+        }),
+      ],
+      comments: [],
+      labels: [],
+    },
+    DEFAULT_CUSTOMIZATION,
+    { sendPeople: true, sendDates: true, pullRequests: true },
+  );
+  assert.deepEqual(triple(stories[0].requestor), ["github", "12", "alice"]);
+  // Assignees first, then the creator — github.rs:1067-1079 pushes onto the assignee list.
+  assert.deepEqual(/** @type {any[]} */ (stories[0].owners).map(triple), [
+    ["github", "34", "bob"],
+    ["github", "12", "alice"],
+  ]);
+});
+
+test("parity: a creator who is also an assignee is one owner, not two", () => {
+  const { stories } = mapRepo(
+    {
+      issues: [pr({ user: { id: 12, login: "alice" }, assignees: [{ id: 12, login: "alice" }] })],
+      comments: [],
+      labels: [],
+    },
+    DEFAULT_CUSTOMIZATION,
+    { sendPeople: true, sendDates: true, pullRequests: true },
+  );
+  assert.deepEqual(/** @type {any[]} */ (stories[0].owners).map(triple), [
+    ["github", "12", "alice"],
+  ]);
+});
+
+// github.rs:434-472: a merged PR that closed an already-closed imported issue resolved it, so
+// it writes no second story — its URL lands on that issue's story instead (#26313 / #26528).
+const REF_REPO = (/** @type {object} */ prOver, /** @type {object} */ issueOver = {}) => ({
+  issues: [
+    issue({ number: 7, state: "closed", closed_at: "2024-03-04T00:00:00Z", ...issueOver }),
+    pr({ number: 10, body: "Fixes #7", ...prOver }),
+  ],
+  comments: [],
+  labels: [],
+});
+const mapRefs = (/** @type {any} */ repo) =>
+  mapRepo(repo, DEFAULT_CUSTOMIZATION, { pullRequests: true });
+
+test("parity: a merged PR that closed a closed imported issue folds into that issue's story", () => {
+  const { stories } = mapRefs(
+    REF_REPO({ state: "closed", pull_request: { merged_at: "2024-03-05T12:00:00Z" } }),
+  );
+  assert.deepEqual(
+    stories.map((s) => s.external_id),
+    ["7"],
+  );
+  assert.deepEqual(stories[0].links, [
+    { url: "https://github.com/o/r/pull/10", link_type: "pull_request" },
+  ]);
+});
+
+// The dedup is gated on the issue being closed: a still-open issue means the merge did not
+// resolve it, so the PR keeps its own story and the link is recorded anyway (github.rs:417-425).
+test("parity: a merged PR referencing a still-open issue keeps its own story", () => {
+  const { stories } = mapRefs(
+    REF_REPO(
+      { state: "closed", pull_request: { merged_at: "2024-03-05T12:00:00Z" } },
+      { state: "open", closed_at: null },
+    ),
+  );
+  assert.deepEqual(
+    stories.map((s) => s.external_id),
+    ["7", "10"],
+  );
+  assert.deepEqual(stories[0].links, [
+    { url: "https://github.com/o/r/pull/10", link_type: "pull_request" },
+  ]);
+});
+
+test("parity: an open PR referencing a closed issue is linked, never deduped", () => {
+  const { stories } = mapRefs(REF_REPO({}));
+  assert.deepEqual(
+    stories.map((s) => s.external_id),
+    ["7", "10"],
+  );
+  assert.deepEqual(stories[0].links, [
+    { url: "https://github.com/o/r/pull/10", link_type: "pull_request" },
+  ]);
+});
+
+// github.rs `parse_closing_issue_refs`: nine keywords, word-bounded, `:`/whitespace tolerated
+// before the `#`, same-repo `#N` only. Unreferenced or cross-repo forms record nothing.
+for (const [body, expected] of /** @type {[string, string[]][]} */ ([
+  ["Closes #7", ["7"]],
+  ["closed:#7", ["7"]],
+  ["FIXES\n#7", ["7"]],
+  ["resolve   #7", ["7"]],
+  ["Fixes #7 and closes #7", ["7"]],
+  ["closely #7", []],
+  ["unfixes #7", []],
+  ["Fixes o/r#7", []],
+  ["Fixes #8", []],
+  ["mentions #7", []],
+])) {
+  test(`parity: parse_closing_issue_refs(${JSON.stringify(body)})`, () => {
+    const { stories } = mapRefs(REF_REPO({ body }));
+    const seven = /** @type {any} */ (stories.find((s) => s.external_id === "7"));
+    assert.deepEqual(
+      seven.links.map((/** @type {any} */ l) => l.url),
+      expected.map(() => "https://github.com/o/r/pull/10"),
+    );
+  });
+}
+
 // --- people (story #33465) ---------------------------------------------------
 // From github.rs `to_person` / `valid_gh_user`: the `(source, external_id)` rows the server writes.
 

@@ -7,7 +7,7 @@
 
 import readline from "node:readline/promises";
 
-import { stripControls } from "./mapping.js";
+import { mappableRow, stripControls } from "./mapping.js";
 
 /** Thrown when the member closes the input (Ctrl-D) before answering every question. */
 export class WizardAborted extends Error {
@@ -18,13 +18,15 @@ export class WizardAborted extends Error {
 }
 
 /**
- * Non-PR issues only, matching {@link import("./mapping.js").mapRepo}'s filter.
+ * The rows this run would map, so the questions describe the run that will happen:
+ * under `--include prs` a PR row is one of them.
  *
  * @param {{ issues?: any[] }} fetched
+ * @param {boolean} pullRequests
  * @returns {any[]}
  */
-function realIssues(fetched) {
-  return (fetched.issues ?? []).filter((issue) => !issue.pull_request);
+function mappableRows(fetched, pullRequests) {
+  return (fetched.issues ?? []).filter((row) => mappableRow(row, pullRequests));
 }
 
 /**
@@ -72,12 +74,13 @@ async function askYesNo(ask, question, dflt) {
  *
  * @param {{ issues: any[], comments: any[], labels: any[] }} fetched
  * @param {{ input: import("node:stream").Readable,
- *   output: import("./progress.js").OutStream }} streams injected so tests can
- *   script answers and assert rendered prompts
+ *   output: import("./progress.js").OutStream, pullRequests?: boolean }} options
+ *   streams are injected so tests can script answers and assert rendered prompts;
+ *   `pullRequests` is the run's `--include prs`, which decides whether a PR row counts
  * @returns {Promise<import("./mapping.js").Customization>}
  * @throws {WizardAborted} on EOF before every question is answered
  */
-export async function runWizard(fetched, { input, output }) {
+export async function runWizard(fetched, { input, output, pullRequests = false }) {
   // OutStream is the minimal write-sink tests inject; readline only calls write.
   const rl = readline.createInterface({ input, output: /** @type {any} */ (output) });
   const lines = rl[Symbol.asyncIterator]();
@@ -90,9 +93,9 @@ export async function runWizard(fetched, { input, output }) {
   };
 
   try {
-    const issues = realIssues(fetched);
-    const open = issues.filter((i) => String(i.state ?? "").toLowerCase() === "open").length;
-    const closed = issues.filter((i) => String(i.state ?? "").toLowerCase() === "closed").length;
+    const rows = mappableRows(fetched, pullRequests);
+    const open = rows.filter((r) => String(r.state ?? "").toLowerCase() === "open").length;
+    const closed = rows.filter((r) => String(r.state ?? "").toLowerCase() === "closed").length;
 
     const statesIdx = await askMenu(
       ask,
@@ -103,7 +106,7 @@ export async function runWizard(fetched, { input, output }) {
     );
     const states = /** @type {"all" | "open" | "closed"} */ (["all", "open", "closed"][statesIdx]);
 
-    const milestones = await askMilestones(ask, write, issues);
+    const milestones = await askMilestones(ask, write, rows);
 
     const typeIdx = await askMenu(
       ask,
@@ -127,19 +130,19 @@ export async function runWizard(fetched, { input, output }) {
 
 /**
  * Multi-select milestone filter, or `null` (all). Skipped — returns `null`
- * without prompting — when no fetched issue carries a milestone.
+ * without prompting — when no mappable row carries a milestone.
  *
  * @param {(prompt: string) => Promise<string>} ask
  * @param {(chunk: string) => void} write
- * @param {any[]} issues non-PR issues
+ * @param {any[]} rows the rows this run would map
  * @returns {Promise<string[] | null>}
  */
-async function askMilestones(ask, write, issues) {
+async function askMilestones(ask, write, rows) {
   /** @type {string[]} */
   const titles = [];
   const seen = new Set();
-  for (const issue of issues) {
-    const title = issue.milestone?.title;
+  for (const row of rows) {
+    const title = row.milestone?.title;
     if (typeof title === "string" && title && !seen.has(title)) {
       seen.add(title);
       titles.push(title);

@@ -281,6 +281,24 @@ export class EATClient {
   }
 
   /**
+   * True when the server publishes the story-links **create** the writer posts to
+   * (`POST /projects/{id}/stories/{id}/links`, body carrying `url`). An older server 404s
+   * it, which is not retryable and would abort a part-written run — and a spec matched on
+   * path shape alone would probe true for a GET-only or unscoped path and die anyway.
+   *
+   * @returns {Promise<boolean>}
+   */
+  async supportsStoryLinks() {
+    const spec = await this.#openapi();
+    for (const [path, ops] of Object.entries(spec?.paths ?? {})) {
+      if (!path.includes("/projects/") || !path.includes("/stories/")) continue;
+      if (!path.endsWith("/links")) continue;
+      if ("url" in EATClient.#postProperties(spec, ops)) return true;
+    }
+    return false;
+  }
+
+  /**
    * The write fields' `maxLength` limits from the published spec, when any.
    *
    * Aliased request fields (`text`/`comment_text`, `description`/`task_desc`)
@@ -461,6 +479,32 @@ export class EATClient {
     const response = await this.#request(
       "POST",
       `/projects/${projectId}/stories/${storyId}/comments`,
+      { json, headers: { "Idempotency-Key": idempotencyKey } },
+    );
+    return response.json();
+  }
+
+  /**
+   * Attach a link to a story (direct engine). `link_type` is allowlisted server-side —
+   * `relates_to`, `duplicates`, `blocks`, `is_blocked_by`, `pull_request`, `branch`,
+   * `other`; anything else 400s "link_type is not permitted" and omitting it lets the
+   * server derive one from the URL. The import writes `pull_request`. `url` must be
+   * http(s) and ≤ 1000 bytes, `title` ≤ 255. Gated on {@link supportsStoryLinks}.
+   *
+   * @param {number} projectId
+   * @param {number} storyId
+   * @param {{ url: string, link_type?: string | null, title?: string | null }} link
+   * @param {string} idempotencyKey
+   * @returns {Promise<any>}
+   */
+  async createLink(projectId, storyId, { url, link_type, title }, idempotencyKey) {
+    /** @type {Record<string, unknown>} */
+    const json = { url };
+    if (link_type != null) json.link_type = link_type;
+    if (title != null) json.title = title;
+    const response = await this.#request(
+      "POST",
+      `/projects/${projectId}/stories/${storyId}/links`,
       { json, headers: { "Idempotency-Key": idempotencyKey } },
     );
     return response.json();

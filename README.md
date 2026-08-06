@@ -108,8 +108,11 @@ must contain `issues` — the other types only add to an issue import:
 
 - `prs` — pull requests become stories: open → started, merged → accepted
   (with a `pull-request` label), closed-unmerged → rejected; a merged PR that
-  closes an imported issue folds into that issue's story instead of creating
-  its own.
+  closes an imported *closed* issue folds into that issue's story instead of
+  creating its own. Each PR story carries the PR's URL as a link, and a PR that
+  closes an imported issue links onto that issue's story too. Its conversation
+  comments come along. Works on both engines, and costs no extra GitHub
+  requests — PR rows ride the same issues listing.
 - `milestones` — GitHub milestones become epics; every story whose issue is in
   the milestone carries the epic's label, and the milestone's state and due date
   ride in the epic's description. Works on both engines. **Add it from the

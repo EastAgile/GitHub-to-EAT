@@ -131,6 +131,58 @@ test("the story-type question names the issue type ahead of labels/title", async
   );
 });
 
+// --- `--customize --include prs` (#31933) -------------------------------------
+// The wizard's questions must describe the run that will happen: under `--include prs`
+// a PR row is one of the rows imported, so it counts and its milestone is selectable.
+
+/** 1 open issue + 2 closed PRs, both on a milestone no issue carries. */
+const prFetched = () => ({
+  issues: [
+    { number: 1, state: "open" },
+    { number: 2, state: "closed", pull_request: {}, milestone: { title: "v1.0" } },
+    { number: 3, state: "closed", pull_request: { merged_at: "2024-01-01T00:00:00Z" } },
+  ],
+  comments: [],
+  labels: [],
+});
+
+test("with prs included the states question counts the PR rows the run imports", async () => {
+  const output = capture();
+  await runWizard(prFetched(), {
+    input: scripted(["", "", "", "", ""]),
+    output,
+    pullRequests: true,
+  });
+  assert.match(output.buf, /1 open, 2 closed/);
+});
+
+test("without prs the states question still counts issues only", async () => {
+  const output = capture();
+  await runWizard(prFetched(), { input: scripted(["", "", "", ""]), output });
+  assert.match(output.buf, /1 open, 0 closed/);
+});
+
+test("with prs included a milestone only a PR carries is offered and selectable", async () => {
+  const output = capture();
+  const customization = await runWizard(prFetched(), {
+    input: scripted(["", "1", "", "", ""]),
+    output,
+    pullRequests: true,
+  });
+  assert.match(output.buf, /1\) v1\.0/);
+  assert.deepEqual(customization.milestones, ["v1.0"]);
+});
+
+test("without prs that same milestone is not offered and the question is skipped", async () => {
+  const output = capture();
+  const customization = await runWizard(prFetched(), {
+    input: scripted(["", "", "", ""]),
+    output,
+  });
+  assert.equal(customization.milestones, null);
+  assert.doesNotMatch(output.buf, /milestone/i);
+});
+
 test("EOF mid-wizard rejects with WizardAborted", async () => {
   const fetched = { issues: [{ number: 1, state: "open" }], comments: [], labels: [] };
   await assert.rejects(
