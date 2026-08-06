@@ -613,8 +613,7 @@ test("divergence: the CLI cannot set blocker_display_order; the importer writes 
 });
 
 // --- description back-link (story #36736) ------------------------------------
-// The divergence on 100% of rows. Pinned because the direct engine's exact sentence
-// is CONTRACT.md's fallback dedup key, so it can never simply adopt the server's.
+// Pinned: the marker is CONTRACT.md's fallback dedup key — it cannot adopt the server's.
 
 /** `common.rs:1541-1550`, ported: no source body ⇒ no description and no link. */
 const serverDescription = (/** @type {string | null} */ body, /** @type {string | null} */ url) => {
