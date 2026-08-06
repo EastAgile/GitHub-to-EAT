@@ -108,6 +108,17 @@ test("parity: a draft release imports to the backlog, and so does one with no pu
   assert.equal(oneRelease({ body: "   " }).description, null);
 });
 
+// A published release lands `accepted`, which is inside STARTED_STATES, so the writer's
+// rank guard cannot backstop this — only `release_to_record`'s own null keeps it off the wire.
+for (const [label, over] of /** @type {[string, object][]} */ ([
+  ["published", {}],
+  ["draft", { draft: true, published_at: null }],
+])) {
+  test(`parity: a ${label} release carries no started marker`, () => {
+    assert.equal(oneRelease(over).started_at, null);
+  });
+}
+
 // --- pull requests (story #31933) --------------------------------------------
 // From github.rs `issue_to_record`'s `is_pr` branches, expectations copied from its own tests.
 
@@ -154,6 +165,31 @@ test("parity: a merged PR maps to accepted, a closed-unmerged one to rejected", 
   assert.equal(unmerged.completed_at, "2024-03-05T12:00:00Z");
   assert.ok(unmerged.labels.includes("pull-request"));
 });
+
+// github.rs:1186 — `let started_at = if is_pr && !closed { created_at } else { None };`
+// Expectations copied from that module's own PR tests (story #36700).
+test("parity: an open PR seeds started_at from its created_at", () => {
+  const s = onePr();
+  assert.equal(s.started_at, s.created_at);
+  assert.equal(s.started_at, "2024-03-01T08:00:00Z");
+});
+
+for (const [label, over] of /** @type {[string, object][]} */ ([
+  ["merged", { pull_request: { merged_at: "2024-03-05T12:00:00Z" } }],
+  ["closed-unmerged", {}],
+])) {
+  test(`parity: a ${label} PR carries no started marker`, () => {
+    const s = onePr({ state: "closed", closed_at: "2024-03-05T12:00:00Z", ...over });
+    assert.equal(s.started_at, null);
+  });
+}
+
+// `is_pr &&` — the rule is PR-only, so no issue row earns one whatever its state.
+for (const over of [{}, { state: "closed", closed_at: "2026-02-03T04:05:06Z" }]) {
+  test(`parity: an issue row (${JSON.stringify(over)}) carries no started marker`, () => {
+    assert.equal(oneStory(over).started_at, null);
+  });
+}
 
 // `closed_reason` is computed `if closed && !is_pr` (github.rs:999), so a PR never earns a
 // reason label and its `state_reason` cannot move it off the merge mapping, in either direction.

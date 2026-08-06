@@ -460,6 +460,116 @@ for (const state of ["finished", "delivered", "accepted"]) {
   });
 }
 
+// --- backdated started_at for open PRs (#36700) --------------------------------
+
+/** @returns {import("../src/writer.js").WritePlan} */
+const startedPlan = () => ({
+  labels: [],
+  stories: [
+    {
+      external_id: "10",
+      name: "open PR",
+      description: null,
+      story_type: "feature",
+      current_state: "started",
+      created_at: "2024-03-01T08:00:00Z",
+      started_at: "2024-03-01T08:00:00Z",
+      completed_at: null,
+      labels: [],
+      tasks: [],
+      comments: [],
+    },
+  ],
+});
+
+test("sendStarted sends the open PR's started_at alongside its created_at", async () => {
+  const { client, stories } = recordingClient();
+  await writePlan(client, 91, startedPlan(), {
+    stream: capture(),
+    sendDates: true,
+    sendStarted: true,
+  });
+
+  assert.equal(stories[0].started_at, "2024-03-01T08:00:00Z");
+  assert.equal(stories[0].created_at, "2024-03-01T08:00:00Z");
+});
+
+test("without sendStarted a started create carries no started_at", async () => {
+  const { client, stories } = recordingClient();
+  await writePlan(client, 91, startedPlan(), { stream: capture(), sendDates: true });
+
+  assert.equal(stories[0].created_at, "2024-03-01T08:00:00Z");
+  assert.ok(!("started_at" in stories[0]), JSON.stringify(stories[0]));
+});
+
+// started_at clamps forward to created_at server-side, so a marker on a story stamped
+// `now()` collapses to the import instant — the newer field rides only with the older.
+test("sendStarted without sendDates sends no started_at", async () => {
+  const { client, stories } = recordingClient();
+  await writePlan(client, 91, startedPlan(), { stream: capture(), sendStarted: true });
+
+  assert.ok(!("started_at" in stories[0]), JSON.stringify(stories[0]));
+});
+
+// With no created_at the row is stamped `now()` and the marker clamps forward onto that
+// import instant, saying nothing — mapRepo never builds this, but writePlan is general.
+test("a create with no created_at sends no started_at", async () => {
+  const { client, stories } = recordingClient();
+  const plan = startedPlan();
+  plan.stories[0].created_at = null;
+  await writePlan(client, 91, plan, { stream: capture(), sendDates: true, sendStarted: true });
+
+  assert.ok(!("started_at" in stories[0]), JSON.stringify(stories[0]));
+});
+
+// `accepted` is the one state in both rank sets, so it is the only create that carries both
+// markers — and the only one running the server's two clamp branches together.
+test("an accepted create carries started_at and completed_at together", async () => {
+  const mock = await startMockServer();
+  try {
+    const plan = startedPlan();
+    plan.stories[0].current_state = "accepted";
+    plan.stories[0].completed_at = "2024-03-05T12:00:00Z";
+    await writePlan(new EATClient(mock.baseUrl, "ea_token"), 91, plan, {
+      stream: capture(),
+      sendDates: true,
+      sendStarted: true,
+    });
+
+    const [story] = mock.state.stories[91];
+    assert.equal(story.started_at, "2024-03-01T08:00:00Z");
+    assert.equal(story.completed_at, "2024-03-05T12:00:00Z");
+  } finally {
+    await mock.close();
+  }
+});
+
+// The create 400s a started_at below `started`; `rejected` is off the rank axis (NULL),
+// so a closed-unmerged PR must never carry one however the plan was built.
+for (const state of ["unstarted", "rejected"]) {
+  test(`a ${state} create sends no started_at, even though the op carries one`, async () => {
+    const { client, stories } = recordingClient();
+    const plan = startedPlan();
+    plan.stories[0].current_state = /** @type {any} */ (state);
+    await writePlan(client, 91, plan, { stream: capture(), sendDates: true, sendStarted: true });
+
+    assert.ok(!("started_at" in stories[0]), JSON.stringify(stories[0]));
+  });
+}
+
+// writePlan is a general plan executor: the guard is the server's own rank >= started set,
+// not the one state mapRepo happens to emit for an open PR.
+for (const state of ["started", "finished", "delivered", "accepted"]) {
+  test(`a ${state} create carries its started_at`, async () => {
+    const { client, stories } = recordingClient();
+    const plan = startedPlan();
+    plan.stories[0].current_state = /** @type {any} */ (state);
+    await writePlan(client, 91, plan, { stream: capture(), sendDates: true, sendStarted: true });
+
+    assert.equal(stories[0].started_at, "2024-03-01T08:00:00Z", JSON.stringify(stories[0]));
+  });
+}
+
 /**
  * @param {import("../src/mapping.js").StoryOp["links"]} links
  * @returns {import("../src/writer.js").WritePlan}

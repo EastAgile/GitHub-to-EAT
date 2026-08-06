@@ -282,6 +282,22 @@ export class EATClient {
   }
 
   /**
+   * True when the story create accepts a backdated `started_at` — its own probe, since
+   * #35489 shipped after #31425 and `CreateStory` has no `deny_unknown_fields`. Any error
+   * (404, auth, parse) counts as "not supported" — the run then writes no start marker.
+   *
+   * @returns {Promise<boolean>}
+   */
+  async supportsStartedBackdating() {
+    const spec = await this.#openapi();
+    for (const [path, ops] of Object.entries(spec?.paths ?? {})) {
+      if (!path.includes("/projects/") || !path.endsWith("/stories")) continue;
+      if ("started_at" in EATClient.#postProperties(spec, ops)) return true;
+    }
+    return false;
+  }
+
+  /**
    * True when the story create accepts a `requestor` **and** the comment create an
    * `author`: neither body rejects unknown fields, so half-support drops one silently.
    *

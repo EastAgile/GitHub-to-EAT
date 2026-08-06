@@ -321,6 +321,45 @@ test("supportsBackdating is false when /openapi.json is absent", async () => {
   }
 });
 
+// --- started_at feature detection (story #36700) ------------------------------
+
+test("supportsStartedBackdating is true when the spec advertises started_at, false otherwise", async () => {
+  const mock = await startMockServer();
+  try {
+    assert.equal(await new EATClient(mock.baseUrl, "tok").supportsStartedBackdating(), true);
+  } finally {
+    await mock.close();
+  }
+  const older = await startMockServer(makeState({ startedBackdating: false }));
+  try {
+    assert.equal(await new EATClient(older.baseUrl, "tok").supportsStartedBackdating(), false);
+  } finally {
+    await older.close();
+  }
+});
+
+// #35489 shipped after #31425's created_at/completed_at, so a server can publish the
+// older pair and not the newer field — one probe for the pair would guess wrong here.
+test("supportsStartedBackdating is independent of supportsBackdating", async () => {
+  const older = await startMockServer(makeState({ startedBackdating: false }));
+  try {
+    const client = new EATClient(older.baseUrl, "tok");
+    assert.equal(await client.supportsBackdating(), true);
+    assert.equal(await client.supportsStartedBackdating(), false);
+  } finally {
+    await older.close();
+  }
+});
+
+test("supportsStartedBackdating is false when /openapi.json is absent", async () => {
+  const mock = await startMockServer(makeState({ serverDryRun: false }));
+  try {
+    assert.equal(await new EATClient(mock.baseUrl, "tok").supportsStartedBackdating(), false);
+  } finally {
+    await mock.close();
+  }
+});
+
 // --- person attribution feature detection (story #33465) ----------------------
 
 test("supportsPersonAttribution is true when the spec advertises requestor, false otherwise", async () => {

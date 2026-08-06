@@ -2187,6 +2187,54 @@ test("--include prs imports each PR into its own state, with its label, link and
   }
 });
 
+// --- backdated started_at for open PRs (#36700) --------------------------------
+
+test("--include prs: an open PR carries its own created_at as its started_at", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues", "prs"],
+      stream: capture(),
+      github: { fetchAll: async () => prRepo() },
+    });
+    const rows = mock.state.stories[91];
+    const by = (/** @type {string} */ title) =>
+      /** @type {any} */ (rows.find((/** @type {any} */ r) => r.title === title));
+
+    assert.equal(by("open PR").started_at, "2024-03-01T08:00:00Z");
+    assert.equal(by("open PR").created_at, "2024-03-01T08:00:00Z");
+    // Every other row is terminal or never started, so it carries no marker at all.
+    for (const title of ["merged PR", "abandoned PR", "a closed issue"]) {
+      assert.ok(!("started_at" in by(title)), title);
+    }
+  } finally {
+    await mock.close();
+  }
+});
+
+test("against a server without #35489 the PR run imports, just without the marker", async () => {
+  const mock = await startMockServer(makeState({ startedBackdating: false }));
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues", "prs"],
+      stream: capture(),
+      github: { fetchAll: async () => prRepo() },
+    });
+    // The probe is what keeps this a clean import rather than a 400 mid-run.
+    assert.equal(result.importedStories, 4);
+    const open = /** @type {any} */ (
+      mock.state.stories[91].find((/** @type {any} */ r) => r.title === "open PR")
+    );
+    assert.equal(open.current_state, "started");
+    assert.equal(open.created_at, "2024-03-01T08:00:00Z");
+    assert.ok(!("started_at" in open), JSON.stringify(open));
+  } finally {
+    await mock.close();
+  }
+});
+
 // --- issue dependencies -> blockers (#31934) ---------------------------------
 
 /** A fetched repo whose issue #3 is blocked by #7 and by an unimported #90. */

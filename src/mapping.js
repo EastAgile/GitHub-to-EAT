@@ -945,6 +945,7 @@ function releaseToStory(release) {
     story_type: "release",
     current_state: published ? "accepted" : "unstarted",
     created_at: sourceDate(release.created_at),
+    started_at: null,
     completed_at: published ? publishedAt : null,
     labels: [],
     // `release_to_record` maps no people either — a release has no author or assignees.
@@ -970,6 +971,12 @@ const REJECTABLE_TYPES = new Set(["feature", "bug"]);
 export const DONE_STATES = new Set(["finished", "delivered", "accepted"]);
 
 /**
+ * States at or past `state_rank` 1 — the server's create-time `started_at` guard
+ * (#35489). `rejected` is off the axis too, so it is not one of them either.
+ */
+export const STARTED_STATES = new Set(["started", ...DONE_STATES]);
+
+/**
  * @typedef {object} StoryOp one EAT story to create, with its sub-resources
  * @property {string} external_id the GitHub issue number, or `release-<id>` for a release
  * @property {string} name EAT's create-body title field
@@ -981,6 +988,8 @@ export const DONE_STATES = new Set(["finished", "delivered", "accepted"]);
  * @property {"bug" | "chore" | "feature" | "release"} story_type
  * @property {"unstarted" | "started" | "accepted" | "rejected"} current_state
  * @property {string | null} created_at
+ * @property {string | null} [started_at] an open PR's own `created_at`; null on every
+ *   other row (github.rs:1186)
  * @property {string | null} completed_at the GitHub closed date, or a release's
  *   `published_at`, kept
  * @property {string[]} labels label names on this story
@@ -1137,6 +1146,9 @@ export function mapRepo(
       story_type: storyType,
       current_state: currentState,
       created_at: issue.created_at ?? null,
+      // An open PR is in progress, so its history is a single `NULL → started @ created`
+      // (github.rs:1186).
+      started_at: (isPr && !closed ? issue.created_at : null) ?? null,
       completed_at: (closed ? issue.closed_at : null) ?? null,
       labels: names,
       links: isPr ? selfLink(issue) : referencingPrLinks(prLinks.get(externalId)),

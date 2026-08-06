@@ -755,6 +755,146 @@ test("backdated story create persists created_at; accepted completed_at clamps f
   }
 });
 
+test("a started create persists started_at, clamping it forward to created_at", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await client.createStory(
+      91,
+      {
+        name: "open PR",
+        current_state: "started",
+        created_at: "2024-03-01T08:00:00Z",
+        started_at: "2024-03-01T08:00:00Z",
+      },
+      "k-started",
+    );
+    await client.createStory(
+      91,
+      {
+        name: "out of order",
+        current_state: "started",
+        created_at: "2024-03-01T08:00:00Z",
+        started_at: "2020-01-01T00:00:00Z",
+      },
+      "k-clamp-start",
+    );
+    const [pr, clamped] = mock.state.stories[91];
+    assert.equal(pr.started_at, "2024-03-01T08:00:00Z");
+    assert.equal(clamped.started_at, "2024-03-01T08:00:00Z");
+  } finally {
+    await mock.close();
+  }
+});
+
+// The server's one shared chain clamps against the row's creation instant whether that was
+// backdated or defaulted, so an unbackdated create cannot store a start before it exists.
+test("a started create with no created_at clamps started_at to the creation instant", async () => {
+  const mock = await startMockServer();
+  try {
+    await new EATClient(mock.baseUrl, "ea_token").createStory(
+      91,
+      { name: "open PR", current_state: "started", started_at: "2020-01-01T00:00:00Z" },
+      "k-no-created",
+    );
+    const [story] = mock.state.stories[91];
+    assert.equal(story.started_at, story.created);
+  } finally {
+    await mock.close();
+  }
+});
+
+// `started` is in the fields= allowlist, so a marker that never reaches it reads back as
+// never started — the same pairing the backdating branch does for `created_at`/`created`.
+test("a persisted started_at rides the `started` read alias", async () => {
+  const mock = await startMockServer();
+  try {
+    await new EATClient(mock.baseUrl, "ea_token").createStory(
+      91,
+      {
+        name: "open PR",
+        current_state: "started",
+        created_at: "2024-03-01T08:00:00Z",
+        started_at: "2024-03-01T08:00:00Z",
+      },
+      "k-alias",
+    );
+    const res = await fetch(`${mock.baseUrl}/projects/91/stories?fields=started`, {
+      headers: { "X-TrackerToken": "ea_token" },
+    });
+    const [row] = await res.json();
+    assert.equal(row.started, "2024-03-01T08:00:00Z");
+  } finally {
+    await mock.close();
+  }
+});
+
+// #35489 shipped strictly after #31425, so no server publishes started_at without the
+// created_at pair — the older-server state must model one that has neither.
+test("a server without backdating neither advertises started_at nor persists it", async () => {
+  const mock = await startMockServer(makeState({ backdating: false }));
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    assert.equal(await client.supportsStartedBackdating(), false);
+    await client.createStory(
+      91,
+      {
+        name: "open PR",
+        current_state: "started",
+        created_at: "2024-03-01T08:00:00Z",
+        started_at: "2024-03-01T08:00:00Z",
+      },
+      "k",
+    );
+    const [story] = mock.state.stories[91];
+    assert.ok(!("started_at" in story), JSON.stringify(story));
+  } finally {
+    await mock.close();
+  }
+});
+
+// stories.rs: `lands_started = state_rank >= STARTED_RANK`, and `rejected` is NULL-ranked.
+for (const state of ["unstarted", "rejected"]) {
+  test(`a started_at on a ${state} create is 400 invalid`, async () => {
+    const mock = await startMockServer();
+    try {
+      await assert.rejects(
+        new EATClient(mock.baseUrl, "ea_token").createStory(
+          91,
+          { name: "s", current_state: state, started_at: "2024-03-01T08:00:00Z" },
+          "k",
+        ),
+        /** @param {any} err */ (err) => err.status === 400,
+      );
+    } finally {
+      await mock.close();
+    }
+  });
+}
+
+// No deny_unknown_fields server-side, so an older server drops the key silently — a run
+// against it must still import, just without the marker.
+test("a server without #35489 ignores started_at instead of rejecting it", async () => {
+  const mock = await startMockServer(makeState({ startedBackdating: false }));
+  try {
+    await new EATClient(mock.baseUrl, "ea_token").createStory(
+      91,
+      {
+        name: "open PR",
+        current_state: "started",
+        created_at: "2024-03-01T08:00:00Z",
+        started_at: "2024-03-01T08:00:00Z",
+      },
+      "k",
+    );
+    const [story] = mock.state.stories[91];
+    assert.equal(story.created_at, "2024-03-01T08:00:00Z");
+    assert.ok(!("started_at" in story), JSON.stringify(story));
+  } finally {
+    await mock.close();
+  }
+});
+
 test("async import returns 202 then a job that progresses to done with a result", async () => {
   const mock = await startMockServer(makeState({ asyncImport: true }));
   try {

@@ -5,7 +5,7 @@
 
 import { randomUUID } from "node:crypto";
 import { AuthError, ConflictError, EATError, EATTimeout, NotFoundError } from "./client.js";
-import { DONE_STATES, epicTitleKey, stripControls } from "./mapping.js";
+import { DONE_STATES, epicTitleKey, STARTED_STATES, stripControls } from "./mapping.js";
 import { runWithProgress } from "./progress.js";
 
 /**
@@ -128,11 +128,13 @@ async function withRetry(fn, attempts, delayMs) {
  * @param {WritePlan} plan
  * @param {{ runId?: string, stream?: import("./progress.js").OutStream,
  *   retryAttempts?: number, retryDelayMs?: number, sendProvenance?: boolean,
- *   sendDates?: boolean, sendPeople?: boolean, sendLinks?: boolean }} [options]
+ *   sendDates?: boolean, sendStarted?: boolean, sendPeople?: boolean,
+ *   sendLinks?: boolean }} [options]
  *   `runId` scopes the idempotency keys (fresh per run, stable across in-run
  *   retries); `sendProvenance` adds the re-import pair (EAT #31427) to every
  *   story create; `sendDates` adds backdated `created_at`/`completed_at` to the
- *   writes; `sendPeople` adds the imported GitHub requestor, owners and comment author
+ *   writes; `sendStarted` adds a backdated `started_at` (EAT #35489) to creates at or past
+ *   `started`; `sendPeople` adds the imported GitHub requestor, owners and comment author
  *   (EAT #32773); `sendLinks` writes each story's `pull_request` links — all off keep
  *   the payloads and the call sequence byte-identical to v3
  * @returns {Promise<WriteResult>}
@@ -145,6 +147,7 @@ export async function writePlan(client, projectId, plan, options = {}) {
     retryDelayMs = 250,
     sendProvenance = false,
     sendDates = false,
+    sendStarted = false,
     sendPeople = false,
     sendLinks = false,
   } = options;
@@ -281,6 +284,16 @@ export async function writePlan(client, projectId, plan, options = {}) {
           };
           if (sendDates) {
             body.created_at = op.created_at;
+            // Needs a created_at to clamp against: started_at clamps forward to it, so a
+            // marker on a `now()`-stamped story collapses to the import instant, saying nothing.
+            if (
+              sendStarted &&
+              op.created_at != null &&
+              op.started_at != null &&
+              STARTED_STATES.has(op.current_state)
+            ) {
+              body.started_at = op.started_at;
+            }
             // completed_at is valid only on a done-state create, and `rejected` is
             // off that axis (no state_rank), so a closed-unmerged PR sends none.
             if (op.completed_at != null && DONE_STATES.has(op.current_state)) {
