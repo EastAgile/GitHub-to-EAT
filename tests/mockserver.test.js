@@ -755,6 +755,80 @@ test("backdated story create persists created_at; accepted completed_at clamps f
   }
 });
 
+test("a started create persists started_at, clamping it forward to created_at", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await client.createStory(
+      91,
+      {
+        name: "open PR",
+        current_state: "started",
+        created_at: "2024-03-01T08:00:00Z",
+        started_at: "2024-03-01T08:00:00Z",
+      },
+      "k-started",
+    );
+    await client.createStory(
+      91,
+      {
+        name: "out of order",
+        current_state: "started",
+        created_at: "2024-03-01T08:00:00Z",
+        started_at: "2020-01-01T00:00:00Z",
+      },
+      "k-clamp-start",
+    );
+    const [pr, clamped] = mock.state.stories[91];
+    assert.equal(pr.started_at, "2024-03-01T08:00:00Z");
+    assert.equal(clamped.started_at, "2024-03-01T08:00:00Z");
+  } finally {
+    await mock.close();
+  }
+});
+
+// stories.rs: `lands_started = state_rank >= STARTED_RANK`, and `rejected` is NULL-ranked.
+for (const state of ["unstarted", "rejected"]) {
+  test(`a started_at on a ${state} create is 400 invalid`, async () => {
+    const mock = await startMockServer();
+    try {
+      await assert.rejects(
+        new EATClient(mock.baseUrl, "ea_token").createStory(
+          91,
+          { name: "s", current_state: state, started_at: "2024-03-01T08:00:00Z" },
+          "k",
+        ),
+        /** @param {any} err */ (err) => err.status === 400,
+      );
+    } finally {
+      await mock.close();
+    }
+  });
+}
+
+// No deny_unknown_fields server-side, so an older server drops the key silently — a run
+// against it must still import, just without the marker.
+test("a server without #35489 ignores started_at instead of rejecting it", async () => {
+  const mock = await startMockServer(makeState({ startedBackdating: false }));
+  try {
+    await new EATClient(mock.baseUrl, "ea_token").createStory(
+      91,
+      {
+        name: "open PR",
+        current_state: "started",
+        created_at: "2024-03-01T08:00:00Z",
+        started_at: "2024-03-01T08:00:00Z",
+      },
+      "k",
+    );
+    const [story] = mock.state.stories[91];
+    assert.equal(story.created_at, "2024-03-01T08:00:00Z");
+    assert.ok(!("started_at" in story), JSON.stringify(story));
+  } finally {
+    await mock.close();
+  }
+});
+
 test("async import returns 202 then a job that progresses to done with a result", async () => {
   const mock = await startMockServer(makeState({ asyncImport: true }));
   try {

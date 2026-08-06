@@ -155,6 +155,33 @@ test("parity: a merged PR maps to accepted, a closed-unmerged one to rejected", 
   assert.ok(unmerged.labels.includes("pull-request"));
 });
 
+// github.rs:1186 — `let started_at = if is_pr && !closed { created_at } else { None };`
+// Expectations copied from `open_pr_maps_to_started_with_marker_and_label`,
+// `merged_pr_maps_to_accepted_with_completed_and_label` and
+// `closed_unmerged_pr_maps_to_rejected_with_label` (story #36700).
+test("parity: an open PR seeds started_at from its created_at", () => {
+  const s = onePr();
+  assert.equal(s.started_at, s.created_at);
+  assert.equal(s.started_at, "2024-03-01T08:00:00Z");
+});
+
+for (const [label, over] of /** @type {[string, object][]} */ ([
+  ["merged", { pull_request: { merged_at: "2024-03-05T12:00:00Z" } }],
+  ["closed-unmerged", {}],
+])) {
+  test(`parity: a ${label} PR carries no started marker`, () => {
+    const s = onePr({ state: "closed", closed_at: "2024-03-05T12:00:00Z", ...over });
+    assert.equal(s.started_at, null);
+  });
+}
+
+// `is_pr &&` — the rule is PR-only, so no issue row earns one whatever its state.
+for (const over of [{}, { state: "closed", closed_at: "2026-02-03T04:05:06Z" }]) {
+  test(`parity: an issue row (${JSON.stringify(over)}) carries no started marker`, () => {
+    assert.equal(oneStory(over).started_at, null);
+  });
+}
+
 // `closed_reason` is computed `if closed && !is_pr` (github.rs:999), so a PR never earns a
 // reason label and its `state_reason` cannot move it off the merge mapping, in either direction.
 for (const [reason, merged_at, state] of /** @type {[string, string | null, string][]} */ ([

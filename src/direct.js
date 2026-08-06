@@ -46,6 +46,7 @@ import { writePlan } from "./writer.js";
  *   & { fieldLimits?: () => Promise<Partial<import("./mapping.js").FieldLimits>>,
  *       supportsProvenanceDedup?: () => Promise<boolean>,
  *       supportsBackdating?: () => Promise<boolean>,
+ *       supportsStartedBackdating?: () => Promise<boolean>,
  *       supportsPersonAttribution?: () => Promise<boolean>,
  *       supportsStoryLinks?: () => Promise<boolean> }} DirectClient
  */
@@ -415,6 +416,9 @@ export async function runDirect(client, projectId, owner, repo, options) {
   // One probe gates all three backdated fields; degrades to false, so an older
   // server gets v3-identical payloads and the full-date comment prefix.
   const sendDates = await (client.supportsBackdating?.() ?? false);
+  // Its own probe: `started_at` (#35489) shipped after that pair, so a server can
+  // publish one and not the other — and the create drops an unknown field silently.
+  const sendStarted = sendDates && (await (client.supportsStartedBackdating?.() ?? false));
   // One probe gates requestor + owners[].external + the comment author (EAT #32773,
   // one change); degrades to false, which keeps the `@login` comment prefix.
   const sendPeople = await (client.supportsPersonAttribution?.() ?? false);
@@ -509,6 +513,7 @@ export async function runDirect(client, projectId, owner, repo, options) {
     runId,
     sendProvenance,
     sendDates,
+    sendStarted,
     sendPeople,
     sendLinks,
   });

@@ -792,7 +792,10 @@ The mapping mirrors `github.rs` `issue_to_record`'s PR branches exactly;
   `pull_request.merged_at` (non-null ⇒ merged), never from a per-PR fetch. A
   closed PR keeps its GitHub closed date the way a closed issue does, but only an
   `accepted` create carries it on the wire (see *Length limits* → the write rule
-  below).
+  below). An **open** PR additionally carries its own `created_at` as its
+  `started_at` (`github.rs:1186`), so its history is the importer's single
+  `NULL → started @ created`; a closed PR of either kind carries none — see
+  *Started dates* under *Fidelity limitations*.
 - **`state_reason` never applies to a PR.** The closed-reason state and labels
   are computed `if closed && !is_pr`, so a PR closed `not_planned` is still
   `rejected` because it was not merged, and one closed `duplicate` after a merge
@@ -1155,7 +1158,8 @@ real server 2026-07-16 and mirrored by `src/mockserver.js`):
   epics" above.
 - **`POST /stories`** — body requires `name` (the read-side field is `title`;
   missing → `400 validation_failed`); optional `description`, `story_type`,
-  `current_state`, `estimate`, `icebox`, `created_at`, `completed_at`,
+  `current_state`, `estimate`, `icebox`, `created_at`, `started_at`,
+  `completed_at`,
   `import_source`, `import_external_id`, `requestor`, `owners`, and `labels` as
   bare strings or `{ "name": "..." }` objects — the server attaches by name,
   get-or-creating with default colors (unlike `POST /labels`, it never 409s on
@@ -1169,7 +1173,11 @@ real server 2026-07-16 and mirrored by `src/mockserver.js`):
   writer sends `completed_at` on `accepted` creates only and omits it on every
   other state — including a `rejected` closed-unmerged PR and a `rejected`
   abandoned issue, both of which carry a GitHub closed date the plan keeps but
-  the write cannot express. The four backdating / provenance
+  the write cannot express. **`started_at` is the same rule one rank lower**
+  (`state_rank >= 1`, server story #35489): valid on a create at or past
+  `started`, clamped forward to `created_at`, and refused on `rejected` — so the
+  writer sends it on the open-PR `started` create and omits it everywhere else.
+  The five backdating / provenance
   fields are owner-gated, and so are `requestor` and `owners[].external`
   (`ExternalPersonInput`, server story #32773 — create-only: the PUT `owners`
   reconcile rejects `external`); see "Marker dedup", "GitHub identity mapping
@@ -1391,6 +1399,27 @@ and both are prescanned, in union.
   the grid-extension server ask (#32434) lands; the create response carries no
   iteration info, so the write report cannot yet surface which iteration a
   backdated story landed in.
+- **Started dates** — `started_at` (server story
+  [#35489](https://eastagiletracker.com/s/e3cqxk6d)) rides the same story create,
+  behind its **own** probe: it shipped after the `created_at` / `completed_at`
+  pair, so a server can publish that pair and not this field, and `CreateStory`
+  declares no `deny_unknown_fields` — sending it unprobed would lose the marker
+  silently rather than fail loudly. Under `--include prs` an **open** PR is
+  created with its own GitHub `created_at` as its `started_at`, mirroring
+  `github.rs:1186` (`let started_at = if is_pr && !closed { created_at } else
+  { None };`), so its reconstructed history is the server importer's single
+  `NULL → started @ created`. Every other row sends none: a merged PR
+  (`accepted`), a closed-unmerged PR (`rejected`) and every issue and release row
+  are terminal or never started. The field rides only when `created_at` does —
+  the server clamps `started_at` forward to `created_at`, so a start marker on a
+  `now()`-stamped story would invert its own history. Server behaviour
+  (owner-gated): `started_at` is valid only on a create at or past `started`
+  (`state_rank >= 1`); `rejected` is off that axis, so the writer omits it there
+  the way it omits `completed_at`. Against a server whose spec does not advertise
+  it the run imports normally, just without the marker, and the open PR's
+  transition is stamped at import time. `tests/parity.test.js` pins the open-PR
+  rule against `github.rs`'s own assertions; the mock server mirrors it behind a
+  `startedBackdating` flag (default on) so the older-server case stays testable.
 - **People** — feature-detected from `GET /openapi.json`: when the story create
   advertises `requestor` **and** the comment create advertises `author`, the
   direct engine sends the issue author as the story's `requestor`, the assignees
@@ -1435,16 +1464,6 @@ and both are prescanned, in union.
   one GitHub repo per EAT project. Releases are keyed off GitHub's global
   release ids, which do not collide across repos, so only the issue half of the
   key carries this hazard.
-- **An open PR loses its started date.** The server importer seeds an open PR's
-  `started_at` from the PR's `created_at`, so its reconstructed history is a
-  single `NULL → started @ created`. `started_at` is not on the public
-  `POST /stories` body, so the direct engine's open PR is created `started` with
-  the transition stamped at import time instead. Everything else about the row —
-  title, description, type, state, labels, links, owners, external id — matches
-  the server importer, so the two engines still dedup each other's PRs. Accepting
-  a backdated `started_at` on the public create is the EAT-side ask that would
-  close the gap: tracker
-  [#35489](https://eastagiletracker.com/s/e3cqxk6d).
 - **A rejected story loses its completion date.** A closed-unmerged PR (and an
   issue closed `not_planned` / `duplicate`) lands `rejected`, which the create
   treats as not-done, so `completed_at` cannot ride along — the row keeps its

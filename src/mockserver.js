@@ -35,7 +35,7 @@ import http from "node:http";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
-import { DONE_STATES } from "./mapping.js";
+import { DONE_STATES, STARTED_STATES } from "./mapping.js";
 
 /**
  * Configurable state and recorded requests for a mock server instance.
@@ -71,6 +71,9 @@ import { DONE_STATES } from "./mapping.js";
  *   openapi advertises `created_at`/`completed_at` on story creates and
  *   `created_at` on comment creates, and the handlers persist them; false
  *   simulates a server that predates backdating (fields absent + ignored)
+ * @property {boolean} startedBackdating when true (default, mirroring prod), the openapi
+ *   advertises `started_at` on story creates and the handler persists it; false simulates
+ *   a server with #31425's pair but not #35489's later field
  * @property {boolean} people when true (default, mirroring the server tree), the openapi
  *   advertises + the handlers persist the EAT #32773 person fields; false, absent + ignored,
  *   and an `external`-only owner 400s the way serde-dropping the unknown key makes it
@@ -143,6 +146,7 @@ export function makeState(overrides = {}) {
     serverDryRun: true,
     provenance: true,
     backdating: true,
+    startedBackdating: true,
     people: true,
     dependencyImport: true,
     storyLinks: true,
@@ -262,6 +266,7 @@ function openapiDoc(state) {
           // must be seen never to send it; a numeric type here would invite the wrong guess.
           estimate: { type: ["string", "null"] },
           ...(state.backdating ? { created_at: dateTime, completed_at: dateTime } : {}),
+          ...(state.startedBackdating ? { started_at: dateTime } : {}),
           // `owners` is server story #199, not #32773 — every older server publishes it.
           owners: { type: ["array", "null"] },
           ...(state.people ? { requestor: externalPerson } : {}),
@@ -865,6 +870,24 @@ function createStory(state, projectId, body) {
     };
   }
 
+  // Same shape one rank lower (#35489): `rejected` is NULL-ranked, so it fails this too.
+  if (
+    state.startedBackdating &&
+    body.started_at != null &&
+    !STARTED_STATES.has(body.current_state)
+  ) {
+    return {
+      status: 400,
+      payload: {
+        code: "validation_failed",
+        details: { fields: ["started_at"] },
+        error:
+          "started_at is only valid when the story is created at or past started " +
+          "(started, finished, delivered, accepted)",
+      },
+    };
+  }
+
   // EAT #31427 owner-gates the pair and rejects a lone field (probed 2026-07-24).
   if (state.provenance) {
     const hasSource = body.import_source != null;
@@ -966,6 +989,13 @@ function createStory(state, projectId, body) {
       story.completed_at =
         body.completed_at < body.created_at ? body.created_at : body.completed_at;
     }
+  }
+  if (state.startedBackdating && body.started_at != null) {
+    // Clamped like completed_at, by the server's one shared chain (common.rs `clamp_dates`).
+    story.started_at =
+      story.created_at != null && body.started_at < story.created_at
+        ? story.created_at
+        : body.started_at;
   }
   state.stories[projectId] ??= [];
   state.stories[projectId].push(story);
