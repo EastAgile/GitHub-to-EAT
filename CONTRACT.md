@@ -1415,10 +1415,13 @@ and both are prescanned, in union.
   valid only on a create at or past `started` (`state_rank >= 1`); `rejected` is
   off that axis, so the writer omits it there the way it omits `completed_at`.
   Against a server whose spec does not advertise it the run imports normally,
-  just without the marker, and the open PR's transition is stamped at import
-  time. `tests/parity.test.js` pins the open-PR rule against `github.rs`'s own
-  assertions; the mock server mirrors it behind a `startedBackdating` flag
-  (default on) so the older-server case stays testable.
+  just without the marker: the row still lands `started`, but its `started`
+  instant stays NULL rather than falling back to the import time (observed on a
+  real stack 2026-08-06 — the pre-#35489 behaviour this closes), so anything
+  reading that column treats the PR as never started. `tests/parity.test.js`
+  pins the open-PR rule against `github.rs`'s own assertions; the mock server
+  mirrors it behind a `startedBackdating` flag (default on) so the older-server
+  case stays testable.
 - **People** — feature-detected from `GET /openapi.json`: when the story create
   advertises `requestor` **and** the comment create advertises `author`, the
   direct engine sends the issue author as the story's `requestor`, the assignees
