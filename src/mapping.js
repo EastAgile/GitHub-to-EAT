@@ -206,6 +206,34 @@ export function prsLegend(engine = "server") {
 /** The default (server-engine) PR legend the MAPPINGS registry re-exports. */
 export const PRS_LEGEND = prsLegend();
 
+// The example is rendered by the description builder itself, so the two cannot drift.
+const DEPENDENCY_LINE =
+  "issue 'blocked by' dependency → a blocker on its story " +
+  `('${blockedByDesc(90, "Upstream fix")}', unresolved)`;
+// A lower bound: a listing past 100 dependencies pages, and each page is a request.
+const DEPENDENCY_COST_LINE =
+  "costs at least one extra GitHub request per issue — an anonymous run (60/h) may need --token";
+const DEPENDENCY_UNIMPORTED_LINE =
+  "a blocker is recorded whether or not the blocking issue is itself imported";
+
+/**
+ * No customization flag reaches dependencies — the filters select issues, and a
+ * blocker is not one of the mapping overrides — so only the engine shapes these.
+ *
+ * @param {import("./engine.js").Engine} [engine]
+ * @returns {string[]}
+ */
+export function depsLegend(engine = "server") {
+  // The scope rule holds on both engines; only the request budget is the caller's,
+  // and naming it on the server legend — which holds the platform PAT — would be a lie.
+  const lines = [DEPENDENCY_LINE, DEPENDENCY_UNIMPORTED_LINE];
+  if (engine === "direct") lines.push(DEPENDENCY_COST_LINE);
+  return lines;
+}
+
+/** The default (server-engine) deps legend the MAPPINGS registry re-exports. */
+export const DEPS_LEGEND = depsLegend();
+
 /**
  * One human-readable line per non-default choice, for the legend's `Customized:`
  * block. Empty when every field is at its default (an all-default customization
@@ -628,6 +656,46 @@ function externalPerson(user) {
  */
 
 /**
+ * @typedef {object} BlockerOp one EAT blocker row to create on a story
+ * @property {string} desc `blocker_desc`
+ * @property {boolean} [resolved] `CreateBlocker.resolved` is `Option<bool>`; absent is false
+ */
+
+/**
+ * One `blocked_by` entry's blocker text. Byte-identical to github.rs
+ * `blocked_by_desc`, so both engines write the same blocker for a repo.
+ *
+ * @param {number} number the blocking issue's number
+ * @param {string} title its title
+ * @returns {string}
+ */
+export function blockedByDesc(number, title) {
+  return `Blocked by #${number} (${title.trim()})`;
+}
+
+/**
+ * One issue's `blocked_by` rows as blocker ops, mirroring github.rs
+ * `list_blocked_by`: skip `number <= 0`, deduplicate by number, keep GitHub's order.
+ *
+ * @param {any[] | undefined} rows
+ * @returns {BlockerOp[]}
+ */
+function blockersFrom(rows) {
+  /** @type {BlockerOp[]} */
+  const out = [];
+  const seen = new Set();
+  for (const row of rows ?? []) {
+    // `#[serde(default)]` on both fields: a missing or non-numeric number reads
+    // as 0, which the server's own `row.number <= 0` guard drops.
+    const number = Number.isInteger(row?.number) ? row.number : 0;
+    if (number <= 0 || seen.has(number)) continue;
+    seen.add(number);
+    out.push({ desc: blockedByDesc(number, String(row?.title ?? "")), resolved: false });
+  }
+  return out;
+}
+
+/**
  * @typedef {object} EpicOp one EAT epic to get-or-create
  * @property {string} title the epic's name, and the name of the label its stories carry
  * @property {string | null} description the milestone's state + due note
@@ -884,6 +952,7 @@ function releaseToStory(release) {
     owners: [],
     tasks: [],
     comments: [],
+    blockers: [],
   };
 }
 
@@ -922,6 +991,7 @@ export const DONE_STATES = new Set(["finished", "delivered", "accepted"]);
  * @property {{ description: string, complete: boolean }[]} tasks
  * @property {{ text: string, created_at: string | null,
  *   author?: ExternalPerson | null }[]} comments
+ * @property {BlockerOp[]} [blockers] one per `blocked_by` entry (`--include deps`)
  */
 
 /**
@@ -929,7 +999,8 @@ export const DONE_STATES = new Set(["finished", "delivered", "accepted"]);
  * writer's plan. Comments join by `issue_url`, so a PR's chatter lands only when its PR is mapped.
  *
  * @param {{ issues: any[], comments: any[], labels: any[],
- *   subIssues?: Map<string, string[]> | null, releases?: any[] | null }} repo
+ *   subIssues?: Map<string, string[]> | null, releases?: any[] | null,
+ *   blockedBy?: Map<string, any[]> | null }} repo
  * @param {Customization} [customization] per-run overrides; the default reproduces
  *   this profile unchanged (the filter/override stories consume the other fields)
  * @param {{ sendDates?: boolean, epics?: boolean, sendPeople?: boolean,
@@ -941,7 +1012,7 @@ export const DONE_STATES = new Set(["finished", "delivered", "accepted"]);
  * @returns {{ labels: LabelOp[], stories: StoryOp[], epics: EpicOp[] }}
  */
 export function mapRepo(
-  { issues, comments, labels, subIssues, releases },
+  { issues, comments, labels, subIssues, releases, blockedBy },
   customization = DEFAULT_CUSTOMIZATION,
   { sendDates = false, epics = false, sendPeople = false, pullRequests = false } = {},
 ) {
@@ -1079,6 +1150,7 @@ export function mapRepo(
       ),
       tasks: customization.tasks ? parseChecklist(body) : [],
       comments: /** @type {StoryOp["comments"]} */ ([]),
+      blockers: blockersFrom(blockedBy?.get(externalId)),
     };
     byIssue.set(story.external_id, story.comments);
     stories.push(story);
@@ -1115,6 +1187,7 @@ export function mapRepo(
  * @property {number} taskDescription
  * @property {number} commentText
  * @property {number} epicDescription
+ * @property {number} blockerDesc
  */
 
 /**
@@ -1131,6 +1204,8 @@ export const FALLBACK_LIMITS = {
   commentText: 16_000,
   // Not a guess: `limits::EPIC_DESCRIPTION`, which openapi.json does not publish.
   epicDescription: 100_000,
+  // `limits::BLOCKER_DESC` — the `blocker_desc` column width.
+  blockerDesc: 255,
 };
 
 export const TRUNCATION_NOTICE =
@@ -1220,6 +1295,13 @@ export function clampPlan(plan, limits, { reserveDescription = () => 0, warn = (
       if (byteLen(comment.text) <= limits.commentText) return comment;
       notice(`comment ${i + 1}`, limits.commentText);
       return { ...comment, text: clampBlock(comment.text, limits.commentText) };
+    });
+    // Plain truncation, like github.rs's writer: a blocker is a one-liner, and
+    // the notice would cost more room than the text it annotates.
+    out.blockers = (op.blockers ?? []).map((blocker, i) => {
+      if (byteLen(blocker.desc) <= limits.blockerDesc) return blocker;
+      notice(`blocker ${i + 1}`, limits.blockerDesc);
+      return { ...blocker, desc: sliceBytes(blocker.desc, limits.blockerDesc) };
     });
     return out;
   });

@@ -92,8 +92,8 @@ export function storyLabelKeys(row) {
 
 /**
  * Cursor-walk the whole project and map each already-imported external id to
- * its story row. Rows carry `tasks_count`/`comment_count` so the caller can
- * spot stories an interrupted run left without their sub-resources.
+ * its story row. Rows carry `tasks_count`/`blocker_count`/`comment_count` so the
+ * caller can spot stories an interrupted run left without their sub-resources.
  *
  * @param {PrescanClient} client
  * @param {number} projectId
@@ -119,7 +119,7 @@ export async function prescanImported(
     const page = await client.listStoryPage(projectId, {
       limit: pageSize,
       ...(cursor ? { cursor } : {}),
-      fields: `story_id,description,tasks_count,comment_count${labels}`,
+      fields: `story_id,description,tasks_count,blocker_count,comment_count${labels}`,
     });
     for (const row of page.items ?? []) {
       const id = markerExternalId(row.description, owner, repo);
@@ -134,8 +134,8 @@ export async function prescanImported(
  * Cursor-walk the project filtered by `import_source` and map each row's
  * `import_external_id` to its story row — the primary re-import key on a
  * server that persists provenance (EAT #31427). Rows carry
- * `tasks_count`/`comment_count` for the interrupted-run warning, like
- * {@link prescanImported}. Rows without an `import_external_id` are skipped.
+ * `tasks_count`/`blocker_count`/`comment_count` for the interrupted-run warning,
+ * like {@link prescanImported}. Rows without an `import_external_id` are skipped.
  *
  * @param {PrescanClient} client
  * @param {number} projectId
@@ -159,7 +159,7 @@ export async function prescanProvenance(
       importSource: source,
       limit: pageSize,
       ...(cursor ? { cursor } : {}),
-      fields: `story_id,import_external_id,tasks_count,comment_count${labels}`,
+      fields: `story_id,import_external_id,tasks_count,blocker_count,comment_count${labels}`,
     });
     for (const row of page.items ?? []) {
       const id = row.import_external_id;

@@ -698,9 +698,55 @@ function storyOp(overrides = {}) {
     labels: [],
     tasks: [],
     comments: [],
+    blockers: [],
     ...overrides,
   };
 }
+
+test("clampPlan cuts a blocker to blockerDesc, plainly — no truncation notice", () => {
+  /** @type {string[]} */
+  const warnings = [];
+  // github.rs's writer just truncates (`chars().take(255)`); a 76-byte notice
+  // inside a 255-byte one-liner would eat the text it is annotating.
+  const op = storyOp({
+    blockers: [{ desc: `Blocked by #90 (${"x".repeat(400)})`, resolved: false }],
+  });
+  const { stories } = clampPlan({ labels: [], stories: [op] }, FALLBACK_LIMITS, {
+    warn: (m) => warnings.push(m),
+  });
+  const { desc } = (stories[0].blockers ?? [])[0];
+  assert.equal(Buffer.byteLength(desc, "utf8"), 255);
+  assert.ok(desc.startsWith("Blocked by #90 (xxx"));
+  assert.ok(!desc.includes(TRUNCATION_NOTICE));
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /issue #7: blocker 1 truncated to 255 bytes/);
+  assert.equal(op.blockers[0].desc.length, 417); // the input plan is untouched
+});
+
+test("clampPlan clamps a blocker in UTF-8 bytes, never splitting a character", () => {
+  // The public POST /blockers validates with Rust's str::len() (bytes), so a
+  // multi-byte title that "fits" in JS units would 400 the write.
+  const op = storyOp({ blockers: [{ desc: "😀".repeat(100), resolved: false }] });
+  const { stories } = clampPlan({ labels: [], stories: [op] }, FALLBACK_LIMITS);
+  const { desc } = (stories[0].blockers ?? [])[0];
+  assert.ok(Buffer.byteLength(desc, "utf8") <= 255);
+  assert.equal(desc, "😀".repeat(63));
+});
+
+test("clampPlan leaves a blocker inside the limit untouched and silent", () => {
+  /** @type {string[]} */
+  const warnings = [];
+  const op = storyOp({ blockers: [{ desc: "Blocked by #90 (Upstream fix)", resolved: false }] });
+  const { stories } = clampPlan({ labels: [], stories: [op] }, FALLBACK_LIMITS, {
+    warn: (m) => warnings.push(m),
+  });
+  assert.deepEqual(stories[0].blockers, op.blockers);
+  assert.deepEqual(warnings, []);
+});
+
+test("the blocker fallback limit is the server's BLOCKER_DESC column width", () => {
+  assert.equal(FALLBACK_LIMITS.blockerDesc, 255);
+});
 
 test("clampPlan truncates an over-long comment to fit the limit, notice included", () => {
   /** @type {string[]} */

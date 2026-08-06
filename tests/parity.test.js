@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  blockedByDesc,
+  clampPlan,
   DEFAULT_CUSTOMIZATION,
+  FALLBACK_LIMITS,
   inferStoryType,
   mapRepo,
   milestoneEpicDescription,
@@ -406,4 +409,167 @@ test("parity: a comment body carries no '@login' prefix, like the server's", () 
   const { stories } = mapPeople();
   const seven = /** @type {any} */ (stories.find((s) => s.external_id === "7"));
   assert.equal(seven.comments[0].text, "verbatim body");
+});
+
+// --- issue dependencies → blockers (story #31934 / EAT #35491) ----------------
+// From github.rs `blocked_by_desc` / `list_blocked_by` and their own tests.
+
+/** One story, mapped with `rows` as its `blocked_by` listing. */
+const withBlockers = (/** @type {any[]} */ rows) =>
+  mapRepo({
+    issues: [issue({ number: 7 })],
+    comments: [],
+    labels: [],
+    blockedBy: new Map([["7", rows]]),
+  }).stories[0];
+
+test("parity: blocked_by_desc is 'Blocked by #<n> (<title>)', unresolved", () => {
+  assert.equal(blockedByDesc(90, "Upstream fix"), "Blocked by #90 (Upstream fix)");
+  assert.deepEqual(withBlockers([{ number: 90, title: "Upstream fix" }]).blockers, [
+    { desc: "Blocked by #90 (Upstream fix)", resolved: false },
+  ]);
+});
+
+test("parity: the dependency's title is trimmed, like github.rs `row.title.trim()`", () => {
+  assert.equal(blockedByDesc(90, "  Upstream fix \n"), "Blocked by #90 (Upstream fix)");
+});
+
+test("parity: `#[serde(default)]` means an absent title maps to the empty string", () => {
+  // GhDependencyRef defaults `title` to String::new() — the parens still render.
+  assert.deepEqual(withBlockers([{ number: 90 }]).blockers, [
+    { desc: "Blocked by #90 ()", resolved: false },
+  ]);
+});
+
+test("parity: rows with number <= 0 are skipped and the rest keep GitHub's order", () => {
+  // `#[serde(default)]` turns a *missing* number into 0, which the server's own
+  // `row.number <= 0` guard drops; a wrong-typed one is a serde error, not a 0.
+  const rows = [
+    { number: 90, title: "Upstream fix" },
+    { number: 0, title: "defaulted" },
+    { number: -3, title: "negative" },
+    {},
+    { number: 12, title: "Second" },
+  ];
+  assert.deepEqual(
+    (withBlockers(rows).blockers ?? []).map((b) => b.desc),
+    ["Blocked by #90 (Upstream fix)", "Blocked by #12 (Second)"],
+  );
+});
+
+test("parity: repeats are deduplicated by number, first title winning", () => {
+  const rows = [
+    { number: 90, title: "Upstream fix" },
+    { number: 12, title: "Second" },
+    { number: 90, title: "a later page repeated it, renamed" },
+  ];
+  assert.deepEqual(
+    (withBlockers(rows).blockers ?? []).map((b) => b.desc),
+    ["Blocked by #90 (Upstream fix)", "Blocked by #12 (Second)"],
+  );
+});
+
+test("parity: an issue with no dependencies, or none fetched, carries no blockers", () => {
+  assert.deepEqual(withBlockers([]).blockers, []);
+  // The stage never ran (`--include deps` off, or it degraded): same output.
+  const { stories } = mapRepo({ issues: [issue({ number: 7 })], comments: [], labels: [] });
+  assert.deepEqual(stories[0].blockers, []);
+});
+
+test("parity: a blocker is recorded whether or not the blocking issue was imported", () => {
+  // github.rs never intersects `blocked_by` with the import set — #90 is not in
+  // this repo's listing and still earns its line.
+  const { stories } = mapRepo({
+    issues: [issue({ number: 7 }), issue({ number: 12, title: "Second" })],
+    comments: [],
+    labels: [],
+    blockedBy: new Map([
+      [
+        "7",
+        [
+          { number: 12, title: "Second" },
+          { number: 90, title: "Absent" },
+        ],
+      ],
+    ]),
+  });
+  assert.deepEqual(
+    /** @type {any} */ (stories.find((s) => s.external_id === "7")).blockers.map(
+      (/** @type {any} */ b) => b.desc,
+    ),
+    ["Blocked by #12 (Second)", "Blocked by #90 (Absent)"],
+  );
+  assert.deepEqual(/** @type {any} */ (stories.find((s) => s.external_id === "12")).blockers, []);
+});
+
+test("parity: a release carries no blockers — release_to_record leaves the list empty", () => {
+  const { stories } = mapRepo({
+    issues: [],
+    comments: [],
+    labels: [],
+    releases: [release({})],
+    blockedBy: new Map([["release-900", [{ number: 90, title: "Upstream fix" }]]]),
+  });
+  assert.deepEqual(stories[0].blockers, []);
+});
+
+// The two dependency divergences CONTRACT.md's deps section names, pinned so the
+// claim cannot rot into prose (see "Engine parity" — a divergence ships with a test).
+
+test("divergence: the CLI clamps a blocker in bytes where the importer takes 255 chars", () => {
+  // `POST /blockers` validates in bytes (`str::len()`), so the CLI must cut earlier
+  // than common.rs's `chars().take(255)` — server ask #35629 (/s/y9q8ea68) tracks it.
+  const title = "é".repeat(238); // 255 chars once wrapped, 493 bytes
+  const desc = blockedByDesc(90, title);
+  assert.equal([...desc].length, 255, "exactly the server importer's char cut");
+  assert.ok(Buffer.byteLength(desc, "utf8") > 255, "and past the public route's byte limit");
+
+  const op = mapRepo({
+    issues: [issue({ number: 7 })],
+    comments: [],
+    labels: [],
+    blockedBy: new Map([["7", [{ number: 90, title }]]]),
+  }).stories[0];
+  const clamped = /** @type {any} */ (
+    clampPlan({ labels: [], stories: [op] }, FALLBACK_LIMITS).stories[0]
+  ).blockers[0].desc;
+  // 254, not 255: the cut never splits a character, so the last é does not fit.
+  assert.ok(Buffer.byteLength(clamped, "utf8") <= 255, "inside the route's byte limit");
+  assert.ok(
+    [...clamped].length < 255,
+    `the CLI keeps fewer characters by design, got ${[...clamped].length}`,
+  );
+  assert.ok(desc.startsWith(clamped), "a prefix of what the importer would write");
+});
+
+test("divergence: the CLI cannot set blocker_display_order; the importer writes the index", () => {
+  // `CreateBlocker` has no order field, so every direct-engine row keeps the
+  // column's DEFAULT 0 where common.rs pushes `idx as i64`.
+  const { stories } = mapRepo({
+    issues: [issue({ number: 7 })],
+    comments: [],
+    labels: [],
+    blockedBy: new Map([
+      [
+        "7",
+        [
+          { number: 12, title: "Second" },
+          { number: 90, title: "Upstream fix" },
+        ],
+      ],
+    ]),
+  });
+  const blockers = /** @type {any} */ (stories[0]).blockers;
+  assert.deepEqual(
+    blockers.map((/** @type {any} */ b) => Object.keys(b).sort()),
+    [
+      ["desc", "resolved"],
+      ["desc", "resolved"],
+    ],
+    "nothing order-shaped to send",
+  );
+  assert.deepEqual(
+    blockers.map((/** @type {any} */ b) => b.desc),
+    ["Blocked by #12 (Second)", "Blocked by #90 (Upstream fix)"],
+  );
 });

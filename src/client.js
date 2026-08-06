@@ -225,6 +225,26 @@ export class EATClient {
   }
 
   /**
+   * True when the server's import endpoint accepts `include_dependencies`
+   * (EAT #35491, the server half of issue-dependency import).
+   *
+   * Feature-detected like `dry_run`: the import body rejects no unknown field,
+   * so sending the flag to a server that predates it imports zero blockers and
+   * still reports success. Any error (404, auth, parse) counts as "not
+   * supported". See CONTRACT.md "Issue dependencies → story blockers".
+   *
+   * @returns {Promise<boolean>}
+   */
+  async supportsDependencyImport() {
+    const spec = await this.#openapi();
+    for (const [path, ops] of Object.entries(spec?.paths ?? {})) {
+      if (!path.endsWith("/import/json")) continue;
+      if ("include_dependencies" in EATClient.#postProperties(spec, ops)) return true;
+    }
+    return false;
+  }
+
+  /**
    * True when the project-scoped story-create endpoint accepts the re-import
    * dedup pair (`import_source` + `import_external_id`, EAT #31427). The pair
    * ships together, so one probe of `import_source` gates both writing it and
@@ -318,7 +338,7 @@ export class EATClient {
     };
     /** @type {Partial<import("./mapping.js").FieldLimits>} */
     const limits = {};
-    /** @param {"storyName" | "storyDescription" | "taskDescription" | "commentText"} key
+    /** @param {keyof import("./mapping.js").FieldLimits} key
      * @param {number | undefined} value */
     const set = (key, value) => {
       if (value !== undefined && limits[key] === undefined) limits[key] = value;
@@ -334,6 +354,8 @@ export class EATClient {
         set("taskDescription", minLength(props, ["description", "task_desc"]));
       } else if (inStories && path.endsWith("/comments")) {
         set("commentText", minLength(props, ["text", "comment_text"]));
+      } else if (inStories && path.endsWith("/blockers")) {
+        set("blockerDesc", minLength(props, ["blocker_desc"]));
       }
     }
     return limits;
@@ -480,6 +502,28 @@ export class EATClient {
       "POST",
       `/projects/${projectId}/stories/${storyId}/comments`,
       { json, headers: { "Idempotency-Key": idempotencyKey } },
+    );
+    return response.json();
+  }
+
+  /**
+   * Create a blocker on a story (direct engine). `blocker_desc` is capped at
+   * `limits::BLOCKER_DESC` server-side; callers clamp before sending.
+   *
+   * @param {number} projectId
+   * @param {number} storyId
+   * @param {import("./mapping.js").BlockerOp} blocker
+   * @param {string} idempotencyKey
+   * @returns {Promise<any>}
+   */
+  async createBlocker(projectId, storyId, { desc, resolved }, idempotencyKey) {
+    const response = await this.#request(
+      "POST",
+      `/projects/${projectId}/stories/${storyId}/blockers`,
+      {
+        json: { blocker_desc: desc, resolved: resolved === true },
+        headers: { "Idempotency-Key": idempotencyKey },
+      },
     );
     return response.json();
   }

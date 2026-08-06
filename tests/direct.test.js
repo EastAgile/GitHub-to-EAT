@@ -1109,9 +1109,9 @@ test("the releases fetch is asked for only when --include names it", async () =>
     await mock.close();
   }
   assert.deepEqual(calls, [
-    { releases: false, pullRequests: false },
-    { releases: true, pullRequests: false },
-    { releases: false, pullRequests: false },
+    { releases: false, pullRequests: false, dependencies: false },
+    { releases: true, pullRequests: false, dependencies: false },
+    { releases: false, pullRequests: false, dependencies: false },
   ]);
 });
 
@@ -1523,7 +1523,7 @@ test("without --include milestones nothing is fetched, labelled, scanned or writ
 
     assert.equal(outcome.importedStories, 3);
     // the milestone rides on the issue rows already fetched, so no flag asks for more
-    assert.deepEqual(fetchArgs, [{ releases: false, pullRequests: false }]);
+    assert.deepEqual(fetchArgs, [{ releases: false, pullRequests: false, dependencies: false }]);
     assert.deepEqual(
       mock.state.requests.filter((r) => r.includes("/epics")),
       [],
@@ -2143,8 +2143,8 @@ test("the PR fetch is asked for only when --include names it", async () => {
     await mock.close();
   }
   assert.deepEqual(calls, [
-    { releases: false, pullRequests: false },
-    { releases: false, pullRequests: true },
+    { releases: false, pullRequests: false, dependencies: false },
+    { releases: false, pullRequests: true, dependencies: false },
   ]);
 });
 
@@ -2182,6 +2182,160 @@ test("--include prs imports each PR into its own state, with its label, link and
       by("open PR").comments.map((/** @type {any} */ c) => c.comment_text),
       ["review ping"],
     );
+  } finally {
+    await mock.close();
+  }
+});
+
+// --- issue dependencies -> blockers (#31934) ---------------------------------
+
+/** A fetched repo whose issue #3 is blocked by #7 and by an unimported #90. */
+function blockedRepo() {
+  return {
+    ...fetchedRepo(),
+    blockedBy: new Map([
+      [
+        "3",
+        [
+          { number: 7, title: "newer open issue" },
+          { number: 90, title: "Upstream fix" },
+        ],
+      ],
+    ]),
+    dependencyRequests: 2,
+  };
+}
+
+test("the direct engine asks GitHub for dependencies only under --include deps", async () => {
+  const mock = await startMockServer();
+  try {
+    /** @type {any[]} */
+    const asked = [];
+    const github = {
+      fetchAll: async (/** @type {any} */ options) => {
+        asked.push(options);
+        return blockedRepo();
+      },
+    };
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await runDirect(client, 91, "o", "r", { included: ["issues"], stream: capture(), github });
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues", "deps"],
+      stream: capture(),
+      github,
+    });
+    assert.deepEqual(
+      asked.map((o) => o?.dependencies === true),
+      [false, true],
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("blocked_by rows become blocker rows on the mapped story", async () => {
+  const mock = await startMockServer();
+  try {
+    const result = await runDirect(new EATClient(mock.baseUrl, "ea_token"), 91, "o", "r", {
+      included: ["issues", "deps"],
+      stream: capture(),
+      github: { fetchAll: async () => blockedRepo() },
+    });
+    assert.equal(result.importedStories, 2);
+    const blocked = mock.state.stories[91].find((s) => s.title === "older closed issue");
+    assert.deepEqual(
+      blocked.blockers.map((/** @type {any} */ b) => b.blocker_desc),
+      ["Blocked by #7 (newer open issue)", "Blocked by #90 (Upstream fix)"],
+    );
+    assert.deepEqual(
+      mock.state.stories[91].find((s) => s.title === "newer open issue").blockers,
+      [],
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a run without deps writes the same stories and no blockers at all", async () => {
+  const mock = await startMockServer();
+  try {
+    // Same fetched rows, flag off: the blockedBy map is simply never populated.
+    const plain = { ...fetchedRepo(), dependencyRequests: 0 };
+    await runDirect(new EATClient(mock.baseUrl, "ea_token"), 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => plain },
+    });
+    for (const story of mock.state.stories[91]) assert.deepEqual(story.blockers, []);
+    assert.deepEqual(
+      mock.state.requests.filter((r) => r.endsWith("/blockers")),
+      [],
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a deps dry run reports the extra GitHub requests the flag cost, and writes nothing", async () => {
+  const mock = await startMockServer();
+  try {
+    const out = capture();
+    const plan = await runDirect(new EATClient(mock.baseUrl, "ea_token"), 91, "o", "r", {
+      included: ["issues", "deps"],
+      stream: out,
+      dryRun: true,
+      github: { fetchAll: async () => blockedRepo() },
+    });
+    assert.equal(plan.dryRun, true);
+    assert.match(out.buf, /--include deps/);
+    assert.match(out.buf, /2 extra GitHub request/);
+    // The count is per page, so "one per issue" would contradict the number it annotates.
+    assert.match(out.buf, /at least one per issue/);
+    // The preview is not free: `fetchAll` runs before the dry-run branch.
+    assert.match(out.buf, /a real run spends them again/);
+    assert.equal(mock.state.stories[91], undefined);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a dry run without deps says nothing about dependency requests", async () => {
+  const mock = await startMockServer();
+  try {
+    const out = capture();
+    await runDirect(new EATClient(mock.baseUrl, "ea_token"), 91, "o", "r", {
+      included: ["issues"],
+      stream: out,
+      dryRun: true,
+      github: { fetchAll: async () => ({ ...fetchedRepo(), dependencyRequests: 0 }) },
+    });
+    assert.ok(!out.buf.includes("--include deps"), out.buf);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a re-run posts no duplicate blocker rows", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const options = {
+      included: ["issues", "deps"],
+      stream: capture(),
+      github: { fetchAll: async () => blockedRepo() },
+    };
+    await runDirect(client, 91, "o", "r", options);
+    // A fresh runId (no idempotency replay): what stops the second write is the
+    // story dedup, which skips the story and everything hanging off it.
+    const rerun = await runDirect(client, 91, "o", "r", options);
+    assert.equal(rerun.importedStories, 0);
+    assert.equal(rerun.skipped, 2);
+    const blocked = mock.state.stories[91].find((s) => s.title === "older closed issue");
+    assert.deepEqual(
+      blocked.blockers.map((/** @type {any} */ b) => b.blocker_desc),
+      ["Blocked by #7 (newer open issue)", "Blocked by #90 (Upstream fix)"],
+    );
+    assert.equal(mock.state.requests.filter((r) => r.endsWith("/blockers")).length, 2);
   } finally {
     await mock.close();
   }
@@ -2411,6 +2565,69 @@ test("a folded PR is not counted by the milestone note or the truncation warning
       await run(repoWithFold(long), ["issues", "prs", "milestones"], "b"),
       /milestone title\(s\) are longer than/,
     );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a story left with half its blockers by an interrupted run warns on the re-run", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    // #7 carries no comments, so only a blocker count can reveal the interruption:
+    // blockers are written between the tasks and the comments.
+    const github = {
+      fetchAll: async () => ({
+        ...fetchedRepo(),
+        blockedBy: new Map([
+          [
+            "7",
+            [
+              { number: 90, title: "Upstream fix" },
+              { number: 91, title: "Other fix" },
+            ],
+          ],
+        ]),
+        dependencyRequests: 2,
+      }),
+    };
+    let writes = 0;
+    const failing = {
+      createLabel: client.createLabel.bind(client),
+      createStory: client.createStory.bind(client),
+      createTask: client.createTask.bind(client),
+      createComment: client.createComment.bind(client),
+      listStoryPage: client.listStoryPage.bind(client),
+      listEpics: client.listEpics.bind(client),
+      createEpic: client.createEpic.bind(client),
+      createBlocker: async (/** @type {any[]} */ ...args) => {
+        writes += 1;
+        if (writes > 1) throw new AuthError("simulated mid-blocker failure");
+        // @ts-expect-error — forwarding the real client's own argument list
+        return client.createBlocker(...args);
+      },
+    };
+    await assert.rejects(
+      runDirect(failing, 91, "o", "r", {
+        included: ["issues", "deps"],
+        stream: capture(),
+        github,
+      }),
+      AuthError,
+    );
+    const half = mock.state.stories[91].find((s) => s.title === "newer open issue");
+    assert.equal(half.blockers.length, 1, "one blocker landed before the failure");
+    assert.equal(half.comments.length, 0, "and no comment count can betray the gap");
+
+    const out = capture();
+    const rerun = await runDirect(client, 91, "o", "r", {
+      included: ["issues", "deps"],
+      stream: out,
+      github,
+    });
+    assert.equal(rerun.skipped, 2, "the half-written story stays skipped");
+    assert.match(out.buf, /warning: issue #7 .*blockers 1\/2/);
+    assert.match(out.buf, /delete that story in EAT and re-run/);
   } finally {
     await mock.close();
   }

@@ -125,6 +125,23 @@ must contain `issues` — the other types only add to an issue import:
   landing in the backlog rather than being skipped — but GitHub only lists
   drafts to a token with push access, so an anonymous or read-only run never
   sees them. Works on both engines.
+- `deps` — each issue's "blocked by" dependencies become blockers on its story,
+  one per entry, reading `Blocked by #90 (Upstream fix)` and unresolved. A
+  blocker is recorded whether or not the blocking issue is itself imported.
+  Works on both engines and writes the same text, with one narrow exception: an
+  over-long blocker is cut at 255 **bytes** by the direct engine (what the public
+  API accepts) and 255 **characters** by the server, so a multi-byte title near
+  that boundary lands slightly shorter on `--engine direct` — tracked as EAT
+  #35629. The server engine needs a tracker new enough to accept
+  `include_dependencies`; against an older one the run is refused up front,
+  naming `--engine direct`, rather than reporting success with no blockers in it.
+  This costs **at least one extra GitHub request per issue** — the issue row
+  carries no dependency count to gate the request on, and a listing past 100
+  dependencies pages — so an anonymous run (60 req/h) may need `--token`; the
+  direct engine refuses up front rather than dying halfway. `--dry-run` reports
+  what the flag spent, but note that it *spends* it: the preview costs the same
+  requests as the real run, so previewing first saves no budget. If a listing
+  fails, that issue is imported without its blockers and the run keeps going.
 
 **Sub-issues** need no flag. EAT has no parent/child story relation, so on
 `--engine direct` the hierarchy rides the description's last paragraph instead:

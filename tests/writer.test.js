@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { AuthError, ConflictError, EATClient, EATError } from "../src/client.js";
 import { startMockServer } from "../src/mockserver.js";
-import { writePlan } from "../src/writer.js";
+import { BlockerWriteUnsupported, writePlan } from "../src/writer.js";
 import { capture } from "./helpers.js";
 
 /** @returns {import("../src/writer.js").WritePlan} */
@@ -65,6 +65,7 @@ test("writePlan writes labels, then stories oldest-first with their subresources
       stories: 2,
       tasks: 2,
       comments: 1,
+      blockers: 0,
     });
 
     const labels = mock.state.labels[91];
@@ -916,6 +917,136 @@ test("an epic the listing already names is never POSTed at all", async () => {
       mock.state.requests.filter((r) => r.includes("/epics")),
       ["GET /projects/91/epics"],
     );
+  } finally {
+    await mock.close();
+  }
+});
+
+// --- blockers (#31934) -------------------------------------------------------
+
+test("writePlan creates one blocker per op, in order, after the story's tasks", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const plan = samplePlan();
+    plan.stories[1].blockers = [
+      { desc: "Blocked by #12 (Second)", resolved: false },
+      { desc: "Blocked by #90 (Upstream fix)", resolved: false },
+    ];
+    const result = await writePlan(client, 91, plan, { stream: capture() });
+
+    assert.equal(result.blockers, 2);
+    const story = mock.state.stories[91].find((s) => s.title === "older closed issue");
+    assert.deepEqual(
+      story.blockers.map((/** @type {any} */ b) => [b.blocker_desc, b.resolved]),
+      [
+        ["Blocked by #12 (Second)", false],
+        ["Blocked by #90 (Upstream fix)", false],
+      ],
+    );
+    // Insertion order is what the writer controls: `POST /blockers` binds no
+    // display order, so every row the public route writes keeps the column's default.
+    assert.deepEqual(
+      story.blockers.map((/** @type {any} */ b) => b.blocker_display_order),
+      [0, 0],
+    );
+    assert.equal(story.blocker_count, 2);
+    // The other story asked for none and got none.
+    assert.deepEqual(
+      mock.state.stories[91].find((s) => s.title === "newer open issue").blockers,
+      [],
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("writePlan sends no blockers request for a plan with none", async () => {
+  const mock = await startMockServer();
+  try {
+    const result = await writePlan(new EATClient(mock.baseUrl, "ea_token"), 91, samplePlan(), {
+      stream: capture(),
+    });
+    assert.equal(result.blockers, 0);
+    assert.deepEqual(
+      mock.state.requests.filter((r) => r.endsWith("/blockers")),
+      [],
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a blocker write is idempotency-keyed per story and index, so a replay never doubles", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const plan = samplePlan();
+    plan.stories[1].blockers = [{ desc: "Blocked by #90 (Upstream fix)", resolved: false }];
+    // One runId, two passes: the ledger must replay the create, not repeat it.
+    await writePlan(client, 91, plan, { stream: capture(), runId: "run-1" });
+    const story = mock.state.stories[91].find((s) => s.title === "older closed issue");
+    const before = story.blockers.length;
+    await client.createBlocker(
+      91,
+      story.story_id,
+      { desc: "Blocked by #90 (Upstream fix)", resolved: false },
+      "run-1:blocker:3:0",
+    );
+    assert.equal(story.blockers.length, before, "the keyed replay wrote no second row");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a plan carrying blockers fails typed, before any write, on a client that cannot write them", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    // A client that satisfies the type but omits the optional blocker write:
+    // a bare TypeError here lands mid-plan, and an import never updates.
+    const noBlockers = {
+      createLabel: client.createLabel.bind(client),
+      createStory: client.createStory.bind(client),
+      createTask: client.createTask.bind(client),
+      createComment: client.createComment.bind(client),
+      listEpics: client.listEpics.bind(client),
+      createEpic: client.createEpic.bind(client),
+    };
+    const plan = samplePlan();
+    plan.stories[1].blockers = [{ desc: "Blocked by #90 (Upstream fix)", resolved: false }];
+    await assert.rejects(
+      writePlan(noBlockers, 91, plan, { stream: capture() }),
+      (/** @type {any} */ err) => {
+        assert.ok(err instanceof BlockerWriteUnsupported, `got ${err?.constructor?.name}`);
+        // Inside the EAT hierarchy, so cli.main renders it as `error: …` + exit 1.
+        assert.ok(err instanceof EATError);
+        assert.match(err.message, /blocker/i);
+        return true;
+      },
+    );
+    assert.equal(mock.state.stories[91], undefined, "nothing was written first");
+    assert.equal(mock.state.labels[91], undefined);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a plan with no blockers still writes against a client without createBlocker", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const noBlockers = {
+      createLabel: client.createLabel.bind(client),
+      createStory: client.createStory.bind(client),
+      createTask: client.createTask.bind(client),
+      createComment: client.createComment.bind(client),
+      listEpics: client.listEpics.bind(client),
+      createEpic: client.createEpic.bind(client),
+    };
+    const result = await writePlan(noBlockers, 91, samplePlan(), { stream: capture() });
+    assert.equal(result.stories, 2);
+    assert.equal(result.blockers, 0);
   } finally {
     await mock.close();
   }

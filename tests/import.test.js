@@ -1157,3 +1157,83 @@ test("dry-run reports the timeout guidance when the async job hangs", async () =
   assert.ok(err.buf.includes("may still be finishing"), err.buf);
   assert.ok(!err.buf.includes("dry run failed"), err.buf); // not mislabeled
 });
+
+test("--include issues,deps sends include_dependencies to the server engine", async () => {
+  const mock = await startMockServer();
+  const out = capture();
+  try {
+    await inTempDir(() =>
+      withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
+        const code = await main(
+          ["--project", "91", "--repo", "o/r", "--include", "issues,deps", "-y"],
+          { stdout: out, stderr: capture() },
+        );
+        assert.equal(code, 0);
+      }),
+    );
+  } finally {
+    await mock.close();
+  }
+  // The server ask (EAT #35491) shipped first, so deps is a both-engines type:
+  // the default engine just forwards the flag.
+  assert.equal(mock.state.imports[0].body.include_dependencies, true);
+  // Blockers hang off the stories the import already counts — no story total moves.
+  assert.ok(out.buf.includes("Imported 3"), out.buf);
+});
+
+test("a default import sends no include_dependencies at all", async () => {
+  const mock = await startMockServer();
+  try {
+    await inTempDir(() =>
+      withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
+        assert.equal(
+          await main(["--project", "91", "--repo", "o/r", "-y"], {
+            stdout: capture(),
+            stderr: capture(),
+          }),
+          0,
+        );
+      }),
+    );
+  } finally {
+    await mock.close();
+  }
+  assert.ok(!("include_dependencies" in mock.state.imports[0].body));
+});
+
+test("--include issues,deps reaches the direct pipeline instead of a usage error", async () => {
+  const mock = await startMockServer();
+  const out = capture();
+  /** @type {string[][]} */
+  const included = [];
+  try {
+    await inTempDir(() =>
+      withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
+        const argv = ["--project", "91", "--repo", "o/r", "--engine", "direct", "-y"];
+        const code = await main([...argv, "--include", "issues,deps"], {
+          stdout: out,
+          stderr: capture(),
+          runDirect: async (_client, _project, _owner, _repo, opts) => {
+            included.push(opts.included ?? []);
+            return {
+              importedStories: 3,
+              importedLabels: 0,
+              skipped: 0,
+              errors: [],
+              warnings: [],
+              unmatched: {},
+              externalMembersCreated: [],
+              dryRun: false,
+            };
+          },
+        });
+        assert.equal(code, 0);
+      }),
+    );
+  } finally {
+    await mock.close();
+  }
+  // The direct engine's scope gate lets deps through, and no import/json is posted.
+  assert.deepEqual(included, [["issues", "deps"]]);
+  assert.deepEqual(mock.state.imports, []);
+});

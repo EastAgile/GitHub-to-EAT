@@ -418,6 +418,21 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     );
   }
 
+  // Refused before the legend, not warned after it: the import body ignores
+  // unknown fields, so this run would promise blockers, report success and write none.
+  if (engine === "server" && included.includes("deps")) {
+    if (!(await client.supportsDependencyImport())) {
+      stderr.write(
+        `error: project ${project}'s server cannot import issue dependencies — its ` +
+          "import endpoint publishes no `include_dependencies` field, and the import body " +
+          "ignores fields it does not know, so this run would report success and write no " +
+          "blockers. Re-run with --engine direct, which imports them from GitHub itself, " +
+          "or drop deps from --include.\n",
+      );
+      return 1;
+    }
+  }
+
   // --customize defers the legend + confirm until after the wizard, so they can
   // reflect the member's choices; they run in the direct pipeline's announce hook.
   if (!values.customize) {
