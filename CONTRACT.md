@@ -1347,6 +1347,32 @@ and both are prescanned, in union.
   the mapper assembled, so the sub-issue cross-link block above sits *before* it
   and the marker is still the description's last line — the only line the
   prescan reads.
+- **Divergence: the description back-link** — on **100% of rows**. Both engines
+  end an imported description with a link home, and neither writes the other's
+  words: the server importer appends `[View original issue](<original_url>)`
+  after a blank line (`common.rs:1547`), the direct engine appends
+  `Imported from <url>` (`src/dedup.js:20-34`). The direct engine cannot simply
+  adopt the server's form, because that sentence is its fallback dedup key —
+  `markerExternalId` parses it back off the description's last line, and it is
+  the *only* key a row written before `import_source`/`import_external_id`
+  existed carries, so rewording it would re-import every legacy row. Three
+  consequences worth naming:
+  - **An empty body diverges hardest.** The server gates its back-link on the
+    source description being non-empty (`(None, _) => String::new()`, and
+    deliberately — "we don't fabricate a body out of just the link",
+    `common.rs:1538-1540`), so an issue with an empty body gets an empty
+    description and **no** link at all. `withMarker` has no such gate: the direct
+    engine writes the marker **alone**, because dropping it there would leave
+    that row with no re-run key whatsoever on a pre-provenance server.
+  - **A PR carries no server back-link.** The importer sets `original_url: None`
+    for a PR and attaches the URL as a `pull_request` link instead
+    (`github.rs:754`), so a PR story's description is footer-free server-side.
+    The direct engine stamps its marker on a PR like any other row.
+  - **A release's two links differ in host.** The server's is the release's
+    `github.com` `html_url` (`github.rs:895`); the marker is the API resource,
+    for the browsability reason given above.
+  Pinned by `tests/parity.test.js`, like the deps divergences, so the claim
+  cannot rot into prose.
 - The prescan cursor-walks the project —
   `GET /stories?limit=…&cursor=…&fields=…` (cursor mode whenever `cursor=` or
   `limit=` is present; `fields=` is a sparse-fieldset allowlist, unknown values
@@ -1392,11 +1418,19 @@ and both are prescanned, in union.
   byte-identical to v3 — no `created_at` / `completed_at` keys — and `created`
   is the import time. Server behaviour (owner-gated): `completed_at` is valid
   only on a done-state create and clamps forward to `created_at`; an accepted
-  create lands in the iteration window containing its completion. A completion
-  that predates the iteration grid falls back to the **current** iteration until
-  the grid-extension server ask (#32434) lands; the create response carries no
-  iteration info, so the write report cannot yet surface which iteration a
-  backdated story landed in.
+  create lands in the iteration window containing its completion. The
+  grid-extension ask (#32434) has **shipped**:
+  `extend_grid_backwards_for_completion` (`iterations.rs:448`, called from
+  `handlers/stories.rs:3444`) creates the historical windows a backdated
+  completion needs — but only up to `MAX_BACKFILL_PAST_WINDOWS = 199`
+  (`iterations.rs:50`). Past the cap the backfill is all-or-nothing: it creates
+  **no** window at all (`iterations.rs:490`) and the completion falls back to the
+  **current** iteration. Measured on the 2026-08-06 two-engine parity run: 94
+  done stories the server engine spread across 62 historical iterations back to
+  2012 all landed in the current week through the direct engine's public creates.
+  Server ask [#36735](https://eastagiletracker.com/s/gz8kucea) tracks the cap.
+  Either way the create response carries no iteration info, so the write report
+  cannot yet surface which iteration a backdated story landed in.
 - **Started dates** — `started_at` (server story
   [#35489](https://eastagiletracker.com/s/e3cqxk6d)) rides the same story create,
   behind its **own** probe: it shipped after the `created_at` / `completed_at`

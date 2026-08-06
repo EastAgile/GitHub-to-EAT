@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import { applyDedup, markerExternalId } from "../src/dedup.js";
 import {
   blockedByDesc,
   clampPlan,
@@ -608,4 +610,65 @@ test("divergence: the CLI cannot set blocker_display_order; the importer writes 
     blockers.map((/** @type {any} */ b) => b.desc),
     ["Blocked by #12 (Second)", "Blocked by #90 (Upstream fix)"],
   );
+});
+
+// --- description back-link (story #36736) ------------------------------------
+// The divergence on 100% of rows. Pinned because the direct engine's exact sentence
+// is CONTRACT.md's fallback dedup key, so it can never simply adopt the server's.
+
+/** `common.rs:1541-1550`, ported: no source body ⇒ no description and no link. */
+const serverDescription = (/** @type {string | null} */ body, /** @type {string | null} */ url) => {
+  const desc = (body ?? "").trim();
+  if (desc === "") return "";
+  return url ? `${desc}\n\n[View original issue](${url})` : desc;
+};
+
+/** What the direct engine finally writes — `applyDedup` stamps the marker at plan time. */
+const directDescription = (/** @type {any} */ op) =>
+  /** @type {any} */ (
+    applyDedup({ labels: [], stories: [op] }, new Set(), "o", "r").plan.stories[0]
+  ).description;
+
+test("divergence: the engines write different description back-links, on every row", () => {
+  const op = oneStory({ number: 7, body: "the body" });
+  assert.equal(
+    serverDescription(op.description, "https://github.com/o/r/issues/7"),
+    "the body\n\n[View original issue](https://github.com/o/r/issues/7)",
+  );
+  assert.equal(directDescription(op), "the body\n\nImported from https://github.com/o/r/issues/7");
+});
+
+test("divergence: an empty body leaves the server no description, the direct engine a bare marker", () => {
+  const op = oneStory({ number: 7, body: "   " });
+  assert.equal(op.description, null, "the mapper matches the server's own empty-body filter");
+  assert.equal(serverDescription(op.description, "https://github.com/o/r/issues/7"), "");
+  assert.equal(directDescription(op), "Imported from https://github.com/o/r/issues/7");
+  // Not decoration: on a pre-provenance row the bare marker is the only re-run key there is.
+  assert.equal(markerExternalId(directDescription(op), "o", "r"), "7");
+});
+
+// The marker has always been documented as the dedup key; what CONTRACT.md never
+// said is that the server writes a different footer on the very same rows.
+test("CONTRACT.md names the description back-link divergence in its dedup section", () => {
+  const lines = readFileSync(new URL("../CONTRACT.md", import.meta.url), "utf8").split("\n");
+  const start = lines.findIndex((l) => l.startsWith("### Marker dedup"));
+  assert.notEqual(start, -1, "CONTRACT.md still has a marker-dedup section");
+  const rest = lines.slice(start + 1);
+  const end = rest.findIndex((l) => l.startsWith("### "));
+  const section = end === -1 ? rest : rest.slice(0, end);
+  assert.ok(
+    section.some((l) => l.includes("Imported from https://github.com/")),
+    "the section parsed — a rename must not make this test vacuous",
+  );
+
+  const at = section.findIndex((l) => /^- \*\*.*back-link\*\*/.test(l));
+  assert.notEqual(at, -1, "a bullet names the description back-link divergence");
+  let bullet = section[at];
+  for (const line of section.slice(at + 1)) {
+    if (/^- /.test(line)) break;
+    bullet += ` ${line.trim()}`;
+  }
+  for (const cite of ["[View original issue]", "common.rs:1547", "dedup.js", "empty body"]) {
+    assert.ok(bullet.includes(cite), `the back-link bullet names ${cite}`);
+  }
 });
