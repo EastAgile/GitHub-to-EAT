@@ -1147,7 +1147,7 @@ export function mapRepo(
       current_state: currentState,
       created_at: issue.created_at ?? null,
       // An open PR is in progress, so its history is a single `NULL → started @ created`
-      // (github.rs:1186). Every other row — terminal PR, any issue — lands with no marker.
+      // (github.rs:1186).
       started_at: (isPr && !closed ? issue.created_at : null) ?? null,
       completed_at: (closed ? issue.closed_at : null) ?? null,
       labels: names,

@@ -108,6 +108,17 @@ test("parity: a draft release imports to the backlog, and so does one with no pu
   assert.equal(oneRelease({ body: "   " }).description, null);
 });
 
+// A published release lands `accepted`, which is inside STARTED_STATES, so the writer's
+// rank guard cannot backstop this — only `release_to_record`'s own null keeps it off the wire.
+for (const [label, over] of /** @type {[string, object][]} */ ([
+  ["published", {}],
+  ["draft", { draft: true, published_at: null }],
+])) {
+  test(`parity: a ${label} release carries no started marker`, () => {
+    assert.equal(oneRelease(over).started_at, null);
+  });
+}
+
 // --- pull requests (story #31933) --------------------------------------------
 // From github.rs `issue_to_record`'s `is_pr` branches, expectations copied from its own tests.
 

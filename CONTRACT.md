@@ -1159,13 +1159,12 @@ real server 2026-07-16 and mirrored by `src/mockserver.js`):
 - **`POST /stories`** — body requires `name` (the read-side field is `title`;
   missing → `400 validation_failed`); optional `description`, `story_type`,
   `current_state`, `estimate`, `icebox`, `created_at`, `started_at`,
-  `completed_at`,
-  `import_source`, `import_external_id`, `requestor`, `owners`, and `labels` as
-  bare strings or `{ "name": "..." }` objects — the server attaches by name,
-  get-or-creating with default colors (unlike `POST /labels`, it never 409s on
-  an existing name), and embeds the full label objects in the response.
-  `current_state: "accepted"` is accepted at create time for an unestimated
-  feature (verified 2026-07-16) — no estimate guard, so no
+  `completed_at`, `import_source`, `import_external_id`, `requestor`, `owners`,
+  and `labels` as bare strings or `{ "name": "..." }` objects — the server
+  attaches by name, get-or-creating with default colors (unlike `POST /labels`,
+  it never 409s on an existing name), and embeds the full label objects in the
+  response. `current_state: "accepted"` is accepted at create time for an
+  unestimated feature (verified 2026-07-16) — no estimate guard, so no
   create-then-transition fallback is needed. `current_state: "started"` is
   likewise a legal create state (what an open PR lands in). **`completed_at` is
   valid only on a create that lands *done*** (`state_rank >= finished`);
@@ -1177,19 +1176,18 @@ real server 2026-07-16 and mirrored by `src/mockserver.js`):
   (`state_rank >= 1`, server story #35489): valid on a create at or past
   `started`, clamped forward to `created_at`, and refused on `rejected` — so the
   writer sends it on the open-PR `started` create and omits it everywhere else.
-  The five backdating / provenance
-  fields are owner-gated, and so are `requestor` and `owners[].external`
-  (`ExternalPersonInput`, server story #32773 — create-only: the PUT `owners`
-  reconcile rejects `external`); see "Marker dedup", "GitHub identity mapping
-  (both engines)" and "Fidelity limitations". The
-  create body has **no** `scheduled_at` — that column is importer-only, so the
-  direct engine cannot reproduce the planned date the server importer seeds on
-  a draft release. 200 → the full story object (`story_id`, `title`,
-  `current_state`, `labels`, …). `estimate` is on the create schema
-  (`CreateStory`, read from `GET /openapi.json` 2026-07-29) — typed
-  `["string", "null"]`, a scale *label* ("3", "½") resolved within the project's
-  own effort scale, not a number — but the writer never sends it: no story type
-  it creates is estimated, and `bug`/`chore`/`release` are seeded
+  The five backdating / provenance fields are owner-gated, and so are
+  `requestor` and `owners[].external` (`ExternalPersonInput`, server story
+  #32773 — create-only: the PUT `owners` reconcile rejects `external`); see
+  "Marker dedup", "GitHub identity mapping (both engines)" and "Fidelity
+  limitations". The create body has **no** `scheduled_at` — that column is
+  importer-only, so the direct engine cannot reproduce the planned date the
+  server importer seeds on a draft release. 200 → the full story object
+  (`story_id`, `title`, `current_state`, `labels`, …). `estimate` is on the
+  create schema (`CreateStory`, read from `GET /openapi.json` 2026-07-29) —
+  typed `["string", "null"]`, a scale *label* ("3", "½") resolved within the
+  project's own effort scale, not a number — but the writer never sends it: no
+  story type it creates is estimated, and `bug`/`chore`/`release` are seeded
   `allow_points = false`.
 - **Story types are seeded, global reference data, so `release` needs no guard.**
   `GET /story_types` (public and unscoped — it answers unauthenticated; read
@@ -1411,15 +1409,16 @@ and both are prescanned, in union.
   `NULL → started @ created`. Every other row sends none: a merged PR
   (`accepted`), a closed-unmerged PR (`rejected`) and every issue and release row
   are terminal or never started. The field rides only when `created_at` does —
-  the server clamps `started_at` forward to `created_at`, so a start marker on a
-  `now()`-stamped story would invert its own history. Server behaviour
-  (owner-gated): `started_at` is valid only on a create at or past `started`
-  (`state_rank >= 1`); `rejected` is off that axis, so the writer omits it there
-  the way it omits `completed_at`. Against a server whose spec does not advertise
-  it the run imports normally, just without the marker, and the open PR's
-  transition is stamped at import time. `tests/parity.test.js` pins the open-PR
-  rule against `github.rs`'s own assertions; the mock server mirrors it behind a
-  `startedBackdating` flag (default on) so the older-server case stays testable.
+  the server clamps `started_at` forward to `created_at`, so a marker on a
+  `now()`-stamped story would collapse to the import instant and say nothing
+  about when the work began. Server behaviour (owner-gated): `started_at` is
+  valid only on a create at or past `started` (`state_rank >= 1`); `rejected` is
+  off that axis, so the writer omits it there the way it omits `completed_at`.
+  Against a server whose spec does not advertise it the run imports normally,
+  just without the marker, and the open PR's transition is stamped at import
+  time. `tests/parity.test.js` pins the open-PR rule against `github.rs`'s own
+  assertions; the mock server mirrors it behind a `startedBackdating` flag
+  (default on) so the older-server case stays testable.
 - **People** — feature-detected from `GET /openapi.json`: when the story create
   advertises `requestor` **and** the comment create advertises `author`, the
   direct engine sends the issue author as the story's `requestor`, the assignees

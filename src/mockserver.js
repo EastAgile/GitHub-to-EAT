@@ -71,8 +71,9 @@ import { DONE_STATES, STARTED_STATES } from "./mapping.js";
  *   openapi advertises `created_at`/`completed_at` on story creates and
  *   `created_at` on comment creates, and the handlers persist them; false
  *   simulates a server that predates backdating (fields absent + ignored)
- * @property {boolean} startedBackdating when true (default, mirroring prod), the openapi
- *   advertises `started_at` and the handler persists it; false predates #35489
+ * @property {boolean} startedBackdating when true (default, mirroring prod) *and*
+ *   `backdating` is too, the openapi advertises `started_at` and the handler persists it;
+ *   false predates #35489
  * @property {boolean} people when true (default, mirroring the server tree), the openapi
  *   advertises + the handlers persist the EAT #32773 person fields; false, absent + ignored,
  *   and an `external`-only owner 400s the way serde-dropping the unknown key makes it
@@ -159,6 +160,14 @@ export function makeState(overrides = {}) {
     ...overrides,
   };
 }
+
+/**
+ * #35489 shipped strictly after #31425, so no real server accepts `started_at` without the
+ * `created_at` pair — the two flags cannot be modelled independently.
+ *
+ * @param {MockState} state
+ */
+const startedBackdatingOn = (state) => state.backdating && state.startedBackdating;
 
 /** The `fields=` allowlist published by the real server's openapi.json. */
 const STORY_FIELDS = new Set([
@@ -265,7 +274,7 @@ function openapiDoc(state) {
           // must be seen never to send it; a numeric type here would invite the wrong guess.
           estimate: { type: ["string", "null"] },
           ...(state.backdating ? { created_at: dateTime, completed_at: dateTime } : {}),
-          ...(state.startedBackdating ? { started_at: dateTime } : {}),
+          ...(startedBackdatingOn(state) ? { started_at: dateTime } : {}),
           // `owners` is server story #199, not #32773 — every older server publishes it.
           owners: { type: ["array", "null"] },
           ...(state.people ? { requestor: externalPerson } : {}),
@@ -871,7 +880,7 @@ function createStory(state, projectId, body) {
 
   // Same shape one rank lower (#35489): `rejected` is NULL-ranked, so it fails this too.
   if (
-    state.startedBackdating &&
+    startedBackdatingOn(state) &&
     body.started_at != null &&
     !STARTED_STATES.has(body.current_state)
   ) {
@@ -989,12 +998,11 @@ function createStory(state, projectId, body) {
         body.completed_at < body.created_at ? body.created_at : body.completed_at;
     }
   }
-  if (state.startedBackdating && body.started_at != null) {
-    // Clamped like completed_at, by the server's one shared chain (common.rs `clamp_dates`).
-    story.started_at =
-      story.created_at != null && body.started_at < story.created_at
-        ? story.created_at
-        : body.started_at;
+  if (startedBackdatingOn(state) && body.started_at != null) {
+    // Clamped by the server's one shared chain (common.rs `clamp_dates`) against the row's
+    // creation instant — backdated or defaulted, which is why it reads `created`.
+    story.started_at = body.started_at < story.created ? story.created : body.started_at;
+    story.started = story.started_at;
   }
   state.stories[projectId] ??= [];
   state.stories[projectId].push(story);

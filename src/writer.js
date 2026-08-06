@@ -284,9 +284,14 @@ export async function writePlan(client, projectId, plan, options = {}) {
           };
           if (sendDates) {
             body.created_at = op.created_at;
-            // Nested under sendDates because started_at clamps forward to created_at:
-            // a start marker on a `now()`-stamped story would invert its own history.
-            if (sendStarted && op.started_at != null && STARTED_STATES.has(op.current_state)) {
+            // Needs a created_at to clamp against: started_at clamps forward to it, so a
+            // marker on a `now()`-stamped story collapses to the import instant, saying nothing.
+            if (
+              sendStarted &&
+              op.created_at != null &&
+              op.started_at != null &&
+              STARTED_STATES.has(op.current_state)
+            ) {
               body.started_at = op.started_at;
             }
             // completed_at is valid only on a done-state create, and `rejected` is

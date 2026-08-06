@@ -283,7 +283,8 @@ export class EATClient {
 
   /**
    * True when the story create accepts a backdated `started_at` — its own probe, since
-   * #35489 shipped after #31425 and `CreateStory` has no `deny_unknown_fields`.
+   * #35489 shipped after #31425 and `CreateStory` has no `deny_unknown_fields`. Any error
+   * (404, auth, parse) counts as "not supported" — the run then writes no start marker.
    *
    * @returns {Promise<boolean>}
    */
