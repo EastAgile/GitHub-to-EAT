@@ -5,7 +5,7 @@
 
 import { randomUUID } from "node:crypto";
 import { AuthError, ConflictError, EATError, EATTimeout, NotFoundError } from "./client.js";
-import { epicTitleKey, stripControls } from "./mapping.js";
+import { DONE_STATES, epicTitleKey, stripControls } from "./mapping.js";
 import { runWithProgress } from "./progress.js";
 
 /**
@@ -29,6 +29,9 @@ import { runWithProgress } from "./progress.js";
  * @property {(projectId: number) => Promise<any[]>} listEpics
  * @property {(projectId: number, epic: { name: string, description?: string | null },
  *   idempotencyKey: string) => Promise<any>} createEpic
+ * @property {(projectId: number, storyId: number, link: { url: string,
+ *   link_type?: string | null, title?: string | null },
+ *   idempotencyKey: string) => Promise<any>} [createLink]
  */
 
 /**
@@ -51,6 +54,7 @@ export class BlockerWriteUnsupported extends EATError {}
  * @property {number} tasks
  * @property {number} comments
  * @property {number} blockers
+ * @property {number} links
  */
 
 /**
@@ -124,12 +128,13 @@ async function withRetry(fn, attempts, delayMs) {
  * @param {WritePlan} plan
  * @param {{ runId?: string, stream?: import("./progress.js").OutStream,
  *   retryAttempts?: number, retryDelayMs?: number, sendProvenance?: boolean,
- *   sendDates?: boolean, sendPeople?: boolean }} [options]
+ *   sendDates?: boolean, sendPeople?: boolean, sendLinks?: boolean }} [options]
  *   `runId` scopes the idempotency keys (fresh per run, stable across in-run
  *   retries); `sendProvenance` adds the re-import pair (EAT #31427) to every
  *   story create; `sendDates` adds backdated `created_at`/`completed_at` to the
  *   writes; `sendPeople` adds the imported GitHub requestor, owners and comment author
- *   (EAT #32773) — both owner-gated, and both off keep the payloads byte-identical to v3
+ *   (EAT #32773); `sendLinks` writes each story's `pull_request` links — all off keep
+ *   the payloads and the call sequence byte-identical to v3
  * @returns {Promise<WriteResult>}
  */
 export async function writePlan(client, projectId, plan, options = {}) {
@@ -141,6 +146,7 @@ export async function writePlan(client, projectId, plan, options = {}) {
     sendProvenance = false,
     sendDates = false,
     sendPeople = false,
+    sendLinks = false,
   } = options;
   /** @template T @param {() => Promise<T>} fn */
   const retrying = (fn) => withRetry(fn, retryAttempts, retryDelayMs);
@@ -166,6 +172,7 @@ export async function writePlan(client, projectId, plan, options = {}) {
     tasks: 0,
     comments: 0,
     blockers: 0,
+    links: 0,
   };
 
   const epics = plan.epics ?? [];
@@ -274,9 +281,11 @@ export async function writePlan(client, projectId, plan, options = {}) {
           };
           if (sendDates) {
             body.created_at = op.created_at;
-            // completed_at is valid only on a done-state create; omit it for
-            // open issues rather than sending null.
-            if (op.completed_at != null) body.completed_at = op.completed_at;
+            // completed_at is valid only on a done-state create, and `rejected` is
+            // off that axis (no state_rank), so a closed-unmerged PR sends none.
+            if (op.completed_at != null && DONE_STATES.has(op.current_state)) {
+              body.completed_at = op.completed_at;
+            }
           }
           if (sendPeople) {
             // Omitted rather than null for a ghost: the server then falls back to
@@ -330,6 +339,17 @@ export async function writePlan(client, projectId, plan, options = {}) {
               ),
             );
             result.comments += 1;
+          }
+          for (const [i, link] of (sendLinks ? (op.links ?? []) : []).entries()) {
+            await retrying(() =>
+              /** @type {NonNullable<WriterClient["createLink"]>} */ (client.createLink)(
+                projectId,
+                created.story_id,
+                link,
+                `${runId}:link:${op.external_id}:${i}`,
+              ),
+            );
+            result.links += 1;
           }
         }
       },

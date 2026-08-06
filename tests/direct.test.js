@@ -755,7 +755,7 @@ test("every milestone title matching keeps the run silent", async () => {
       stream.buf,
       "fetching o/r from GitHub...\n" +
         "note: 2 issue(s) carry a GitHub milestone this run does not import — pass --include " +
-        "issues,milestones to import each milestone as an epic. That groups only the issues " +
+        "issues,milestones to import each milestone as an epic. That groups only the rows " +
         "the run itself imports; a story already in EAT is never re-labelled.\n" +
         "scanning project 91 for already-imported stories...\n" +
         "creating 2 stories...\n",
@@ -1109,9 +1109,9 @@ test("the releases fetch is asked for only when --include names it", async () =>
     await mock.close();
   }
   assert.deepEqual(calls, [
-    { releases: false, dependencies: false },
-    { releases: true, dependencies: false },
-    { releases: false, dependencies: false },
+    { releases: false, pullRequests: false, dependencies: false },
+    { releases: true, pullRequests: false, dependencies: false },
+    { releases: false, pullRequests: false, dependencies: false },
   ]);
 });
 
@@ -1523,7 +1523,7 @@ test("without --include milestones nothing is fetched, labelled, scanned or writ
 
     assert.equal(outcome.importedStories, 3);
     // the milestone rides on the issue rows already fetched, so no flag asks for more
-    assert.deepEqual(fetchArgs, [{ releases: false, dependencies: false }]);
+    assert.deepEqual(fetchArgs, [{ releases: false, pullRequests: false, dependencies: false }]);
     assert.deepEqual(
       mock.state.requests.filter((r) => r.includes("/epics")),
       [],
@@ -2062,6 +2062,131 @@ test("a release's over-long notes are clamped against its own marker, end to end
   }
 });
 
+// --- pull requests end to end (#31933) ---------------------------------------
+
+/** A repo whose PR rows exercise every state of the mapping, plus a PR conversation comment. */
+function prRepo() {
+  return {
+    issues: [
+      {
+        number: 3,
+        title: "a closed issue",
+        body: "",
+        state: "closed",
+        created_at: "2024-01-01T00:00:00Z",
+        closed_at: "2024-01-02T00:00:00Z",
+        labels: [],
+      },
+      {
+        number: 10,
+        title: "open PR",
+        body: "work in progress",
+        state: "open",
+        created_at: "2024-03-01T08:00:00Z",
+        html_url: "https://github.com/o/r/pull/10",
+        labels: [],
+        user: { id: 12, login: "alice" },
+        pull_request: { merged_at: null },
+      },
+      {
+        number: 11,
+        title: "merged PR",
+        body: "",
+        state: "closed",
+        created_at: "2024-03-02T08:00:00Z",
+        closed_at: "2024-03-03T08:00:00Z",
+        html_url: "https://github.com/o/r/pull/11",
+        labels: [],
+        pull_request: { merged_at: "2024-03-03T08:00:00Z" },
+      },
+      {
+        number: 12,
+        title: "abandoned PR",
+        body: "",
+        state: "closed",
+        created_at: "2024-03-04T08:00:00Z",
+        closed_at: "2024-03-05T08:00:00Z",
+        html_url: "https://github.com/o/r/pull/12",
+        labels: [],
+        pull_request: { merged_at: null },
+      },
+    ],
+    comments: [
+      {
+        issue_url: "https://api.github.com/repos/o/r/issues/10",
+        user: { id: 12, login: "alice" },
+        created_at: "2024-03-01T09:00:00Z",
+        body: "review ping",
+      },
+    ],
+    labels: [],
+  };
+}
+
+test("the PR fetch is asked for only when --include names it", async () => {
+  /** @type {any[]} */
+  const calls = [];
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const github = {
+      /** @param {any} [options] */
+      fetchAll: async (options) => {
+        calls.push(options);
+        return prRepo();
+      },
+    };
+    const shared = { dryRun: true, stream: capture(), github };
+    await runDirect(client, 91, "o", "r", { ...shared, included: ["issues"] });
+    await runDirect(client, 91, "o", "r", { ...shared, included: ["issues", "prs"] });
+  } finally {
+    await mock.close();
+  }
+  assert.deepEqual(calls, [
+    { releases: false, pullRequests: false, dependencies: false },
+    { releases: false, pullRequests: true, dependencies: false },
+  ]);
+});
+
+test("--include prs imports each PR into its own state, with its label, link and comment", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues", "prs"],
+      stream: capture(),
+      github: { fetchAll: async () => prRepo() },
+    });
+    assert.equal(result.importedStories, 4);
+
+    const rows = mock.state.stories[91];
+    const by = (/** @type {string} */ title) =>
+      /** @type {any} */ (rows.find((/** @type {any} */ r) => r.title === title));
+    assert.equal(by("open PR").current_state, "started");
+    assert.equal(by("merged PR").current_state, "accepted");
+    assert.equal(by("abandoned PR").current_state, "rejected");
+    assert.equal(by("a closed issue").current_state, "accepted");
+
+    for (const title of ["open PR", "merged PR", "abandoned PR"]) {
+      const labels = by(title).labels.map((/** @type {any} */ l) => l.label_name);
+      assert.deepEqual(labels, ["pull-request"], title);
+    }
+    assert.ok(!by("a closed issue").labels.length);
+
+    assert.deepEqual(
+      by("open PR").links.map((/** @type {any} */ l) => [l.url, l.link_type]),
+      [["https://github.com/o/r/pull/10", "pull_request"]],
+    );
+    // AC: the PR's conversation comment lands on the PR's own story.
+    assert.deepEqual(
+      by("open PR").comments.map((/** @type {any} */ c) => c.comment_text),
+      ["review ping"],
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
 // --- issue dependencies -> blockers (#31934) ---------------------------------
 
 /** A fetched repo whose issue #3 is blocked by #7 and by an unimported #90. */
@@ -2211,6 +2336,235 @@ test("a re-run posts no duplicate blocker rows", async () => {
       ["Blocked by #7 (newer open issue)", "Blocked by #90 (Upstream fix)"],
     );
     assert.equal(mock.state.requests.filter((r) => r.endsWith("/blockers")).length, 2);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("an issues-only run writes exactly what it wrote before PRs existed", async () => {
+  /** @param {string[]} included */
+  const run = async (/** @type {string[]} */ included) => {
+    const mock = await startMockServer();
+    try {
+      const client = new EATClient(mock.baseUrl, "ea_token");
+      const result = await runDirect(client, 91, "o", "r", {
+        included,
+        stream: capture(),
+        github: { fetchAll: async () => prRepo() },
+      });
+      return {
+        result,
+        rows: mock.state.stories[91].map((/** @type {any} */ r) => ({
+          title: r.title,
+          current_state: r.current_state,
+          links: r.links,
+          labels: r.labels.map((/** @type {any} */ l) => l.label_name),
+          comments: r.comments.map((/** @type {any} */ c) => c.comment_text),
+        })),
+      };
+    } finally {
+      await mock.close();
+    }
+  };
+  const issuesOnly = await run(["issues"]);
+  assert.equal(issuesOnly.result.importedStories, 1);
+  assert.deepEqual(issuesOnly.rows, [
+    { title: "a closed issue", current_state: "accepted", links: [], labels: [], comments: [] },
+  ]);
+});
+
+// The merged PR resolved the closed issue, so the issue is the single story and the PR's
+// URL rides on it as a link (server stories #26313 / #26528).
+test("a merged PR that closed an imported issue writes one story carrying the PR link", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const repo = prRepo();
+    repo.issues[3].body = "Fixes #3";
+    repo.issues[3].pull_request = { merged_at: "2024-03-05T08:00:00Z" };
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues", "prs"],
+      stream: capture(),
+      github: { fetchAll: async () => repo },
+    });
+    assert.equal(result.importedStories, 3);
+    const rows = mock.state.stories[91];
+    assert.ok(!rows.some((/** @type {any} */ r) => r.title === "abandoned PR"));
+    const issue = rows.find((/** @type {any} */ r) => r.title === "a closed issue");
+    assert.deepEqual(
+      issue.links.map((/** @type {any} */ l) => l.url),
+      ["https://github.com/o/r/pull/12"],
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("against a server without the links path the run still imports, and says what it lost", async () => {
+  const mock = await startMockServer(makeState({ storyLinks: false }));
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const out = capture();
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues", "prs"],
+      stream: out,
+      github: { fetchAll: async () => prRepo() },
+    });
+    assert.equal(result.importedStories, 4);
+    assert.match(out.buf, /warning: this server does not accept story links/);
+    // The two losses are not the same, and the warning must not conflate them: a PR with
+    // its own story still reaches EAT by the dedup marker, while a folded PR and every
+    // link onto a closed issue reach it nowhere at all.
+    assert.match(out.buf, /Imported from/);
+    assert.match(out.buf, /folded into an issue's story.*reach EAT nowhere/);
+    for (const row of mock.state.stories[91]) assert.deepEqual(row.links, []);
+  } finally {
+    await mock.close();
+  }
+});
+
+// The legend and the [y/N] confirm must not promise link rows the server will refuse, so
+// the probe has to land before `announce`, not after it.
+test("the links-off warning reaches the member before the legend and confirm", async () => {
+  const mock = await startMockServer(makeState({ storyLinks: false }));
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const out = capture();
+    let warnedBeforeAnnounce = false;
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues", "prs"],
+      stream: out,
+      github: { fetchAll: async () => prRepo() },
+      announce: async () => {
+        warnedBeforeAnnounce = /warning: this server does not accept story links/.test(out.buf);
+      },
+    });
+    assert.ok(warnedBeforeAnnounce, `announce ran before the warning: ${out.buf}`);
+  } finally {
+    await mock.close();
+  }
+});
+
+// An issues-only run maps no links at all, so the warning would be noise.
+test("a run with no PR rows to link is not warned about links", async () => {
+  const mock = await startMockServer(makeState({ storyLinks: false }));
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const out = capture();
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: out,
+      github: { fetchAll: async () => prRepo() },
+    });
+    assert.doesNotMatch(out.buf, /does not accept story links/);
+  } finally {
+    await mock.close();
+  }
+});
+
+// Adding `--include prs` to an already-imported repo is the common upgrade path, and
+// applyDedup drops a skipped story's links with the story — silently, until now.
+test("re-running with prs on an imported repo says the cross-links are dropped", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const repo = prRepo();
+    // The merged PR closes the closed issue: the link belongs on the issue's story.
+    repo.issues[3].body = "Fixes #3";
+    repo.issues[3].pull_request = { merged_at: "2024-03-05T08:00:00Z" };
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => repo },
+    });
+    const out = capture();
+    const second = await runDirect(client, 91, "o", "r", {
+      included: ["issues", "prs"],
+      stream: out,
+      github: { fetchAll: async () => repo },
+    });
+    assert.equal(second.skipped, 1);
+    const issue = mock.state.stories[91].find(
+      (/** @type {any} */ r) => r.title === "a closed issue",
+    );
+    assert.deepEqual(issue.links, [], "the skipped story really did lose its link");
+    assert.match(
+      out.buf,
+      /warning: 1 pull-request link\(s\) belong on story\(s\) already imported/,
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+// The filters select rows, and under `--include prs` a PR row is one — so the
+// nothing-to-import warning and the milestone note must both count them.
+test("with PRs imported the filter warning and milestone note count PR rows too", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const repo = prRepo();
+    /** @type {any} */ (repo.issues[1]).milestone = { title: "v1.0", state: "open" };
+    /** @param {string[]} included */
+    const run = async (included) => {
+      const out = capture();
+      await runDirect(client, 91, "o", `r-${included.join("-")}`, {
+        included,
+        dryRun: true,
+        customization: { ...DEFAULT_CUSTOMIZATION, states: "open" },
+        stream: out,
+        github: { fetchAll: async () => repo },
+      });
+      return out.buf;
+    };
+    // Only the open PR survives `--states open`, so an issues-only run really has nothing.
+    assert.match(await run(["issues"]), /warning: no fetched issue matches this run's filters/);
+    const withPrs = await run(["issues", "prs"]);
+    assert.doesNotMatch(withPrs, /no fetched issue matches this run's filters/);
+    // The count includes PR rows, so the noun must too — it is not 1 issue.
+    assert.match(withPrs, /note: 1 issue\/PR row\(s\) carry a GitHub milestone/);
+  } finally {
+    await mock.close();
+  }
+});
+
+// A folded PR produces no story, so a count of "rows this run imports" must not include
+// it — the milestone note and the truncation warning both over-reported by one.
+test("a folded PR is not counted by the milestone note or the truncation warning", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const long = "m".repeat(300);
+    /** @param {string} milestone */
+    const repoWithFold = (milestone) => {
+      const repo = prRepo();
+      // The merged PR closes the closed issue, so it folds into that issue's story.
+      repo.issues[3].body = "Fixes #3";
+      repo.issues[3].pull_request = { merged_at: "2024-03-05T08:00:00Z" };
+      /** @type {any} */ (repo.issues[3]).milestone = { title: milestone, state: "open" };
+      return repo;
+    };
+    /** @param {any} repo @param {string[]} included @param {string} dir */
+    const run = async (repo, included, dir) => {
+      const out = capture();
+      await runDirect(client, 91, "o", dir, {
+        included,
+        dryRun: true,
+        stream: out,
+        github: { fetchAll: async () => repo },
+      });
+      return out.buf;
+    };
+    // Only the folded PR carries the milestone, and it writes no story of its own.
+    assert.doesNotMatch(
+      await run(repoWithFold("v1.0"), ["issues", "prs"], "a"),
+      /carry a GitHub milestone/,
+    );
+    // Same for the epic-title truncation warning: no epic is cut, because none is made.
+    assert.doesNotMatch(
+      await run(repoWithFold(long), ["issues", "prs", "milestones"], "b"),
+      /milestone title\(s\) are longer than/,
+    );
   } finally {
     await mock.close();
   }

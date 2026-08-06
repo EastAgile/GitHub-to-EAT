@@ -35,6 +35,8 @@ import http from "node:http";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
+import { DONE_STATES } from "./mapping.js";
+
 /**
  * Configurable state and recorded requests for a mock server instance.
  *
@@ -77,6 +79,8 @@ import { parseArgs } from "node:util";
  * @property {boolean} dependencyImport when true (default, mirroring the server tree),
  *   the openapi advertises `include_dependencies` on POST /import/json (EAT #35491);
  *   false simulates a server that predates it and silently ignores the flag
+ * @property {boolean} storyLinks when true (default, mirroring prod), the openapi publishes
+ *   `POST /stories/{id}/links` and the route accepts links; false, the route 404s
  * @property {boolean} asyncImport when true, POST /import/json answers the v2
  *   async accept — 202 `{ import_id, status:"pending" }` plus a pollable job at
  *   GET /imports/{import_id}; false (default) keeps today's synchronous 200
@@ -141,6 +145,7 @@ export function makeState(overrides = {}) {
     backdating: true,
     people: true,
     dependencyImport: true,
+    storyLinks: true,
     asyncImport: false,
     asyncFail: false,
     jobs: {},
@@ -277,6 +282,15 @@ function openapiDoc(state) {
         { blocker_desc: ml.blocker_desc },
         { resolved: { type: ["boolean", "null"] } },
       ),
+      ...(state.storyLinks
+        ? {
+            "/api/v1/projects/{project_id}/stories/{story_id}/links": post({
+              url: 1000,
+              link_type: undefined,
+              title: 255,
+            }),
+          }
+        : {}),
     },
   };
 }
@@ -625,14 +639,14 @@ const LABEL_DEFAULT_BACKGROUND = "#3498db";
 const LABEL_DEFAULT_TEXT = "#ffffff";
 
 /**
- * `comments` on a story row is bookkeeping for tests — the real read shape
- * never carries it (it isn't in the fields= allowlist either).
+ * `comments` / `people` / `links` on a story row are bookkeeping for tests — the real
+ * read shape carries none of them (they aren't in the fields= allowlist either).
  *
  * @param {any} row
  * @returns {any}
  */
 function toStoryPayload(row) {
-  const { comments, people, ...payload } = row;
+  const { comments, people, links, ...payload } = row;
   return payload;
 }
 
@@ -680,6 +694,9 @@ function routePost(state, path, body, idempotencyKey) {
 
   m = path.match(/^\/projects\/(\d+)\/stories\/(\d+)\/blockers$/);
   if (m) return createBlocker(state, Number(m[1]), Number(m[2]), body);
+
+  m = path.match(/^\/projects\/(\d+)\/stories\/(\d+)\/links$/);
+  if (m && state.storyLinks) return createLink(state, Number(m[1]), Number(m[2]), body);
 
   return { status: 404, payload: { error: "unknown route" } };
 }
@@ -833,6 +850,21 @@ function createStory(state, projectId, body) {
     };
   }
 
+  // `rejected` carries no state_rank, so it is not a done landing and the create refuses a
+  // completion on it — the same guard that lets an open create omit the field entirely.
+  if (state.backdating && body.completed_at != null && !DONE_STATES.has(body.current_state)) {
+    return {
+      status: 400,
+      payload: {
+        code: "validation_failed",
+        details: { fields: ["completed_at"] },
+        error:
+          "completed_at is only valid when the story is created in a done state " +
+          "(finished, delivered, accepted)",
+      },
+    };
+  }
+
   // EAT #31427 owner-gates the pair and rejects a lone field (probed 2026-07-24).
   if (state.provenance) {
     const hasSource = body.import_source != null;
@@ -914,6 +946,7 @@ function createStory(state, projectId, body) {
     // server's `fields=` allowlist (STORY_FIELDS).
     blockers: [],
     blocker_count: 0,
+    links: [],
     created: now,
     updated_at: now,
   };
@@ -928,9 +961,8 @@ function createStory(state, projectId, body) {
   if (state.backdating && body.created_at != null) {
     story.created_at = body.created_at;
     story.created = body.created_at;
-    // completed_at is valid only on a done-state create and clamps forward to
-    // created_at (a completion before creation stores as the creation instant).
-    if (body.completed_at != null && story.current_state === "accepted") {
+    // Clamps forward to created_at: a completion before creation stores as the creation instant.
+    if (body.completed_at != null) {
       story.completed_at =
         body.completed_at < body.created_at ? body.created_at : body.completed_at;
     }
@@ -1018,6 +1050,91 @@ function createComment(state, projectId, storyId, body) {
   story.comments.push(comment);
   story.comment_count = story.comments.length;
   return { status: 200, payload: comment };
+}
+
+/** `handlers/story_links.rs` VALID_LINK_TYPES — a caller-supplied type off this list 400s. */
+const VALID_LINK_TYPES = new Set([
+  "relates_to",
+  "duplicates",
+  "blocks",
+  "is_blocked_by",
+  "pull_request",
+  "branch",
+  "other",
+]);
+
+/** `limits::LINK_URL` / `limits::LINK_TITLE` — the story_link column widths. */
+const LINK_URL_LIMIT = 1000;
+const LINK_TITLE_LIMIT = 255;
+
+/**
+ * `detect_link_type`: what the server stores when the caller supplies no `link_type`.
+ *
+ * @param {string} url
+ * @returns {string}
+ */
+function detectLinkType(url) {
+  if (url.includes("github.com") && url.includes("/pull/")) return "pull_request";
+  if (url.includes("github.com") && url.includes("/tree/")) return "branch";
+  return "other";
+}
+
+/**
+ * @param {number} status
+ * @param {string} field
+ * @param {string} constraint
+ * @param {string} error
+ * @returns {MockResponse}
+ */
+const badRequest = (status, field, constraint, error) => ({
+  status,
+  payload: { code: "invalid_parameter", details: { constraint, fields: [field] }, error },
+});
+
+/**
+ * @param {MockState} state
+ * @param {number} projectId
+ * @param {number} storyId
+ * @param {any} body
+ * @returns {MockResponse}
+ */
+function createLink(state, projectId, storyId, body) {
+  const story = findStory(state, projectId, storyId);
+  if (!story) return NOT_FOUND;
+  const url = String(body.url ?? "").trim();
+  if (!url) return badRequest(400, "url", "required", "This field is required.");
+  // validate_link_url: column width, no null bytes, http(s) only — any other scheme is a
+  // stored-XSS / SSRF primitive, so the mock must refuse what production refuses.
+  if (Buffer.byteLength(url, "utf8") > LINK_URL_LIMIT) {
+    return badRequest(400, "url", "too_long", "url is too long");
+  }
+  if (url.includes("\0")) return badRequest(400, "url", "invalid", "url contains a null byte");
+  const scheme = url.toLowerCase();
+  if (!scheme.startsWith("http://") && !scheme.startsWith("https://")) {
+    return badRequest(400, "url", "invalid", "url must use http or https");
+  }
+  const title = body.title ?? null;
+  if (title != null) {
+    if (Buffer.byteLength(String(title), "utf8") > LINK_TITLE_LIMIT) {
+      return badRequest(400, "title", "too_long", "title is too long");
+    }
+    if (String(title).includes("\0")) {
+      return badRequest(400, "title", "invalid", "title contains a null byte");
+    }
+  }
+  if (body.link_type != null && !VALID_LINK_TYPES.has(body.link_type)) {
+    return badRequest(400, "link_type", "invalid", "link_type is not permitted");
+  }
+  const link = {
+    link_id: state.nextId++,
+    story_id: storyId,
+    url,
+    link_type: body.link_type ?? detectLinkType(url),
+    title,
+    created: new Date().toISOString(),
+  };
+  story.links.push(link);
+  return { status: 200, payload: link };
 }
 
 /**

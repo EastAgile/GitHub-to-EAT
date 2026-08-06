@@ -61,6 +61,7 @@ test("writePlan writes labels, then stories oldest-first with their subresources
       epicsBlocked: 0,
       labelsCreated: 2,
       labelsExisting: 0,
+      links: 0,
       stories: 2,
       tasks: 2,
       comments: 1,
@@ -428,6 +429,113 @@ test("without sendDates the story/comment bodies stay byte-identical to v3", asy
     ]);
   }
   assert.equal(comments[0].options, undefined);
+});
+
+// --- pull requests: rejected creates and story links (#31933) ------------------
+
+// `rejected` carries no `state_rank` ("rejected stays NULL by design"), so the create's
+// done-state guard 400s a `completed_at` on one — which every closed-unmerged PR has.
+test("a rejected create sends no completed_at, even though the op carries one", async () => {
+  const { client, stories } = recordingClient();
+  const plan = datedPlan();
+  plan.stories[0].current_state = "rejected";
+  await writePlan(client, 91, plan, { stream: capture(), sendDates: true });
+
+  const rejected = stories.find((s) => s.name === "closed");
+  assert.equal(rejected.created_at, "2020-01-01T00:00:00Z");
+  assert.ok(!("completed_at" in rejected), JSON.stringify(rejected));
+});
+
+// writePlan is a general plan executor, not a GitHub-only one: the guard is the server's
+// done-state set (state_rank >= FINISHED_RANK), not the one state mapRepo happens to emit.
+for (const state of ["finished", "delivered", "accepted"]) {
+  test(`a ${state} create carries its completed_at`, async () => {
+    const { client, stories } = recordingClient();
+    const plan = datedPlan();
+    plan.stories[0].current_state = /** @type {any} */ (state);
+    await writePlan(client, 91, plan, { stream: capture(), sendDates: true });
+
+    const done = stories.find((s) => s.name === "closed");
+    assert.equal(done.completed_at, "2020-02-01T00:00:00Z", JSON.stringify(done));
+  });
+}
+
+/**
+ * @param {import("../src/mapping.js").StoryOp["links"]} links
+ * @returns {import("../src/writer.js").WritePlan}
+ */
+const linkPlan = (links) => ({
+  labels: [],
+  stories: [
+    {
+      external_id: "10",
+      name: "a PR",
+      description: null,
+      story_type: "feature",
+      current_state: "started",
+      created_at: "2024-03-01T08:00:00Z",
+      completed_at: null,
+      labels: ["pull-request"],
+      links,
+      tasks: [],
+      comments: [],
+    },
+  ],
+});
+
+/** @returns {{ client: any, links: any[] }} */
+function linkRecordingClient() {
+  const recording = recordingClient();
+  /** @type {any[]} */
+  const links = [];
+  return {
+    client: {
+      ...recording.client,
+      createLink: async (/** @type {any} */ ..._args) => {
+        links.push({ projectId: _args[0], storyId: _args[1], link: _args[2], key: _args[3] });
+        return {};
+      },
+    },
+    links,
+  };
+}
+
+test("sendLinks writes one link per story link, keyed by plan position", async () => {
+  const { client, links } = linkRecordingClient();
+  const result = await writePlan(
+    client,
+    91,
+    linkPlan([
+      { url: "https://github.com/o/r/pull/10", link_type: "pull_request" },
+      { url: "https://github.com/o/r/pull/11", link_type: "pull_request" },
+    ]),
+    { stream: capture(), runId: "run", sendLinks: true },
+  );
+  assert.equal(result.links, 2);
+  assert.deepEqual(
+    links.map((l) => l.link),
+    [
+      { url: "https://github.com/o/r/pull/10", link_type: "pull_request" },
+      { url: "https://github.com/o/r/pull/11", link_type: "pull_request" },
+    ],
+  );
+  assert.deepEqual(
+    links.map((l) => l.key),
+    ["run:link:10:0", "run:link:10:1"],
+  );
+  assert.equal(links[0].storyId, 1);
+});
+
+test("without sendLinks no link is written and the story create is untouched", async () => {
+  const { client, links } = linkRecordingClient();
+  const result = await writePlan(
+    client,
+    91,
+    linkPlan([{ url: "https://github.com/o/r/pull/10", link_type: "pull_request" }]),
+    { stream: capture() },
+  );
+  assert.equal(links.length, 0);
+  assert.equal(result.links, 0);
 });
 
 // --- epics (#31931) ----------------------------------------------------------

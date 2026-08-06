@@ -657,6 +657,87 @@ test("fetchAll drops comments whose issue_url points at a PR or unknown issue", 
   );
 });
 
+// --- pull requests (#31933) --------------------------------------------------
+
+test("listIssues keeps pull requests when asked for them", async () => {
+  await withGitHub(
+    (_req, res) =>
+      json(res, 200, [
+        { number: 1, title: "a bug" },
+        { number: 2, title: "a PR", pull_request: { merged_at: null } },
+      ]),
+    async (base) => {
+      const kept = await new GitHubClient("o", "r", { apiBase: base }).listIssues({
+        pullRequests: true,
+      });
+      assert.deepEqual(
+        kept.map((i) => i.number),
+        [1, 2],
+      );
+    },
+  );
+});
+
+// The merge state rides on the listing row itself, so no per-PR `/pulls/{n}` request is
+// needed — a per-PR fetch would change the run's rate budget.
+test("fetchAll reads a PR's merge state off the listing, requesting no /pulls endpoint", async () => {
+  /** @type {string[]} */
+  const paths = [];
+  await withGitHub(
+    (req, res) => {
+      const path = new URL(req.url ?? "", "http://x").pathname;
+      paths.push(path);
+      if (path.endsWith("/issues")) {
+        json(res, 200, [
+          { number: 1 },
+          { number: 2, pull_request: { merged_at: "2024-03-05T12:00:00Z" } },
+        ]);
+      } else {
+        json(res, 200, []);
+      }
+    },
+    async (base) => {
+      const repo = await new GitHubClient("o", "r", { apiBase: base }).fetchAll({
+        pullRequests: true,
+      });
+      assert.equal(repo.issues[1].pull_request.merged_at, "2024-03-05T12:00:00Z");
+      assert.ok(!paths.some((p) => p.includes("/pulls")), paths.join(", "));
+    },
+  );
+});
+
+test("fetchAll keeps a PR's conversation comments once the PR itself is kept", async () => {
+  /** @param {boolean} pullRequests @returns {Promise<number[]>} */
+  const commentIds = async (pullRequests) => {
+    /** @type {number[]} */
+    let ids = [];
+    await withGitHub(
+      (req, res) => {
+        const path = new URL(req.url ?? "", "http://x").pathname;
+        if (path.endsWith("/issues")) {
+          json(res, 200, [{ number: 1 }, { number: 2, pull_request: { merged_at: null } }]);
+        } else if (path.endsWith("/issues/comments")) {
+          // GitHub models a PR conversation comment as an issue comment: its `issue_url`
+          // points at `/issues/<n>`, never `/pulls/<n>`.
+          json(res, 200, [
+            { id: 10, issue_url: "https://api.github.com/repos/o/r/issues/1" },
+            { id: 11, issue_url: "https://api.github.com/repos/o/r/issues/2" },
+          ]);
+        } else {
+          json(res, 200, []);
+        }
+      },
+      async (base) => {
+        const repo = await new GitHubClient("o", "r", { apiBase: base }).fetchAll({ pullRequests });
+        ids = repo.comments.map((/** @type {any} */ c) => c.id);
+      },
+    );
+    return ids;
+  };
+  assert.deepEqual(await commentIds(true), [10, 11]);
+  assert.deepEqual(await commentIds(false), [10]);
+});
+
 // --- sub-issue listings (#31928) ---------------------------------------------
 
 /**

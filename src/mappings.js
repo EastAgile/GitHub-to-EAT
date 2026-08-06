@@ -15,6 +15,8 @@ import {
   issuesLegend,
   MILESTONES_LEGEND,
   milestonesLegend,
+  PRS_LEGEND,
+  prsLegend,
   RELEASES_LEGEND,
   releasesLegend,
 } from "./mapping.js";
@@ -41,11 +43,8 @@ export const MAPPINGS = {
   },
   prs: {
     requestField: "include_pull_requests",
-    legend: [
-      "open PR → story (started); merged PR → story (accepted, 'pull-request' label)",
-      "closed-unmerged PR → story (rejected)",
-      "a merged PR that closes an imported issue folds into that issue's story",
-    ],
+    legend: PRS_LEGEND,
+    render: prsLegend,
   },
   milestones: {
     requestField: "include_milestones",

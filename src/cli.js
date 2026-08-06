@@ -12,7 +12,7 @@ import { parseArgs } from "node:util";
 import { EATClient, EATError, EATTimeout } from "./client.js";
 import { ConfigError, loadConfig } from "./config.js";
 import { runDirect as defaultRunDirect } from "./direct.js";
-import { assertDirectSupportsIncludes, DEFAULT_ENGINE, ENGINES, parseEngine } from "./engine.js";
+import { DEFAULT_ENGINE, ENGINES, parseEngine } from "./engine.js";
 import { GitHubError } from "./github.js";
 import { runImport as defaultRunImport } from "./importer.js";
 import { customizationFlagsGiven, parseCustomization } from "./mapping.js";
@@ -379,20 +379,6 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     }
   }
 
-  try {
-    if (engine === "direct") assertDirectSupportsIncludes(included);
-  } catch (err) {
-    // Blame the flag the caller actually typed: --engine is only one of the
-    // three ways a run ends up on the direct engine.
-    const blamed =
-      values.engine !== undefined
-        ? "--engine"
-        : values.customize === true
-          ? "--customize"
-          : (customizationFlagsGiven(values)[0] ?? "--include");
-    return usageError(`argument ${blamed}: ${err instanceof Error ? err.message : err}`);
-  }
-
   // Fail closed: off-terminal there is no way to show the [y/N] confirm, so a
   // run that would write must say --yes rather than have it assumed.
   if (!values["dry-run"] && !values.yes && !confirm) {
@@ -491,6 +477,9 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
               wizard(fetched, {
                 input: /** @type {import("node:stream").Readable} */ (stdin),
                 output: stderr,
+                // The questions describe the rows this run maps, and under
+                // --include prs a PR row is one of them.
+                pullRequests: included.includes("prs"),
               })
           : undefined,
         // Runs after the wizard, before any write, so the legend + confirm

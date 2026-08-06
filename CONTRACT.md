@@ -195,8 +195,6 @@ then fall back to the calling key (the server importer's own fallback), while a
 ghost *assignee* is simply absent — the caller does not become an owner.
 `tests/parity.test.js` pins the triples. The differences that remain:
 
-- **Scope** — the direct engine imports no pull requests, so the "PR creator is
-  also an owner" rule has nothing to apply to.
 - **Gating** — all three fields are **owner-gated and create-only**, so the engine
   feature-detects them first and falls back to the `@login` comment prefix against
   a server that does not advertise them (see *Fidelity limitations* below).
@@ -282,12 +280,16 @@ v3 adds a second import engine selectable with `--engine server|direct`
 
 ### v3 scope
 
-- **Issues, milestones, releases and deps.** `--engine direct` composes with
-  `--include`; it supports `issues` (always imported), `milestones`, `releases`
-  and `deps`. `prs` exits with a usage error ("not supported by the direct
-  engine yet"). The message names the supported set straight from the engine
-  module's own list, so it cannot go on advertising a narrower scope than the
-  engine has.
+- **Every `--include` type.** `--engine direct` composes with `--include`; it
+  supports `issues` (always imported), `prs`, `milestones`, `releases` and
+  `deps` — the whole registry, so no selection the flag accepts is refused by
+  the direct engine. There is no direct-unsupported refusal path: `parseInclude`
+  is the only producer of a selection and it yields registry types only,
+  rejecting anything else with `unknown import type '<x>'`. A type added to the
+  registry therefore reaches both engines, and gating one off is a decision for
+  whichever story adds it — `deps` is the one type gated the other way round,
+  refused on the **server** engine when that server's import body has no
+  `include_dependencies`.
 - **Staged build.** This epic ships across several stories; the pipeline is
   now wired end-to-end. `--engine direct` performs real imports,
   prompting for confirmation exactly like the server engine. `--dry-run` runs
@@ -457,11 +459,17 @@ repo-wide list endpoints under `https://api.github.com`, all `per_page=100`
 with `Link`-header pagination:
 
 - `GET /repos/{owner}/{repo}/issues?state=all` — issues. The endpoint mixes in
-  pull requests (tagged with a `pull_request` key); the fetcher drops them.
+  pull requests (tagged with a `pull_request` key); the fetcher drops them unless
+  `--include prs` asks for them. That stub carries `merged_at` (non-null exactly
+  when the PR was merged), so merge state costs **no** extra request: the run's
+  rate budget is the same whether or not PRs are imported. No `/pulls` endpoint
+  is ever requested.
 - `GET /repos/{owner}/{repo}/issues/comments` — every issue comment,
-  repo-wide. The endpoint includes PR conversation comments; the fetcher keeps
-  only comments whose `issue_url` points at a kept issue, so PR chatter never
-  reaches the mapping stage.
+  repo-wide. The endpoint includes PR conversation comments — GitHub models them
+  as issue comments, so their `issue_url` points at `/issues/<n>`, never
+  `/pulls/<n>`. The fetcher keeps only comments whose `issue_url` points at a
+  **kept row**, so PR chatter reaches mapping exactly when its PR does and never
+  otherwise.
 - `GET /repos/{owner}/{repo}/labels` — the repo's labels.
 - `GET /repos/{owner}/{repo}/issues/{n}/sub_issues` — one issue's sub-issues,
   requested **only** for rows whose `sub_issues_summary.total` is a number
@@ -744,8 +752,10 @@ drifting in prose.
 - **People** — the issue author becomes the story's `requestor` and the
   assignees its `owners`, both as `ExternalPersonInput` (see *GitHub identity
   mapping (both engines)* above). Releases carry neither.
-- **Identity** — `external_id` is the issue number as a string; rows carrying
-  a `pull_request` key are dropped (v3 is issues-only).
+- **Identity** — `external_id` is the issue number as a string. GitHub numbers
+  issues and PRs in one space, so a PR needs no namespace of its own (unlike a
+  release's `release-<id>`); rows carrying a `pull_request` key are dropped
+  unless `--include prs` is on (see "Pull requests → stories" below).
 
 The CLI legend's `issues` lines are assembled by this module's own renderer,
 whose default output is what the `MAPPINGS` registry re-exports — the registry
@@ -766,6 +776,84 @@ rule off for the whole run — `--no-comments` / `--no-tasks` drop their lines, 
 that run; the `Customized:` block names the override instead). `--story-type
 infer` is the default, so it keeps the line. No override turns the sub-issue
 rule off, so its line renders for every `--engine direct` run.
+
+### Pull requests → stories (direct engine)
+
+Opt-in via `--include prs` (the server engine's `include_pull_requests`, server
+story #26313). Off, every byte the engine fetches, maps and writes is what it
+wrote before PRs existed: the PR rows are dropped at the fetch, so nothing
+downstream sees them.
+
+The mapping mirrors `github.rs` `issue_to_record`'s PR branches exactly;
+`tests/parity.test.js` pins each rule against that module's own Rust assertions.
+
+- **State** — open PR → `started`; merged PR → `accepted`; closed-unmerged PR →
+  `rejected`. Merge state is read from the listing row's
+  `pull_request.merged_at` (non-null ⇒ merged), never from a per-PR fetch. A
+  closed PR keeps its GitHub closed date the way a closed issue does, but only an
+  `accepted` create carries it on the wire (see *Length limits* → the write rule
+  below).
+- **`state_reason` never applies to a PR.** The closed-reason state and labels
+  are computed `if closed && !is_pr`, so a PR closed `not_planned` is still
+  `rejected` because it was not merged, and one closed `duplicate` after a merge
+  is still `accepted`. A PR never earns a `not-planned` / `duplicate` label.
+- **The chore carve-out does not apply either.** The closed-reason branch is
+  gated on the type accepting `rejected` (a chore has no such state in
+  `valid_states_for_type`), but the PR branch is ungated — the server writes a
+  closed-unmerged chore PR `rejected`, and so does the direct engine. The public
+  `POST /stories` resolves `story_type` and `current_state` independently and
+  applies no per-type state check on create (`handlers/stories.rs::create`; the
+  per-type table gates *transitions*), so the create accepts it.
+- **A synthetic `pull-request` label** rides on every PR story. It is added
+  *after* type inference has read the author's own labels, so it can never
+  reclassify the story; it goes through the normal label pipeline, so a repo
+  label of the same name keeps its casing and colour and the label is not
+  doubled. The server importer reaches the same rows by a different route — its
+  `labels.push` is unconditional (`github.rs:993`), and the duplicate is absorbed
+  by the lowercase-keyed label cache plus `INSERT INTO story_has_label … ON
+  CONFLICT DO NOTHING` (`common.rs:2192`, `:1928-1934`) — so this is not an
+  engine divergence, only a difference in where the deduplication happens.
+- **People** — the PR's creator is the story's `requestor` **and** an owner (they
+  authored the work), appended after the assignees and deduplicated on the
+  numeric GitHub id, so a creator who is also an assignee is one owner.
+- **Links** — the PR's own `html_url` is attached to its story as a
+  `link_type: "pull_request"` link (server story #30751), not as description
+  text. When a PR's body closes an imported issue, that PR's URL is also attached
+  to the *issue's* story (server story #26528), deduplicated per issue by URL.
+  Closing references are detected keyword-only, mirroring
+  `parse_closing_issue_refs`: `close`/`closed`/`closes`/`fix`/`fixed`/`fixes`/
+  `resolve`/`resolved`/`resolves`, word-bounded, `:`/whitespace tolerated before
+  a same-repo `#N`. Like the server's, the detection misses PRs linked only via
+  GitHub's UI "Development" panel and cross-repo (`owner/repo#N`) references.
+- **The #26313 fold** — a **merged** PR whose body closes an imported issue that
+  is itself `closed` in the snapshot resolved that issue (GitHub only auto-closes
+  on merge), so it writes **no** second story: the issue is the single story, and
+  the PR's URL lands on it as the link above. The fold is gated on the issue
+  being closed — a still-open one means the merge did not resolve it (a race, or
+  a manual reopen), so that PR keeps its own `accepted` story and the link is
+  recorded anyway.
+  - **What the fold discards.** A folded PR has no story, and nothing of its own
+    is moved onto the issue's story: its conversation comments, its repo labels
+    (including the synthetic `pull-request` one), its creator-as-owner, its dates
+    and its body are all dropped. Only its URL survives, as the link above. This
+    mirrors the server importer, which filters the folded numbers out *before*
+    fetching comments and before `issue_to_record` runs (`github.rs:477-482`), so
+    both engines lose the same thing — but it is real data loss the bullets above
+    would not lead a reader to expect.
+- **Comments** — a PR's conversation comments attach to the PR's own story, by
+  the same `issue_url` join issues use. A folded PR has no story, so its comments
+  are dropped rather than moved (see *What the fold discards*).
+- **Filters and overrides** — `--states` / `--milestones` select PR rows the same
+  way they select issues, and the warning counts (`no fetched issue matches this
+  run's filters`, the milestone note) count PR rows once `--include prs` is on —
+  minus the folded ones, which write no story. The fold and the links are
+  computed over the rows a run actually maps, so a PR is never folded into an
+  issue a filter excluded — there would be no story to fold it into. No
+  `--customize` choice switches the PR mapping off.
+
+The legend's `prs` block keeps the three lines the server engine has always
+printed and adds the two link lines under `--engine direct`, the way the
+milestones and releases blocks do.
 
 ### Milestones → epics (direct engine)
 
@@ -1074,7 +1162,14 @@ real server 2026-07-16 and mirrored by `src/mockserver.js`):
   an existing name), and embeds the full label objects in the response.
   `current_state: "accepted"` is accepted at create time for an unestimated
   feature (verified 2026-07-16) — no estimate guard, so no
-  create-then-transition fallback is needed. The four backdating / provenance
+  create-then-transition fallback is needed. `current_state: "started"` is
+  likewise a legal create state (what an open PR lands in). **`completed_at` is
+  valid only on a create that lands *done*** (`state_rank >= finished`);
+  `rejected` carries no rank at all ("rejected stays NULL by design"), so the
+  writer sends `completed_at` on `accepted` creates only and omits it on every
+  other state — including a `rejected` closed-unmerged PR and a `rejected`
+  abandoned issue, both of which carry a GitHub closed date the plan keeps but
+  the write cannot express. The four backdating / provenance
   fields are owner-gated, and so are `requestor` and `owners[].external`
   (`ExternalPersonInput`, server story #32773 — create-only: the PUT `owners`
   reconcile rejects `external`); see "Marker dedup", "GitHub identity mapping
@@ -1123,6 +1218,24 @@ real server 2026-07-16 and mirrored by `src/mockserver.js`):
   Member-gated, not owner-gated. Used only under `--include …,deps`; a plan
   carrying no blockers never touches the route, and a plan that does carry them
   is refused before the first write when the client cannot write blockers at all.
+- **`POST /stories/{id}/links`** — body `{ "url": "...", "link_type": "...",
+  "title": "..." }` → 200 with the link row.
+  - `url` is required and trimmed; empty → `400`. It must use an **`http`** or
+    **`https`** scheme (case-insensitive) — any other scheme (`javascript:`,
+    `data:`, `file:`, `ftp:`, …) is `400 "url must use http or https"` — carry no
+    null bytes, and fit `limits::LINK_URL` (1000 bytes). `title` is optional,
+    fits `limits::LINK_TITLE` (255) and is omitted rather than sent null.
+  - `link_type` is **not** free text. The server allowlists exactly
+    `relates_to`, `duplicates`, `blocks`, `is_blocked_by`, `pull_request`,
+    `branch`, `other` and answers `400 "link_type is not permitted"` to anything
+    else (`handlers/story_links.rs` `VALID_LINK_TYPES`). Omit it and the server
+    derives one from the URL (`detect_link_type`: a `github.com` `/pull/` URL →
+    `pull_request`, `/tree/` → `branch`, else `other`) — it never stores null.
+    The import sends `pull_request`, which is on the list.
+  - Feature-detected from `GET /openapi.json` like the other newer capabilities:
+    a server that does not publish the path 404s it, and a 404 is terminal for
+    the writer, so the engine probes first and imports without links (warning
+    aloud) rather than dying part-written.
 - **Idempotency** — every `POST` replays on same key + same body and returns
   `409 idempotency_conflict` on same key + different body (see the v1 import
   note). The ledger is keyed by key + body only: a same-key + same-body
@@ -1296,9 +1409,9 @@ and both are prescanned, in union.
   also survives the mixed case: because backdating and person attribution are two
   independent probes, the body keeps `@login on YYYY-MM-DD:` whenever the
   comment's `created_at` cannot ride on the write, and collapses to `@login:` (or
-  disappears entirely, once people ride too) only when it can. Pull requests are
-  out of scope for this engine, so the server's "the PR creator is also an owner"
-  rule has nothing to apply to.
+  disappears entirely, once people ride too) only when it can. Under
+  `--include prs` a PR's creator is sent as an owner as well as the requestor,
+  mirroring the server importer.
 - **Placeholder-owner reporting** — the direct engine's `N placeholder owner(s)
   created` / `would create N placeholder owner(s)` line lists the distinct GitHub
   logins the run attached as requestor, owner or comment author. The story-create
@@ -1322,6 +1435,51 @@ and both are prescanned, in union.
   one GitHub repo per EAT project. Releases are keyed off GitHub's global
   release ids, which do not collide across repos, so only the issue half of the
   key carries this hazard.
+- **An open PR loses its started date.** The server importer seeds an open PR's
+  `started_at` from the PR's `created_at`, so its reconstructed history is a
+  single `NULL → started @ created`. `started_at` is not on the public
+  `POST /stories` body, so the direct engine's open PR is created `started` with
+  the transition stamped at import time instead. Everything else about the row —
+  title, description, type, state, labels, links, owners, external id — matches
+  the server importer, so the two engines still dedup each other's PRs. Accepting
+  a backdated `started_at` on the public create is the EAT-side ask that would
+  close the gap: tracker
+  [#35489](https://eastagiletracker.com/s/e3cqxk6d).
+- **A rejected story loses its completion date.** A closed-unmerged PR (and an
+  issue closed `not_planned` / `duplicate`) lands `rejected`, which the create
+  treats as not-done, so `completed_at` cannot ride along — the row keeps its
+  GitHub closed date in the plan but is created with the import time. The server
+  importer writes the column directly and is not subject to that guard. Nothing
+  else about the row differs.
+- **Story links need a server that publishes them.** The PR links above are
+  written through `POST /stories/{id}/links`, feature-detected from
+  `GET /openapi.json`. Against a server that does not publish the path the run
+  still imports every story and says so before the confirm, and — because an
+  import never updates a story it already created — those links can only be
+  recovered by deleting the stories and re-running against a server that has the
+  endpoint. The two losses differ: a PR that imports as its own story still
+  reaches EAT through its dedup marker (`Imported from …`, which redirects to the
+  PR), while a folded PR's URL and every link onto a closed issue reach EAT
+  nowhere at all.
+- **Adding `--include prs` to an already-imported repo cannot backfill its
+  links.** A cross-link belongs on the *issue's* story, and re-running a repo
+  imported without `prs` finds that issue already imported — so the dedup drops
+  the story and its links together, and an import never adds a link to a story
+  already in EAT. The run reports the count it could not write (`N pull-request
+  link(s) belong on story(s) already imported`); recovering them means deleting
+  those stories in EAT and re-running with `--include issues,prs`. Only the
+  cross-links are affected: a PR importing as its own story is new, so its
+  self-link is written normally.
+- **A blank `html_url` on a PR is skipped, where the server folds anyway.** The
+  direct engine trims a PR's `html_url` and skips a row whose URL is blank, so
+  such a PR is never folded and keeps its own story. The server importer guards
+  only on the field being present (`github.rs:452`) — it folds the PR away and
+  then drops the blank URL at insert (`common.rs:2053-2056`), so the PR's story
+  is lost with nothing to show for it. GitHub does not emit a blank `html_url`,
+  so this is a divergence in the degenerate case only, named here because the
+  engines are otherwise expected to agree row for row. Both engines write **no**
+  link row for a blank URL (`github.rs:1086-1090` filters it on the self-link
+  path too).
 - **A draft release loses its planned date.** The server importer seeds a draft
   release's `scheduled_at` from the release's `created_at`, which places it in
   the iteration grid. `scheduled_at` is not on the public `POST /stories` body

@@ -21,9 +21,11 @@ import {
   EPIC_TITLE_LIMIT,
   epicTitleKey,
   FALLBACK_LIMITS,
+  foldedPullRequests,
   hasMilestoneFilter,
   ISSUE_TYPE_NAMES,
   mappableRelease,
+  mappableRow,
   mapRepo,
   matchesMilestones,
   matchesStates,
@@ -44,7 +46,8 @@ import { writePlan } from "./writer.js";
  *   & { fieldLimits?: () => Promise<Partial<import("./mapping.js").FieldLimits>>,
  *       supportsProvenanceDedup?: () => Promise<boolean>,
  *       supportsBackdating?: () => Promise<boolean>,
- *       supportsPersonAttribution?: () => Promise<boolean> }} DirectClient
+ *       supportsPersonAttribution?: () => Promise<boolean>,
+ *       supportsStoryLinks?: () => Promise<boolean> }} DirectClient
  */
 
 /**
@@ -55,15 +58,18 @@ import { writePlan } from "./writer.js";
  *
  * @param {{ issues: any[], releases?: any[] }} fetched
  * @param {import("./mapping.js").Customization} customization
+ * @param {boolean} pullRequests
  * @param {import("./progress.js").OutStream} [stream]
  */
-function warnFiltersMatchNothing({ issues, releases }, customization, stream) {
+function warnFiltersMatchNothing({ issues, releases }, customization, pullRequests, stream) {
   const filters = describeFilters(customization);
   if (!filters.length) return;
   const { states, milestones } = customization;
   // Milestones are matched against what survives the other filters, because
   // that is the order mapRepo applies them in.
-  const candidates = issues.filter((issue) => !issue.pull_request && matchesStates(issue, states));
+  const candidates = issues.filter(
+    (issue) => mappableRow(issue, pullRequests) && matchesStates(issue, states),
+  );
 
   if (hasMilestoneFilter(milestones)) {
     const present = new Set(candidates.map((issue) => issue.milestone?.title));
@@ -109,16 +115,23 @@ function warnUnmappableReleases({ releases }, stream) {
 }
 
 /**
- * The issues a run actually maps: not a PR, and past both selection filters.
+ * The rows a run actually writes a story for: mappable at all, past both selection filters,
+ * and not folded away — a merged PR that resolves an imported issue writes no story.
  *
  * @param {any[]} issues
  * @param {import("./mapping.js").Customization} customization
+ * @param {boolean} pullRequests
  * @returns {any[]}
  */
-function inScope(issues, { states, milestones }) {
+function inScope(issues, customization, pullRequests) {
+  const { states, milestones } = customization;
+  const folded = foldedPullRequests(issues, customization, pullRequests);
   return issues.filter(
-    (issue) =>
-      !issue.pull_request && matchesStates(issue, states) && matchesMilestones(issue, milestones),
+    (row) =>
+      mappableRow(row, pullRequests) &&
+      !folded.has(String(row.number)) &&
+      matchesStates(row, states) &&
+      matchesMilestones(row, milestones),
   );
 }
 
@@ -131,17 +144,20 @@ function inScope(issues, { states, milestones }) {
  * @param {{ issues: any[] }} fetched
  * @param {import("./mapping.js").Customization} customization
  * @param {string[]} included
+ * @param {boolean} pullRequests
  * @param {import("./progress.js").OutStream} [stream]
  */
-function noteMilestonesNotImported({ issues }, customization, included, stream) {
-  const count = inScope(issues, customization).filter((issue) =>
+function noteMilestonesNotImported({ issues }, customization, included, pullRequests, stream) {
+  const count = inScope(issues, customization, pullRequests).filter((issue) =>
     milestoneEpicTitle(issue.milestone),
   ).length;
   if (!count) return;
+  // The count includes PR rows under `--include prs`, so the noun has to as well.
+  const noun = pullRequests ? "issue/PR row(s)" : "issue(s)";
   stream?.write(
-    `note: ${count} issue(s) carry a GitHub milestone this run does not import — pass ` +
+    `note: ${count} ${noun} carry a GitHub milestone this run does not import — pass ` +
       `--include ${includeWith(included, "milestones")} to import each milestone as an epic. ` +
-      "That groups only the issues the run itself imports; a story already in EAT is never " +
+      "That groups only the rows the run itself imports; a story already in EAT is never " +
       "re-labelled.\n",
   );
 }
@@ -208,13 +224,14 @@ function warnEpicsPruned(mapped, plan, imported, included, stream) {
  *
  * @param {{ issues: any[] }} fetched
  * @param {import("./mapping.js").Customization} customization
+ * @param {boolean} pullRequests
  * @param {import("./progress.js").OutStream} [stream]
  */
-function warnTruncatedMilestones({ issues }, customization, stream) {
+function warnTruncatedMilestones({ issues }, customization, pullRequests, stream) {
   // Trimmed before the Set: two titles differing only in surrounding whitespace do
   // collapse into one epic, so counting them twice would over-report the merge.
   const long = new Set(
-    inScope(issues, customization)
+    inScope(issues, customization, pullRequests)
       .map((issue) => issue.milestone?.title)
       .filter((title) => typeof title === "string")
       .map((title) => title.trim())
@@ -236,15 +253,16 @@ function warnTruncatedMilestones({ issues }, customization, stream) {
  *
  * @param {{ issues: any[] }} fetched
  * @param {import("./mapping.js").Customization} customization
+ * @param {boolean} pullRequests
  * @param {import("./progress.js").OutStream} [stream]
  */
-function warnUnrecognisedIssueTypes({ issues }, customization, stream) {
+function warnUnrecognisedIssueTypes({ issues }, customization, pullRequests, stream) {
   const { storyType, states, milestones } = customization;
   if (storyType !== "infer") return;
   const count = issues.filter((issue) => {
     const name = issue.type?.name;
     return (
-      !issue.pull_request &&
+      mappableRow(issue, pullRequests) &&
       matchesStates(issue, states) &&
       matchesMilestones(issue, milestones) &&
       typeof name === "string" &&
@@ -257,6 +275,50 @@ function warnUnrecognisedIssueTypes({ issues }, customization, stream) {
     `warning: ${count} issue(s) carry an issue type this importer does not recognise ` +
       `(it knows ${ISSUE_TYPE_NAMES.join(", ")}) — those stories take their type from ` +
       "labels + title instead.\n",
+  );
+}
+
+/**
+ * A server without the links path drops every PR↔story URL silently, and an import never
+ * updates a story it already created — so the loss is permanent. It runs before the legend
+ * and the confirm, so nobody says yes to link rows this server will not take.
+ *
+ * @param {{ issues: any[] }} fetched
+ * @param {import("./progress.js").OutStream} [stream]
+ */
+function warnLinksNotWritten({ issues }, stream) {
+  if (!issues.some((row) => row.pull_request)) return;
+  stream?.write(
+    "warning: this server does not accept story links, so no pull-request link rows are " +
+      "written. A PR that imports as its own story still reaches EAT by its dedup marker " +
+      "(`Imported from …`), which redirects to the PR; but a merged PR folded into an " +
+      "issue's story, and every link from a PR onto the issue it closes, reach EAT nowhere " +
+      "at all. An import never adds a link later, so delete those stories and re-run " +
+      "against a server that publishes the links endpoint to get them.\n",
+  );
+}
+
+/**
+ * What the story dedup cost the links. `applyDedup` drops an already-imported story *and*
+ * its links, and an import never updates a story it already created — so adding
+ * `--include prs` to a repo imported without it silently loses every cross-link.
+ *
+ * @param {{ stories: import("./mapping.js").StoryOp[] }} mapped
+ * @param {import("./writer.js").WritePlan} plan post-dedup
+ * @param {string[]} included
+ * @param {import("./progress.js").OutStream} [stream]
+ */
+function warnLinksPruned(mapped, plan, included, stream) {
+  const survivors = new Set(plan.stories.map((op) => op.external_id));
+  const dropped = mapped.stories
+    .filter((op) => !survivors.has(op.external_id))
+    .reduce((total, op) => total + (op.links?.length ?? 0), 0);
+  if (!dropped) return;
+  stream?.write(
+    `warning: ${dropped} pull-request link(s) belong on story(s) already imported, so this ` +
+      "run does not write them — an import never adds a link to a story already in EAT. " +
+      `Delete those stories in EAT and re-run with --include ${includeWith(included, "prs")} ` +
+      "to import them with their links.\n",
   );
 }
 
@@ -298,7 +360,8 @@ function attachedPeople(plan) {
  *     => Promise<import("./mapping.js").Customization>,
  *   announce?: (fetched: { issues: any[], comments: any[], labels: any[] },
  *     customization: import("./mapping.js").Customization) => Promise<void>,
- *   github?: { fetchAll(options?: { releases?: boolean, dependencies?: boolean }):
+ *   github?: { fetchAll(options?: { releases?: boolean, pullRequests?: boolean,
+ *     dependencies?: boolean }):
  *     Promise<{ issues: any[], comments: any[], labels: any[],
  *     subIssues?: Map<string, string[]>, releases?: any[],
  *     blockedBy?: Map<string, any[]>, dependencyRequests?: number }> } }} options
@@ -320,8 +383,10 @@ export async function runDirect(client, projectId, owner, repo, options) {
   // Every issue row carries its own milestone, so the epic mapping costs no extra fetch.
   const epics = included.includes("milestones");
   const dependencies = included.includes("deps");
+  // PR rows ride the issues listing, merge state included, so this costs no extra fetch either.
+  const pullRequests = included.includes("prs");
   const fetched = await runWithProgress(
-    () => source.fetchAll({ releases, dependencies }),
+    () => source.fetchAll({ releases, pullRequests, dependencies }),
     `fetching ${owner}/${repo} from GitHub`,
     { stream },
   );
@@ -331,11 +396,16 @@ export async function runDirect(client, projectId, owner, repo, options) {
   const customization = customize
     ? await customize(fetched)
     : (options.customization ?? DEFAULT_CUSTOMIZATION);
-  warnFiltersMatchNothing(fetched, customization, stream);
-  warnUnrecognisedIssueTypes(fetched, customization, stream);
+  warnFiltersMatchNothing(fetched, customization, pullRequests, stream);
+  warnUnrecognisedIssueTypes(fetched, customization, pullRequests, stream);
   warnUnmappableReleases(fetched, stream);
-  if (epics) warnTruncatedMilestones(fetched, customization, stream);
-  else noteMilestonesNotImported(fetched, customization, included, stream);
+  if (epics) warnTruncatedMilestones(fetched, customization, pullRequests, stream);
+  else noteMilestonesNotImported(fetched, customization, included, pullRequests, stream);
+  // An older server 404s the links path, which is terminal — probing keeps a PR run
+  // importing there instead of dying part-written. Probed ahead of the legend and the
+  // confirm so neither promises link rows this server refuses.
+  const sendLinks = await (client.supportsStoryLinks?.() ?? false);
+  if (pullRequests && !sendLinks) warnLinksNotWritten(fetched, stream);
   // The customized legend + confirm reflect those answers, so they land here —
   // a declined confirm throws, aborting before any prescan or write.
   if (announce) await announce(fetched, customization);
@@ -349,7 +419,7 @@ export async function runDirect(client, projectId, owner, repo, options) {
   // one change); degrades to false, which keeps the `@login` comment prefix.
   const sendPeople = await (client.supportsPersonAttribution?.() ?? false);
   const mapped = clampPlan(
-    mapRepo(fetched, customization, { sendDates, epics, sendPeople }),
+    mapRepo(fetched, customization, { sendDates, epics, sendPeople, pullRequests }),
     limits,
     {
       reserveDescription: (op) =>
@@ -381,6 +451,8 @@ export async function runDirect(client, projectId, owner, repo, options) {
   );
   const { plan, skipped } = applyDedup(mapped, imported, owner, repo);
   warnEpicsPruned(mapped, plan, imported, included, stream);
+  // Only when links ride at all: otherwise the pre-legend warning already said they don't.
+  if (sendLinks) warnLinksPruned(mapped, plan, included, stream);
 
   // The marker lands at story-create, before tasks/blockers/comments — a run that
   // died in that window left a skipped-but-incomplete story. Surface it, loudly.
@@ -438,6 +510,7 @@ export async function runDirect(client, projectId, owner, repo, options) {
     sendProvenance,
     sendDates,
     sendPeople,
+    sendLinks,
   });
   return {
     importedStories: written.stories,

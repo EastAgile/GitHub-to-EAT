@@ -467,3 +467,28 @@ test("the deps cost line is a lower bound, and direct-only", () => {
   assert.match(direct, /at least one extra GitHub request per issue/);
   assert.ok(!renderLegend(["issues", "deps"], "server").includes("extra GitHub request"));
 });
+// --- pull requests in the legend (#31933) ------------------------------------
+
+test("the direct legend documents the PR links; the server legend keeps its three lines", () => {
+  const direct = renderLegend(["issues", "prs"], "direct");
+  assert.match(direct, /- the PR's own URL → a 'pull_request' link on its story/);
+  assert.match(direct, /links onto that issue's story/);
+  // The literals, not `render("server") === legend` — those are the same call, so that
+  // pins nothing. These are the bytes every `--engine server` run has printed since the
+  // type existed; editing PR_STATE_LINE / PR_REJECTED_LINE / PR_FOLD_LINE must fail here.
+  assert.deepEqual(MAPPINGS.prs.render?.("server", null), [
+    "open PR → story (started); merged PR → story (accepted, 'pull-request' label)",
+    "closed-unmerged PR → story (rejected)",
+    "a merged PR that closes an imported issue folds into that issue's story",
+  ]);
+  assert.deepEqual(MAPPINGS.prs.legend, MAPPINGS.prs.render?.("server", null));
+  assert.doesNotMatch(renderLegend(["issues", "prs"], "server"), /pull_request' link/);
+});
+
+// The PR rule has no `--customize` off switch, so no override may drop its lines.
+test("the PR lines survive every customization field", () => {
+  for (const c of CUSTOMIZATIONS) {
+    assert.match(renderLegend(["issues", "prs"], "direct", c), /- closed-unmerged PR → /);
+    assert.match(renderLegend(["issues", "prs"], "direct", c), /'pull_request' link on its story/);
+  }
+});
