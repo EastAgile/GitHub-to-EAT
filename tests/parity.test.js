@@ -605,7 +605,7 @@ test("divergence: the CLI clamps a blocker in bytes where the importer takes 255
 
 test("divergence: the CLI cannot set blocker_display_order; the importer writes the index", () => {
   // `CreateBlocker` has no order field, so every direct-engine row keeps the column's
-  // DEFAULT 0 where common.rs pushes `idx as i64` — server ask #35639 (/s/8kzvqm6a) tracks it.
+  // DEFAULT 0 where common.rs pushes `idx as i64` — server ask #35639 (/s/kp82mw25) tracks it.
   const { stories } = mapRepo({
     issues: [issue({ number: 7 })],
     comments: [],

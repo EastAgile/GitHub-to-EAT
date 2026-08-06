@@ -1124,7 +1124,8 @@ probe.
     `blocker_display_order` with no tiebreaker — returns direct-engine blockers
     in unspecified order. The writer still posts them sequentially in GitHub's
     `blocked_by` order, because insertion order is all it controls. Server ask
-    **#35639 (/s/8kzvqm6a)** tracks opening the order to the public create.
+    **#35639 (/s/kp82mw25)** tracks both halves — a settable order on the public
+    create, and a tiebreaker on the projection.
 
 ### Write surface (direct engine)
 
