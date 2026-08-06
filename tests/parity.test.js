@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   blockedByDesc,
@@ -579,8 +580,8 @@ test("divergence: the CLI clamps a blocker in bytes where the importer takes 255
 });
 
 test("divergence: the CLI cannot set blocker_display_order; the importer writes the index", () => {
-  // `CreateBlocker` has no order field, so every direct-engine row keeps the
-  // column's DEFAULT 0 where common.rs pushes `idx as i64`.
+  // `CreateBlocker` has no order field, so every direct-engine row keeps the column's
+  // DEFAULT 0 where common.rs pushes `idx as i64` — server ask #35639 (/s/kp82mw25) tracks it.
   const { stories } = mapRepo({
     issues: [issue({ number: 7 })],
     comments: [],
@@ -608,4 +609,39 @@ test("divergence: the CLI cannot set blocker_display_order; the importer writes 
     blockers.map((/** @type {any} */ b) => b.desc),
     ["Blocked by #12 (Second)", "Blocked by #90 (Upstream fix)"],
   );
+});
+
+// The parity rule wants the companion ask named beside the exception, so nobody
+// has to rediscover whether one was ever filed.
+test("every write-side deps divergence CONTRACT.md names cites a companion story", () => {
+  const lines = readFileSync(new URL("../CONTRACT.md", import.meta.url), "utf8").split("\n");
+  const start = lines.findIndex((l) => /^- \*\*.*write-side divergences\*\*/.test(l));
+  assert.notEqual(start, -1, "CONTRACT.md's deps section still leads a write-side divergence list");
+
+  const bullets = /** @type {string[]} */ ([]);
+  // Ends on the first dedent, not on the next heading: prose following the list would
+  // otherwise join the last bullet and lend it whatever story id it happens to mention.
+  for (const line of lines.slice(start + 1)) {
+    if (line.trim() === "") continue;
+    if (!/^ {2,}\S/.test(line)) break;
+    if (/^ {2}- /.test(line)) bullets.push(line);
+    else if (bullets.length > 0) bullets[bullets.length - 1] += ` ${line.trim()}`;
+  }
+  // Naming both divergences beats counting them: a partial re-indent drops one silently,
+  // and a legitimately-third divergence should not have to edit this test.
+  for (const known of ["clamped in bytes", "blocker_display_order"]) {
+    assert.ok(
+      bullets.some((b) => b.includes(known)),
+      `the list parsed — a rename or re-indent must not hide the "${known}" divergence`,
+    );
+  }
+
+  for (const bullet of bullets) {
+    const title = /\*\*(.+?)\*\*/.exec(bullet)?.[1] ?? bullet.trim();
+    assert.match(
+      bullet,
+      /#\d{4,} \(\/s\/[a-z0-9]+\)/,
+      `no companion story citation beside "${title}"`,
+    );
+  }
 });
