@@ -282,13 +282,8 @@ export class EATClient {
   }
 
   /**
-   * True when the story create accepts a backdated `started_at` (EAT #35489).
-   *
-   * Probed separately from {@link supportsBackdating}: #35489 shipped after
-   * #31425's `created_at`/`completed_at`, so a server can publish that pair and
-   * not this field — and `CreateStory` uses no `deny_unknown_fields`, so guessing
-   * wrong loses every open PR's start marker silently. Any error (404, auth,
-   * parse) counts as "not supported".
+   * True when the story create accepts a backdated `started_at` — its own probe, since
+   * #35489 shipped after #31425 and `CreateStory` has no `deny_unknown_fields`.
    *
    * @returns {Promise<boolean>}
    */

@@ -156,9 +156,7 @@ test("parity: a merged PR maps to accepted, a closed-unmerged one to rejected", 
 });
 
 // github.rs:1186 — `let started_at = if is_pr && !closed { created_at } else { None };`
-// Expectations copied from `open_pr_maps_to_started_with_marker_and_label`,
-// `merged_pr_maps_to_accepted_with_completed_and_label` and
-// `closed_unmerged_pr_maps_to_rejected_with_label` (story #36700).
+// Expectations copied from that module's own PR tests (story #36700).
 test("parity: an open PR seeds started_at from its created_at", () => {
   const s = onePr();
   assert.equal(s.started_at, s.created_at);

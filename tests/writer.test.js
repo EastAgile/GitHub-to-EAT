@@ -462,11 +462,7 @@ for (const state of ["finished", "delivered", "accepted"]) {
 
 // --- backdated started_at for open PRs (#36700) --------------------------------
 
-/**
- * A plan whose one story is an open PR: `started`, carrying the PR's creation instant.
- *
- * @returns {import("../src/writer.js").WritePlan}
- */
+/** @returns {import("../src/writer.js").WritePlan} */
 const startedPlan = () => ({
   labels: [],
   stories: [

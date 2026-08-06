@@ -133,9 +133,8 @@ async function withRetry(fn, attempts, delayMs) {
  *   `runId` scopes the idempotency keys (fresh per run, stable across in-run
  *   retries); `sendProvenance` adds the re-import pair (EAT #31427) to every
  *   story create; `sendDates` adds backdated `created_at`/`completed_at` to the
- *   writes; `sendStarted` adds a backdated `started_at` (EAT #35489, a later ship,
- *   so its own flag) to creates at or past `started`; `sendPeople` adds the imported
- *   GitHub requestor, owners and comment author
+ *   writes; `sendStarted` adds a backdated `started_at` (EAT #35489) to creates at or past
+ *   `started`; `sendPeople` adds the imported GitHub requestor, owners and comment author
  *   (EAT #32773); `sendLinks` writes each story's `pull_request` links — all off keep
  *   the payloads and the call sequence byte-identical to v3
  * @returns {Promise<WriteResult>}

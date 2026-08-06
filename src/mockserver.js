@@ -72,8 +72,7 @@ import { DONE_STATES, STARTED_STATES } from "./mapping.js";
  *   `created_at` on comment creates, and the handlers persist them; false
  *   simulates a server that predates backdating (fields absent + ignored)
  * @property {boolean} startedBackdating when true (default, mirroring prod), the openapi
- *   advertises `started_at` on story creates and the handler persists it; false simulates
- *   a server with #31425's pair but not #35489's later field
+ *   advertises `started_at` and the handler persists it; false predates #35489
  * @property {boolean} people when true (default, mirroring the server tree), the openapi
  *   advertises + the handlers persist the EAT #32773 person fields; false, absent + ignored,
  *   and an `external`-only owner 400s the way serde-dropping the unknown key makes it
