@@ -553,30 +553,6 @@ test("parity: a release carries no blockers — release_to_record leaves the lis
 // The two dependency divergences CONTRACT.md's deps section names, pinned so the
 // claim cannot rot into prose (see "Engine parity" — a divergence ships with a test).
 
-// The parity rule wants the companion ask named beside the exception, so nobody
-// has to rediscover whether one was ever filed.
-test("every write-side deps divergence CONTRACT.md names cites a companion story", () => {
-  const lines = readFileSync(new URL("../CONTRACT.md", import.meta.url), "utf8").split("\n");
-  const start = lines.findIndex((l) => /^- \*\*.*write-side divergences\*\*/.test(l));
-  assert.notEqual(start, -1, "CONTRACT.md's deps section still leads a write-side divergence list");
-
-  const bullets = /** @type {string[]} */ ([]);
-  for (const line of lines.slice(start + 1)) {
-    if (line.startsWith("#")) break;
-    if (/^ {2}- /.test(line)) bullets.push(line);
-    else if (bullets.length > 0) bullets[bullets.length - 1] += ` ${line.trim()}`;
-  }
-  assert.ok(
-    bullets.some((b) => b.includes("blocker_display_order")),
-    "the list parsed — a rename must not make this test vacuous",
-  );
-
-  for (const bullet of bullets) {
-    const title = /\*\*(.+?)\*\*/.exec(bullet)?.[1] ?? bullet.trim();
-    assert.match(bullet, /#\d{4,}/, `no companion story id beside "${title}"`);
-  }
-});
-
 test("divergence: the CLI clamps a blocker in bytes where the importer takes 255 chars", () => {
   // `POST /blockers` validates in bytes (`str::len()`), so the CLI must cut earlier
   // than common.rs's `chars().take(255)` — server ask #35629 (/s/y9q8ea68) tracks it.
@@ -633,4 +609,39 @@ test("divergence: the CLI cannot set blocker_display_order; the importer writes 
     blockers.map((/** @type {any} */ b) => b.desc),
     ["Blocked by #12 (Second)", "Blocked by #90 (Upstream fix)"],
   );
+});
+
+// The parity rule wants the companion ask named beside the exception, so nobody
+// has to rediscover whether one was ever filed.
+test("every write-side deps divergence CONTRACT.md names cites a companion story", () => {
+  const lines = readFileSync(new URL("../CONTRACT.md", import.meta.url), "utf8").split("\n");
+  const start = lines.findIndex((l) => /^- \*\*.*write-side divergences\*\*/.test(l));
+  assert.notEqual(start, -1, "CONTRACT.md's deps section still leads a write-side divergence list");
+
+  const bullets = /** @type {string[]} */ ([]);
+  // Ends on the first dedent, not on the next heading: prose following the list would
+  // otherwise join the last bullet and lend it whatever story id it happens to mention.
+  for (const line of lines.slice(start + 1)) {
+    if (line.trim() === "") continue;
+    if (!/^ {2,}\S/.test(line)) break;
+    if (/^ {2}- /.test(line)) bullets.push(line);
+    else if (bullets.length > 0) bullets[bullets.length - 1] += ` ${line.trim()}`;
+  }
+  // Naming both divergences beats counting them: a partial re-indent drops one silently,
+  // and a legitimately-third divergence should not have to edit this test.
+  for (const known of ["clamped in bytes", "blocker_display_order"]) {
+    assert.ok(
+      bullets.some((b) => b.includes(known)),
+      `the list parsed — a rename or re-indent must not hide the "${known}" divergence`,
+    );
+  }
+
+  for (const bullet of bullets) {
+    const title = /\*\*(.+?)\*\*/.exec(bullet)?.[1] ?? bullet.trim();
+    assert.match(
+      bullet,
+      /#\d{4,} \(\/s\/[a-z0-9]+\)/,
+      `no companion story citation beside "${title}"`,
+    );
+  }
 });
