@@ -1,11 +1,6 @@
 /**
- * Two-engine parity harness against a real East Agile Tracker (story #32775).
- *
- * Imports one fixture repo twice — `--engine server` into one project,
- * `--engine direct` into another — then reads both projects back through the
- * API and asserts field equivalence, keyed by GitHub issue number. The rules
- * live in `parity-compare.js`, which the default suite unit-tests; this file is
- * the live run.
+ * Two-engine parity harness against a real East Agile Tracker (#32775): one fixture repo imported
+ * twice, `--engine server` vs `--engine direct`, compared field by field by `parity-compare.js`.
  *
  * Opt-in and skipped by default, like `e2e.test.js`. Configure via environment:
  *
@@ -24,15 +19,8 @@
  *
  * Run just this test with:  node --test tests/parity.e2e.test.js
  *
- * NOT COMPARED — `completed_at`, because no agent-key read path exposes the
- * column (`DIVERGENCES.AGENT_KEY_COMPLETED_AT`, server ask #44442). The nearest
- * agent-readable value, `GET /projects/{id}/search`'s derived
- * `velocity_done_state_at`, is a transition timestamp rather than the column, is
- * NULL for `rejected` (#36701), and hides the archived rows this harness walks —
- * too indirect to stand in, so the harness pins the readable neighbours instead.
- * Also uncompared, all outside AC 2: blockers, `pull_request` cross-links, epic
- * membership, `estimate`, and iteration placement (the `MAX_BACKFILL_PAST_WINDOWS
- * = 199` cap, server ask #36735 — a placement difference, not a field one).
+ * NOT COMPARED — `completed_at` (no agent-key read path, #44442; `/search`'s value is too
+ * indirect). Outside AC 2: blockers, PR links, epics, `estimate`, iteration placement (#36735).
  */
 
 import assert from "node:assert/strict";
@@ -125,10 +113,8 @@ test("the direct engine imports the same repo as the server engine", {
   };
 
   /**
-   * Cursor-walk every story in a project. `include_done` is not optional:
-   * without it the list hides rows frozen on a past iteration, which is most
-   * of a backdated import — and hides a different share of each engine's, so
-   * the row sets would differ for a reason that is not a parity defect.
+   * `include_done` is not optional: without it the list hides rows frozen on a past iteration —
+   * most of a backdated import, and a different share per engine, so the row sets would differ.
    *
    * @param {string} projectId
    * @param {string} [fields]

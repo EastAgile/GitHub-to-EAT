@@ -1,8 +1,6 @@
 /**
- * Pure field-equivalence comparison between one server-engine import and one
- * direct-engine import of the same repo (story #32775). No I/O — the live
- * harness in `parity.e2e.test.js` reads both projects and hands the rows here,
- * and `parity-compare.test.js` exercises the rules on fixtures.
+ * Field-equivalence rules for a server-engine vs. direct-engine import of one repo (#32775).
+ * Pure — `parity.e2e.test.js` runs them live, `parity-compare.test.js` on fixtures.
  */
 
 import { sliceBytes, TRUNCATION_NOTICE } from "../src/mapping.js";
@@ -41,10 +39,7 @@ import { sliceBytes, TRUNCATION_NOTICE } from "../src/mapping.js";
  * @typedef {Mismatch & { reason: string }} Tolerated
  */
 
-/**
- * The divergences this harness accepts, each naming the ask that tracks it.
- * Anything not on this list fails the run.
- */
+/** Divergences this harness accepts, each naming the ask that tracks it; all else fails the run. */
 export const DIVERGENCES = {
   BACKLINK:
     "description back-link footer: server writes '[View original issue](url)', direct writes " +
@@ -103,11 +98,8 @@ const INSTANT_FIELDS = ["created", "started", "rejected_at"];
 const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
- * The footers the two engines may write on THIS row: the direct engine's dedup
- * marker in `dedup.js`'s exact shape, and the server's `original_url` link. Both
- * are pinned to the run's repo and to the row's own external id, so a footer
- * naming another issue — or a body whose last line merely looks like one — is
- * content, not a footer, and must not be stripped away.
+ * The two engines' footers for THIS row — `dedup.js`'s marker and the server's `original_url`.
+ * Both pin the repo and the row's own id, so a look-alike last line is content, not a footer.
  *
  * @param {string} key
  * @param {{ owner: string, name: string }} [repo] the run's repo; without it any
@@ -129,9 +121,8 @@ function backLinkFor(key, repo) {
 }
 
 /**
- * Split one description into its body and its back-link footer, so two bodies
- * compare on their content. Only the last non-blank line is eligible, the same
- * rule `dedup.js` reads the marker by.
+ * Split a description into body + back-link footer, so two bodies compare on content. Only the
+ * last non-blank line is eligible — the same rule `dedup.js` reads its marker by.
  *
  * @param {string} description
  * @param {string} key
@@ -184,10 +175,8 @@ function clampedPrefixOf(clamped, full) {
 }
 
 /**
- * True when `clamped` is exactly what `clampPlan` would write for the title
- * `full` came from. `full` is the importer's own cut (255 chars, so ≥255 bytes)
- * or the whole title, and either way it is a prefix of the source at least
- * `NAME_LIMIT` bytes long — so the CLI's 252-byte prefix is recoverable from it.
+ * True when `clamped` is what `clampPlan` would write for the title `full` came from. `full` is
+ * a source prefix of ≥ `NAME_LIMIT` bytes, so the CLI's 252-byte cut is recoverable from it.
  *
  * @param {string} clamped
  * @param {string} full
@@ -226,8 +215,7 @@ function compareText(a, b, tolerances) {
 }
 
 /**
- * Render one report line's value. Long text is cut with its true length shown,
- * so a difference past the cut is never mistaken for equality.
+ * A cut value keeps its true length, so a difference past the cut never reads as equal.
  *
  * @param {unknown} value
  * @returns {string}
@@ -238,8 +226,7 @@ function render(value) {
 }
 
 /**
- * The whole comparison as text: every mismatching field on its own line keyed
- * by GitHub issue, then the tolerated divergences, then what went uncompared.
+ * The whole comparison as text: mismatches keyed by issue, then tolerated, then uncompared.
  *
  * @param {ReturnType<typeof compareProjects>} result
  * @returns {string}
@@ -311,10 +298,8 @@ export function actorKey(person) {
 const seconds = (at) => Math.floor((at ? Date.parse(at) : 0) / 1000) || 0;
 
 /**
- * Sort by an encoded tuple, not `localeCompare`: ICU treats the separator as
- * ignorable — so the field boundaries vanish — and ties on normalisation,
- * zero-width and soft-hyphen differences, whereupon `Array#sort` falls back to
- * input order, which the two engines need not share.
+ * Not `localeCompare`: it ignores the separator and ties on normalisation/zero-width text,
+ * so `Array#sort` falls back to an input order the two engines need not share.
  *
  * @template T
  * @param {T[]} items
@@ -329,9 +314,8 @@ function canonical(items, tuple) {
 }
 
 /**
- * The list endpoint orders comments by `created`, which leaves same-instant
- * comments free to come back either way round. The trimmed text leads the tuple
- * so {@link DIVERGENCES.COMMENT_TRIM} still pairs a comment with itself.
+ * The list endpoint orders by `created`, so same-instant comments come back either way round.
+ * The trimmed text leads the tuple so {@link DIVERGENCES.COMMENT_TRIM} still pairs correctly.
  *
  * @param {ParityRow["comments"]} comments
  * @returns {ParityRow["comments"]}
@@ -358,9 +342,8 @@ const canonicalLabels = (labels) =>
 const canonicalTasks = (tasks) => canonical(tasks, (t) => [t.description, t.complete]);
 
 /**
- * Every key more than one row on a side claims. Building the row maps collapses
- * them silently, so a dedup or re-import regression that wrote an issue twice
- * would otherwise compare — and pass — as one row.
+ * Building the row maps collapses duplicate keys silently, so a dedup or re-import regression
+ * that wrote an issue twice would otherwise compare — and pass — as one row.
  *
  * @param {ParityRow[]} rows
  * @returns {Map<string, number>}
