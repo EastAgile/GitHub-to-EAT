@@ -14,6 +14,7 @@
  *     EAT_PARITY_DIRECT_PROJECT    id of a second disposable, EMPTY project for --engine direct
  *     EAT_PARITY_REPO              public GitHub repo as OWNER/NAME
  *     EAT_PARITY_INCLUDE           (optional) --include types; default `issues`
+ *     EAT_PARITY_MIN_ROWS          (optional) floor on rows compared; default 1
  *     EAT_API_BASE                 (optional) override the API base URL
  *     GITHUB_TOKEN                 (optional) read by the CLI itself; a local stack with no
  *                                  platform PAT needs it for the server engine
@@ -23,29 +24,24 @@
  *
  * Run just this test with:  node --test tests/parity.e2e.test.js
  *
- * NOT COMPARED — `completed_at`. No read path exposes it to an agent key: it is
- * absent from the story list row and the story detail payload, and it is not in
- * the `fields=` allowlist (`handlers/stories.rs` STORY_FIELDS). The only carrier
- * is the project export, which rejects agent keys (`AuthUser` resolves members
- * and user keys only). Closing this needs a server ask; until then the harness
- * reports the field as uncompared instead of passing over it silently, and pins
- * the readable neighbours — `current_state`, `created`, `started`, `rejected_at`.
- *
- * Iteration placement is likewise out of scope: the two engines diverge there by
- * the `MAX_BACKFILL_PAST_WINDOWS = 199` cap (server ask #36735), which is a
- * placement difference, not a field difference.
- *
- * Labels are compared as each story carries them — name, both colours, and the
- * attachment itself — not as a project-level label inventory.
+ * NOT COMPARED — `completed_at`, because no agent-key read path exposes the
+ * column (`DIVERGENCES.AGENT_KEY_COMPLETED_AT`, server ask #44442). The nearest
+ * agent-readable value, `GET /projects/{id}/search`'s derived
+ * `velocity_done_state_at`, is a transition timestamp rather than the column, is
+ * NULL for `rejected` (#36701), and hides the archived rows this harness walks —
+ * too indirect to stand in, so the harness pins the readable neighbours instead.
+ * Also uncompared, all outside AC 2: blockers, `pull_request` cross-links, epic
+ * membership, `estimate`, and iteration placement (the `MAX_BACKFILL_PAST_WINDOWS
+ * = 199` cap, server ask #36735 — a placement difference, not a field one).
  */
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { main } from "../src/cli.js";
+import { main, parseRepo } from "../src/cli.js";
 import { loadConfig } from "../src/config.js";
 import { capture } from "./helpers.js";
-import { compareProjects, formatReport } from "./parity-compare.js";
+import { compareProjects, DIVERGENCES, floorViolation, formatReport } from "./parity-compare.js";
 
 const REQUIRED = [
   "EAT_AGENT_KEY",
@@ -171,6 +167,7 @@ test("the direct engine imports the same repo as the server engine", {
     );
     return rows.map((row, i) => ({
       key: keyOf(row),
+      name: row.name,
       story_type: row.story_type,
       current_state: row.current_state,
       icebox: row.icebox,
@@ -200,7 +197,11 @@ test("the direct engine imports the same repo as the server engine", {
   };
 
   for (const [engine, projectId] of Object.entries(projects)) {
-    const existing = await get(`/projects/${projectId}/stories?limit=1&include_done=true`);
+    // The same filters `walk` reads by: a project holding only archived rows
+    // would otherwise pass the guard and then pollute the comparison.
+    const existing = await get(
+      `/projects/${projectId}/stories?include_done=true&include_archived=true&limit=1`,
+    );
     assert.equal(
       (existing.items ?? []).length,
       0,
@@ -210,24 +211,24 @@ test("the direct engine imports the same repo as the server engine", {
   }
 
   for (const [engine, projectId] of Object.entries(projects)) {
-    const out = capture();
+    const [out, err] = [capture(), capture()];
     const started = performance.now();
     const code = await main(
       ["--project", projectId, "--repo", repo, "--include", include, "--engine", engine, "-y"],
-      { stdout: out, stderr: capture() },
+      { stdout: out, stderr: err },
     );
     const elapsed = (performance.now() - started) / 1000;
     console.log(`[parity] ${engine} import of ${repo} took ${elapsed.toFixed(1)}s`);
-    assert.equal(code, 0, `${engine} import failed:\n${out.buf}`);
+    assert.equal(code, 0, `${engine} import failed:\n${out.buf}\n${err.buf}`);
   }
 
+  // Split the same way the CLI did, so the footers this compares against are
+  // scoped to exactly the owner/name the direct engine wrote into its markers.
+  const [owner, name] = parseRepo(repo);
   const [server, direct] = [await readProject(projects.server), await readProject(projects.direct)];
   const result = compareProjects(server, direct, {
-    unavailable: {
-      completed_at:
-        "no agent-key read path — absent from the story list row, the detail payload and the " +
-        "fields= allowlist; the project export carries it but rejects agent keys",
-    },
+    unavailable: { completed_at: DIVERGENCES.AGENT_KEY_COMPLETED_AT },
+    repo: { owner, name },
   });
   const report = formatReport(result);
   console.log(report);
@@ -236,4 +237,6 @@ test("the direct engine imports the same repo as the server engine", {
   assert.equal(unkeyed.length, 0, `rows with neither provenance nor a back-link:\n${report}`);
   assert.equal(result.mismatches.length, 0, report);
   assert.equal(result.counts.server, result.counts.direct, report);
+  const floor = Number(process.env.EAT_PARITY_MIN_ROWS ?? 1);
+  assert.equal(floorViolation(result.counts, floor), null, report);
 });

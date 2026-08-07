@@ -5,11 +5,12 @@
  * and `parity-compare.test.js` exercises the rules on fixtures.
  */
 
-import { TRUNCATION_NOTICE } from "../src/mapping.js";
+import { sliceBytes, TRUNCATION_NOTICE } from "../src/mapping.js";
 
 /**
  * @typedef {object} ParityRow
  * @property {string} key GitHub issue number, or `release-<id>` for a release
+ * @property {string} [name]
  * @property {string} story_type
  * @property {string | null} current_state
  * @property {boolean} [icebox]
@@ -51,10 +52,43 @@ export const DIVERGENCES = {
   REJECTED_COMPLETED_AT:
     "completed_at on a rejected row: the server importer writes it, the public create rejects " +
     "it (rejected has a NULL state_rank) — server ask #36701",
-  CLAMP: "text clamped at 255 bytes by the CLI vs 255 chars by the importer — server ask #35629",
+  CLAMP:
+    "long text (description / task / comment) cut by the CLI to the write route's published " +
+    "maxLength and closed with the truncation notice, where the importer writes the column " +
+    "directly and keeps the source whole — server ask #35629",
+  NAME_CLAMP:
+    "story name clamped at 255 bytes by the CLI (what the public route validates) vs 255 chars " +
+    "by the importer (`title.chars().take(255)`) — server ask #35629 (/s/y9q8ea68)",
+  COMMENT_TRIM:
+    "comment body: the CLI trims it before sending, the server importer stores it verbatim " +
+    "(it only calls trim() to skip blank comments) — declared in CONTRACT.md's people section",
+  TASK_ORDER:
+    "task order: the public create cannot set task_order (it defaults to 0.0) where the importer " +
+    "writes the entry index, and the story projection orders by task_order with no tiebreaker, " +
+    "so tasks come back in unspecified order — server ask #44443 (/s/hxc5em5x)",
+  AGENT_KEY_COMPLETED_AT:
+    "completed_at is on no agent-key read path — absent from the story list row, the detail " +
+    "payload and the fields= allowlist, and the project export that carries it rejects agent " +
+    "keys — server ask #44442 (/s/zs8x675e)",
 };
 
-/** Fields compared verbatim, in report order. */
+/** The only fields `unavailable` can name, because they are the only ones it gates. */
+const UNAVAILABLE_FIELDS = new Set(["completed_at"]);
+
+/**
+ * A run that compared too few rows proves nothing, so the caller fails on this
+ * rather than on an empty mismatch list.
+ *
+ * @param {{ compared: number }} counts
+ * @param {number} [minRows]
+ * @returns {string | null} why the run is too thin to certify parity, or null
+ */
+export function floorViolation({ compared }, minRows = 1) {
+  const floor = Math.max(1, Number.isFinite(minRows) ? minRows : 1);
+  if (compared >= floor) return null;
+  return `compared ${compared} row(s), below the floor of ${floor} — a run that compares nothing (or almost nothing) certifies nothing`;
+}
+
 const SCALAR_FIELDS = [
   "story_type",
   "current_state",
@@ -63,24 +97,54 @@ const SCALAR_FIELDS = [
   "import_external_id",
 ];
 
-/** Fields compared to the second. */
 const INSTANT_FIELDS = ["created", "started", "rejected_at"];
 
-/** The two engines' back-link footers; either one is stripped before comparing bodies. */
-const BACK_LINK = /^(?:\[View original issue\]\(\S+\)|Imported from \S+)$/;
+/** @param {string} s @returns {string} */
+const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
- * Drop the trailing back-link line so two bodies compare on their content.
- * Only the last non-blank line counts — the same rule `dedup.js` reads the
- * marker by, so a body quoting the sentence mid-text is left alone.
+ * The footers the two engines may write on THIS row: the direct engine's dedup
+ * marker in `dedup.js`'s exact shape, and the server's `original_url` link. Both
+ * are pinned to the run's repo and to the row's own external id, so a footer
+ * naming another issue — or a body whose last line merely looks like one — is
+ * content, not a footer, and must not be stripped away.
  *
- * @param {string | null | undefined} description
- * @returns {string}
+ * @param {string} key
+ * @param {{ owner: string, name: string }} [repo] the run's repo; without it any
+ *   owner/name is accepted and only the external id is pinned
+ * @returns {RegExp}
  */
-export function stripBackLink(description) {
-  const lines = (description ?? "").trimEnd().split("\n");
-  if (BACK_LINK.test(lines[lines.length - 1].trim())) lines.pop();
-  return lines.join("\n").trimEnd();
+function backLinkFor(key, repo) {
+  const scope = repo
+    ? `${escapeRegExp(repo.owner)}/${escapeRegExp(repo.name)}`
+    : "[^/\\s]+/[^/\\s]+";
+  const release = /^release-(\d+)$/.exec(key);
+  const target = release
+    ? `(?:api\\.github\\.com/repos/${scope}/releases/${release[1]}|github\\.com/${scope}/releases/tag/[^\\s)]+)`
+    : `github\\.com/${scope}/(?:issues|pull)/${escapeRegExp(key)}`;
+  return new RegExp(
+    `^(?:Imported from https://${target}|\\[View original issue\\]\\(https://${target}\\))$`,
+    "i",
+  );
+}
+
+/**
+ * Split one description into its body and its back-link footer, so two bodies
+ * compare on their content. Only the last non-blank line is eligible, the same
+ * rule `dedup.js` reads the marker by.
+ *
+ * @param {string} description
+ * @param {string} key
+ * @param {{ owner: string, name: string }} [repo]
+ * @returns {{ body: string, footer: string | null }}
+ */
+function popBackLink(description, key, repo) {
+  const lines = description.trimEnd().split("\n");
+  if (!backLinkFor(key, repo).test(lines[lines.length - 1].trim())) {
+    return { body: description.trimEnd(), footer: null };
+  }
+  const footer = /** @type {string} */ (lines.pop()).trim();
+  return { body: lines.join("\n").trimEnd(), footer };
 }
 
 /**
@@ -98,9 +162,16 @@ function sameSecond(a, b) {
   return Math.floor(x / 1000) === Math.floor(y / 1000);
 }
 
+const byteLen = (/** @type {string} */ s) => Buffer.byteLength(s, "utf8");
+
+/** The ellipsis `clampPlan` appends when it cuts a story name. */
+const NAME_ELLIPSIS = "…";
+/** `limits::STORY_NAME` — the same 255 both ends clamp to, in different units. */
+const NAME_LIMIT = 255;
+
 /**
- * True when `clamped` is `full` cut short by the CLI's own clamp — the one
- * shape the bytes-vs-chars divergence takes.
+ * True when `clamped` is `full` cut short by `clampBlock`: the notice closes it,
+ * something precedes the notice, and the text it cut really was the longer one.
  *
  * @param {string} clamped
  * @param {string} full
@@ -108,19 +179,49 @@ function sameSecond(a, b) {
  */
 function clampedPrefixOf(clamped, full) {
   const cut = clamped.indexOf(TRUNCATION_NOTICE);
-  return cut >= 0 && full.startsWith(clamped.slice(0, cut).trimEnd());
+  if (cut <= 0 || !clamped.endsWith(TRUNCATION_NOTICE)) return false;
+  return byteLen(full) > byteLen(clamped) && full.startsWith(clamped.slice(0, cut).trimEnd());
 }
 
 /**
- * Compare one text field: equal, clamped short of equal, or genuinely different.
+ * True when `clamped` is exactly what `clampPlan` would write for the title
+ * `full` came from. `full` is the importer's own cut (255 chars, so ≥255 bytes)
+ * or the whole title, and either way it is a prefix of the source at least
+ * `NAME_LIMIT` bytes long — so the CLI's 252-byte prefix is recoverable from it.
+ *
+ * @param {string} clamped
+ * @param {string} full
+ * @returns {boolean}
+ */
+function clampedNameOf(clamped, full) {
+  if (!clamped.endsWith(NAME_ELLIPSIS) || byteLen(full) < NAME_LIMIT) return false;
+  return clamped === `${sliceBytes(full, NAME_LIMIT - byteLen(NAME_ELLIPSIS))}${NAME_ELLIPSIS}`;
+}
+
+/**
+ * @typedef {object} Tolerance one accepted shape of difference for a text field
+ * @property {string} reason the {@link DIVERGENCES} entry it is filed under
+ * @property {(server: string, direct: string) => boolean} matches tried both ways round
+ */
+
+/** @type {Tolerance} */
+const CLAMP = { reason: DIVERGENCES.CLAMP, matches: clampedPrefixOf };
+/** @type {Tolerance} */
+const NAME_CLAMP = { reason: DIVERGENCES.NAME_CLAMP, matches: clampedNameOf };
+/** @type {Tolerance} */
+const COMMENT_TRIM = { reason: DIVERGENCES.COMMENT_TRIM, matches: (a, b) => a.trim() === b };
+
+/**
+ * Compare one text field: equal, tolerated (the reason), or genuinely different.
  *
  * @param {string} a
  * @param {string} b
- * @returns {"equal" | "clamp" | "differ"}
+ * @param {Tolerance[]} tolerances
+ * @returns {"equal" | "differ" | string}
  */
-function compareText(a, b) {
+function compareText(a, b, tolerances) {
   if (a === b) return "equal";
-  if (clampedPrefixOf(a, b) || clampedPrefixOf(b, a)) return "clamp";
+  for (const t of tolerances) if (t.matches(a, b) || t.matches(b, a)) return t.reason;
   return "differ";
 }
 
@@ -149,6 +250,9 @@ export function formatReport({ mismatches, tolerated, skipped, counts }) {
     `PARITY: ${mismatches.length} mismatching field(s) across ${issues} issue(s)`,
     `story count: server ${counts.server}, direct ${counts.direct}, compared ${counts.compared}`,
   ];
+  if (counts.server !== counts.serverKeys || counts.direct !== counts.directKeys) {
+    lines.push(`distinct keys: server ${counts.serverKeys}, direct ${counts.directKeys}`);
+  }
   if (mismatches.length) lines.push("");
   for (const m of mismatches) {
     const gutter = `issue #${m.key}`.padEnd(16);
@@ -207,33 +311,85 @@ export function actorKey(person) {
 const seconds = (at) => Math.floor((at ? Date.parse(at) : 0) / 1000) || 0;
 
 /**
- * Comments in a canonical order. The list endpoint orders by `created`, which
- * leaves same-instant comments free to come back either way round.
+ * Sort by an encoded tuple, not `localeCompare`: ICU treats the separator as
+ * ignorable — so the field boundaries vanish — and ties on normalisation,
+ * zero-width and soft-hyphen differences, whereupon `Array#sort` falls back to
+ * input order, which the two engines need not share.
+ *
+ * @template T
+ * @param {T[]} items
+ * @param {(item: T) => unknown[]} tuple
+ * @returns {T[]}
+ */
+function canonical(items, tuple) {
+  return [...(items ?? [])]
+    .map((item) => ({ item, sortKey: JSON.stringify(tuple(item)) }))
+    .sort((a, b) => (a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0))
+    .map(({ item }) => item);
+}
+
+/**
+ * The list endpoint orders comments by `created`, which leaves same-instant
+ * comments free to come back either way round. The trimmed text leads the tuple
+ * so {@link DIVERGENCES.COMMENT_TRIM} still pairs a comment with itself.
  *
  * @param {ParityRow["comments"]} comments
  * @returns {ParityRow["comments"]}
  */
 const canonicalComments = (comments) =>
-  [...(comments ?? [])].sort((a, b) =>
-    `${seconds(a.created)}\u0000${a.text}\u0000${actorKey(a.author)}`.localeCompare(
-      `${seconds(b.created)}\u0000${b.text}\u0000${actorKey(b.author)}`,
-    ),
-  );
+  canonical(comments, (c) => [
+    seconds(c.created),
+    (c.text ?? "").trim(),
+    actorKey(c.author),
+    c.text,
+  ]);
 
 /** @param {ParityRow["labels"]} labels @returns {ParityRow["labels"]} */
 const canonicalLabels = (labels) =>
-  [...(labels ?? [])].sort((a, b) => a.name.localeCompare(b.name));
+  canonical(labels, (l) => [l.name, l.background_color_hex, l.text_color_hex]);
+
+/**
+ * Position carries no cross-engine meaning ({@link DIVERGENCES.TASK_ORDER}), so
+ * the comparison canonicalises it away rather than pairing tasks by index.
+ *
+ * @param {ParityRow["tasks"]} tasks
+ * @returns {ParityRow["tasks"]}
+ */
+const canonicalTasks = (tasks) => canonical(tasks, (t) => [t.description, t.complete]);
+
+/**
+ * Every key more than one row on a side claims. Building the row maps collapses
+ * them silently, so a dedup or re-import regression that wrote an issue twice
+ * would otherwise compare — and pass — as one row.
+ *
+ * @param {ParityRow[]} rows
+ * @returns {Map<string, number>}
+ */
+function countByKey(rows) {
+  const counts = new Map();
+  for (const r of rows) counts.set(r.key, (counts.get(r.key) ?? 0) + 1);
+  return counts;
+}
 
 /**
  * @param {ParityRow[]} serverRows
  * @param {ParityRow[]} directRows
- * @param {{ unavailable?: Record<string, string> }} [options] `unavailable` names fields no
- *   read path can supply, with the reason; they are reported, never silently dropped
+ * @param {{ unavailable?: Record<string, string>, repo?: { owner: string, name: string } }}
+ *   [options] `unavailable` names fields no read path can supply, with the reason; they are
+ *   reported, never silently dropped. `repo` pins the back-link footers to the run's repo.
  * @returns {{ mismatches: Mismatch[], tolerated: Tolerated[],
  *   skipped: { field: string, reason: string }[],
- *   counts: { server: number, direct: number, compared: number } }}
+ *   counts: { server: number, direct: number, compared: number,
+ *     serverKeys: number, directKeys: number } }}
  */
-export function compareProjects(serverRows, directRows, { unavailable = {} } = {}) {
+export function compareProjects(serverRows, directRows, { unavailable = {}, repo } = {}) {
+  for (const field of Object.keys(unavailable)) {
+    if (!UNAVAILABLE_FIELDS.has(field)) {
+      throw new TypeError(
+        `unavailable: ${field} is compared regardless, so reporting it as uncompared would be a lie — only ${[...UNAVAILABLE_FIELDS].join(", ")} is gated`,
+      );
+    }
+  }
   const server = new Map(serverRows.map((r) => [r.key, r]));
   const direct = new Map(directRows.map((r) => [r.key, r]));
   /** @type {Mismatch[]} */
@@ -241,6 +397,12 @@ export function compareProjects(serverRows, directRows, { unavailable = {} } = {
   /** @type {Tolerated[]} */
   const tolerated = [];
   let compared = 0;
+
+  const [serverCounts, directCounts] = [countByKey(serverRows), countByKey(directRows)];
+  for (const key of new Set([...serverCounts.keys(), ...directCounts.keys()])) {
+    const [x, y] = [serverCounts.get(key) ?? 0, directCounts.get(key) ?? 0];
+    if (x > 1 || y > 1) mismatches.push({ key, field: "duplicate-key", server: x, direct: y });
+  }
 
   for (const key of new Set([...server.keys(), ...direct.keys()])) {
     const a = server.get(key);
@@ -276,16 +438,12 @@ export function compareProjects(serverRows, directRows, { unavailable = {} } = {
       if (x !== y) mismatches.push({ key, field, server: x, direct: y });
     }
 
-    /** Route one text field to the mismatch list, or to the clamp tolerance. */
-    const text = (
-      /** @type {string} */ field,
-      /** @type {string} */ x,
-      /** @type {string} */ y,
-    ) => {
-      const verdict = compareText(x, y);
+    /** @param {string} field @param {string} x @param {string} y @param {Tolerance[]} [allow] */
+    const text = (field, x, y, allow = [CLAMP]) => {
+      const verdict = compareText(x, y, allow);
       if (verdict === "differ") mismatches.push({ key, field, server: x, direct: y });
-      else if (verdict === "clamp") {
-        tolerated.push({ key, field, server: x, direct: y, reason: DIVERGENCES.CLAMP });
+      else if (verdict !== "equal") {
+        tolerated.push({ key, field, server: x, direct: y, reason: verdict });
       }
       return verdict;
     };
@@ -294,18 +452,19 @@ export function compareProjects(serverRows, directRows, { unavailable = {} } = {
       if (x !== y) mismatches.push({ key, field, server: x, direct: y });
     };
 
-    const [textA, textB] = [stripBackLink(a.description), stripBackLink(b.description)];
-    if (text("description", textA, textB) === "equal" && a.description !== b.description) {
-      tolerated.push({
-        key,
-        field: "description",
-        server: a.description,
-        direct: b.description,
-        reason: DIVERGENCES.BACKLINK,
-      });
+    text("name", a.name ?? "", b.name ?? "", [NAME_CLAMP]);
+
+    const [rawA, rawB] = [a.description ?? "", b.description ?? ""];
+    const [popA, popB] = [popBackLink(rawA, key, repo), popBackLink(rawB, key, repo)];
+    if (text("description", popA.body, popB.body) === "equal" && rawA !== rawB) {
+      const entry = { key, field: "description", server: rawA, direct: rawB };
+      // Only a footer that was really popped earns the tolerance; anything else
+      // left over (trailing whitespace, say) is content the two engines disagree on.
+      if (popA.footer || popB.footer) tolerated.push({ ...entry, reason: DIVERGENCES.BACKLINK });
+      else mismatches.push(entry);
     }
 
-    const [tasksA, tasksB] = [a.tasks ?? [], b.tasks ?? []];
+    const [tasksA, tasksB] = [canonicalTasks(a.tasks), canonicalTasks(b.tasks)];
     if (tasksA.length !== tasksB.length) {
       same("tasks.length", tasksA.length, tasksB.length);
     } else {
@@ -320,7 +479,7 @@ export function compareProjects(serverRows, directRows, { unavailable = {} } = {
       same("comments.length", commentsA.length, commentsB.length);
     } else {
       commentsA.forEach((comment, i) => {
-        text(`comments[${i}].text`, comment.text, commentsB[i].text);
+        text(`comments[${i}].text`, comment.text, commentsB[i].text, [CLAMP, COMMENT_TRIM]);
         if (!sameSecond(comment.created, commentsB[i].created)) {
           same(`comments[${i}].created`, comment.created, commentsB[i].created);
         }
@@ -351,6 +510,12 @@ export function compareProjects(serverRows, directRows, { unavailable = {} } = {
     mismatches,
     tolerated,
     skipped,
-    counts: { server: server.size, direct: direct.size, compared },
+    counts: {
+      server: serverRows.length,
+      direct: directRows.length,
+      compared,
+      serverKeys: server.size,
+      directKeys: direct.size,
+    },
   };
 }
