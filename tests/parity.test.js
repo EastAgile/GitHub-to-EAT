@@ -615,7 +615,10 @@ test("divergence: the CLI cannot set blocker_display_order; the importer writes 
 // --- description back-link (story #36736) ------------------------------------
 // Pinned: the marker is CONTRACT.md's fallback dedup key — it cannot adopt the server's.
 
-/** `common.rs:1541-1550`, ported: no source body ⇒ no description and no link. */
+/**
+ * `common.rs:1545-1554` ported (as of agile-tracker `main@0dc48ab0`): no source body ⇒ no link.
+ * A hand-port pins the *contrast* only — it runs no server code, so it cannot catch a server change.
+ */
 const serverDescription = (/** @type {string | null} */ body, /** @type {string | null} */ url) => {
   const desc = (body ?? "").trim();
   if (desc === "") return "";
@@ -646,6 +649,27 @@ test("divergence: an empty body leaves the server no description, the direct eng
   assert.equal(markerExternalId(directDescription(op), "o", "r"), "7");
 });
 
+test("divergence: a PR gets no server back-link at all, and the marker regardless", () => {
+  const op = oneStory({ number: 10, body: "the body" });
+  // `original_url: None` for a PR (`github.rs:1223`), so the server's footer never appends.
+  assert.equal(serverDescription(op.description, null), "the body");
+  assert.equal(directDescription(op), "the body\n\nImported from https://github.com/o/r/issues/10");
+});
+
+// The server's release footer is `release.html_url` — GitHub's browsable `/releases/tag/<tag>`.
+test("divergence: a release's marker is the API resource, not the server's html_url", () => {
+  const s = oneRelease({});
+  const htmlUrl = "https://github.com/o/r/releases/tag/v1.0";
+  assert.equal(
+    serverDescription(s.description, htmlUrl),
+    `notes\n\n[View original issue](${htmlUrl})`,
+  );
+  assert.equal(
+    directDescription(s),
+    "notes\n\nImported from https://api.github.com/repos/o/r/releases/900",
+  );
+});
+
 // The marker has always been documented as the dedup key; what CONTRACT.md never
 // said is that the server writes a different footer on the very same rows.
 test("CONTRACT.md names the description back-link divergence in its dedup section", () => {
@@ -653,7 +677,9 @@ test("CONTRACT.md names the description back-link divergence in its dedup sectio
   const start = lines.findIndex((l) => l.startsWith("### Marker dedup"));
   assert.notEqual(start, -1, "CONTRACT.md still has a marker-dedup section");
   const rest = lines.slice(start + 1);
-  const end = rest.findIndex((l) => l.startsWith("### "));
+  // Any heading level ends the section: demoting the next one must not silently
+  // widen the slice and let the bullet drift out while this stays green.
+  const end = rest.findIndex((l) => /^#{1,6} /.test(l));
   const section = end === -1 ? rest : rest.slice(0, end);
   assert.ok(
     section.some((l) => l.includes("Imported from https://github.com/")),
@@ -667,7 +693,17 @@ test("CONTRACT.md names the description back-link divergence in its dedup sectio
     if (/^- /.test(line)) break;
     bullet += ` ${line.trim()}`;
   }
-  for (const cite of ["[View original issue]", "common.rs:1547", "dedup.js", "empty body"]) {
+  // A foreign repo's line number can only be asserted as a string, never as a fact: pinning one
+  // here kept the suite green *because* the citation was wrong. Anchor on code that doesn't move.
+  for (const cite of [
+    "[View original issue](",
+    "(None, _) => String::new()",
+    "common.rs",
+    "original_url: None",
+    "html_url",
+    "dedup.js",
+    "empty body",
+  ]) {
     assert.ok(bullet.includes(cite), `the back-link bullet names ${cite}`);
   }
 });
