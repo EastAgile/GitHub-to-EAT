@@ -1235,7 +1235,7 @@ const byteLen = (/** @type {string} */ s) => Buffer.byteLength(s, "utf8");
  * @param {number} maxBytes
  * @returns {string}
  */
-function sliceBytes(text, maxBytes) {
+export function sliceBytes(text, maxBytes) {
   if (maxBytes <= 0) return "";
   if (byteLen(text) <= maxBytes) return text;
   let used = 0;
