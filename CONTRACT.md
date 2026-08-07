@@ -1347,6 +1347,36 @@ and both are prescanned, in union.
   the mapper assembled, so the sub-issue cross-link block above sits *before* it
   and the marker is still the description's last line — the only line the
   prescan reads.
+- **Divergence: the description back-link** — on **100% of rows**. The direct
+  engine ends **every** imported description with a link home; the server ends
+  most of them, with the two exceptions below. Where both write one, neither
+  writes the other's words: the server importer appends
+  `[View original issue](<original_url>)` after a blank line (`common.rs:1551`;
+  the server line numbers cited for this divergence and for the backfill cap
+  under *Fidelity limitations* were checked against agile-tracker
+  `main@0dc48ab0`, 2026-08-06), the direct engine appends `Imported from <url>`
+  (`src/dedup.js:20-34`). The direct engine cannot simply adopt the server's
+  form, because that sentence is its fallback dedup key — `markerExternalId`
+  parses it back off the description's last line, and it is the *only* key a row
+  written before `import_source`/`import_external_id` existed carries, so
+  rewording it would re-import every legacy row. Three consequences worth naming:
+  - **An empty body diverges hardest.** The server gates its back-link on the
+    source description being non-empty (`(None, _) => String::new()`,
+    `common.rs:1553`, and deliberately — "we don't fabricate a body out of just
+    the link", `common.rs:1544`), so an issue with an empty body gets an empty
+    description and **no** link at all. `withMarker` has no such gate: the direct
+    engine writes the marker **alone**, because dropping it there would leave
+    that row with no re-run key whatsoever on a pre-provenance server.
+  - **A PR carries no server back-link.** The importer sets `original_url: None`
+    for a PR and attaches the URL as a `pull_request` link instead
+    (`github.rs:1223`), so a PR story's description is footer-free server-side.
+    The direct engine stamps its marker on a PR like any other row.
+  - **A release's two links differ in host.** The server's is the release's
+    `github.com` `html_url` (`github.rs:1366`); the marker is the API resource,
+    for the browsability reason given above.
+
+  Pinned by `tests/parity.test.js`, like the deps divergences, so the claim
+  cannot rot into prose.
 - The prescan cursor-walks the project —
   `GET /stories?limit=…&cursor=…&fields=…` (cursor mode whenever `cursor=` or
   `limit=` is present; `fields=` is a sparse-fieldset allowlist, unknown values
@@ -1392,11 +1422,38 @@ and both are prescanned, in union.
   byte-identical to v3 — no `created_at` / `completed_at` keys — and `created`
   is the import time. Server behaviour (owner-gated): `completed_at` is valid
   only on a done-state create and clamps forward to `created_at`; an accepted
-  create lands in the iteration window containing its completion. A completion
-  that predates the iteration grid falls back to the **current** iteration until
-  the grid-extension server ask (#32434) lands; the create response carries no
-  iteration info, so the write report cannot yet surface which iteration a
-  backdated story landed in.
+  create lands in the iteration window containing its completion. The
+  grid-extension ask (#32434) has **shipped**:
+  `extend_grid_backwards_for_completion` (`iterations.rs:506`, called from
+  `handlers/stories.rs:3508`) creates the historical windows a backdated
+  completion needs — but only up to `MAX_BACKFILL_PAST_WINDOWS = 199`
+  (`iterations.rs:50`). The cap is **not** an absolute reach from today. New
+  windows tile backwards from the project's **oldest existing iteration
+  `start`** (`oldest_start = MIN(start)`, `iterations.rs:515-516`); the server
+  needs `n = ceil(gap / iteration_length_weeks)` of them (`iterations.rs:544`)
+  and bails when `n > 199` (`iterations.rs:548`), so one create reaches
+  `199 × iteration_length_weeks` back from that oldest boundary — on a
+  two-week grid, ~7.6 years past whatever the project already covers. Past the
+  cap the backfill is all-or-nothing: it creates **no** window at all and the
+  completion falls back to the **current** iteration. Every extension that does
+  succeed moves `MIN(start)` earlier, so successive creates **compound** and
+  placement is **order-dependent** — `src/writer.js:263-267` orders creates by
+  `created_at`, which is not `completed_at` order, so which completions clear
+  the cap depends on the order they happen to be written in.
+  Observed on the 2026-08-06 two-engine parity run: 94 done stories the server
+  engine spread across 62 historical iterations back to 2012 all landed in the
+  current week through the direct engine's public creates. The cap explains that
+  only if every one of those 94 completions was still outside it at the moment
+  it was written; that run's per-story placement was not retained, so the
+  measurement stands but the causal attribution is **unconfirmed**.
+  Server ask [#36735](https://eastagiletracker.com/s/gz8kucea) tracks the cap.
+  The create response does carry the placement — `POST /projects/{id}/stories`
+  returns the
+  full story DTO (`handlers/stories.rs:3727`, `build_story_payload`) including
+  `iteration_id` (`:2577`) and `current_panel` (`:2589`) — but the CLI never
+  reads it (nothing under `src/` mentions an iteration) and `src/mockserver.js`
+  models no iterations at all, so the write report cannot surface which
+  iteration a backdated story landed in.
 - **Started dates** — `started_at` (server story
   [#35489](https://eastagiletracker.com/s/e3cqxk6d)) rides the same story create,
   behind its **own** probe: it shipped after the `created_at` / `completed_at`
