@@ -27,9 +27,8 @@ export function keyOf(row) {
 }
 
 /**
- * One page of `GET …/stories/{id}/comments`: a bare array with no query, and an
- * `{items, next_cursor}` envelope the moment `cursor`/`limit`/`order` is sent. Neither
- * shape may throw — an unknown one reads empty and the row's own `comment_count` catches it.
+ * `GET …/stories/{id}/comments` returns a bare array, or an `{items, next_cursor}` envelope once
+ * `cursor`/`limit`/`order` is sent. An unknown shape reads empty; `comment_count` catches it.
  *
  * @param {any} page
  * @returns {any[]}
@@ -59,11 +58,8 @@ const COMPARED_KEYS = [
 ];
 
 /**
- * `errors` are the harness's own: an empty embed makes both engines read nothing, and "nothing
- * equals nothing" must never pass as parity. `tasks_count` is the server's own `expired IS NULL`
- * count; `comment_count` has no such predicate (`fetch_counts_for_page` counts every
- * `story_comment` row) where `GET …/comments` filters on it, so a soft-deleted comment reads
- * as a broken readback here.
+ * `errors` stop "both engines read nothing" passing as parity. `tasks_count` is `expired IS NULL`
+ * where `fetch_counts_for_page`'s `comment_count` is not, so a soft-deleted comment reads broken.
  *
  * @param {any[]} rows the full list walk
  * @param {any[]} withTasks the `fields=story_id,tasks` walk, one entry per row

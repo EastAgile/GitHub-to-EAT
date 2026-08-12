@@ -218,10 +218,8 @@ const CROSS_LINK_LINE = new RegExp(
 );
 
 /**
- * Split the DIRECT body from the cross-link block at its tail. Only that engine writes the
- * block, so a look-alike line the server body carries too is the issue author's content and
- * stays put. `clampPlan` cuts the body *around* the block, so the truncation notice is not
- * last and the clamp tolerance cannot see it.
+ * Splits off the cross-link block only the DIRECT engine writes — a look-alike line the server
+ * body carries too is the author's content. `clampPlan` cuts around it, so the notice is not last.
  *
  * @param {string} body the direct engine's description body
  * @param {string} serverBody the server engine's, which never carries the block
@@ -522,9 +520,8 @@ const canonicalLabels = (labels) =>
 const CLOSURE_LABEL_NAMES = new Set(CLOSED_REASON_LABELS.values());
 
 /**
- * The one closure-reason label the direct engine added on top of the server's set, or null.
- * Positive evidence for {@link DIVERGENCES.CLOSED_REASON} — without it a state or label
- * difference is an ordinary mismatch, in either direction.
+ * The one closure-reason label the direct engine added on top of the server's set, or null:
+ * directional evidence for {@link DIVERGENCES.CLOSED_REASON}, else the difference stays a mismatch.
  *
  * @param {ParityRow["labels"]} serverLabels
  * @param {ParityRow["labels"]} directLabels

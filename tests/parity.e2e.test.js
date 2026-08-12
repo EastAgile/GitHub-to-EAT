@@ -10,11 +10,11 @@
  *     EAT_PARITY_REPO              public GitHub repo as OWNER/NAME
  *     EAT_PARITY_INCLUDE           (optional) --include types; default `issues`
  *     EAT_PARITY_MIN_ROWS          (optional) floor on rows compared; default 1
- *     EAT_PARITY_MIN_COMMENTS      (optional) floor on rows both engines read comments on;
- *     EAT_PARITY_MIN_TASKS         default 1 each. AC 2 claims equivalence for these five
- *     EAT_PARITY_MIN_LABELS        families, so a fixture repo that exercises none of one
- *     EAT_PARITY_MIN_OWNERS        certifies nothing about it; set a family's floor to `0`
- *     EAT_PARITY_MIN_REQUESTOR     to say so out loud.
+ *     EAT_PARITY_MIN_COMMENTS      (optional) per-family floors; default 1 each, `0` opts out —
+ *     EAT_PARITY_MIN_TASKS         an unmeasured family certifies nothing (AC 2 names all five).
+ *     EAT_PARITY_MIN_LABELS
+ *     EAT_PARITY_MIN_OWNERS
+ *     EAT_PARITY_MIN_REQUESTOR
  *     EAT_API_BASE                 (optional) override the API base URL
  *     GITHUB_TOKEN                 (optional) read by the CLI itself; a local stack with no
  *                                  platform PAT needs it for the server engine
@@ -27,11 +27,8 @@
  * NOT COMPARED — `completed_at` (no agent-key read path, #44442; `/search`'s value is too
  * indirect). Outside AC 2: blockers, PR links, epics, `estimate`, iteration placement (#36735).
  *
- * FIXTURE CONSTRAINT — a repo whose issues carry GitHub's org issue-type field must add
- * `story_type: DIVERGENCES.ISSUE_TYPE` to `unavailable` below: the direct engine maps that
- * field and the importer cannot see it, and no read tells the two rules apart. The other two
- * direct-only exceptions (the sub-issue block, the closed-reason state and label) are
- * tolerated directionally by the comparator and need no fixture constraint.
+ * FIXTURE CONSTRAINT — a repo using GitHub's org issue-type field must add
+ * `story_type: DIVERGENCES.ISSUE_TYPE` to `unavailable` below; no read tells the two rules apart.
  */
 
 import assert from "node:assert/strict";
