@@ -1186,3 +1186,98 @@ test("the mock records every request path, so a test can prove one never happene
     await mock.close();
   }
 });
+
+// --- read-side aliases and list visibility, per CONTRACT ---------------------
+
+test("the story read row carries both title and its name alias", async () => {
+  const mock = await startMockServer();
+  try {
+    await post(mock.baseUrl, "/projects/91/stories", { name: "aliased" });
+    const headers = { "X-TrackerToken": "ea_token" };
+    const [listed] = await (await fetch(`${mock.baseUrl}/projects/91/stories`, { headers })).json();
+
+    assert.equal(listed.title, "aliased");
+    assert.equal(listed.name, "aliased");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("fields=name is in the allowlist, so it projects instead of 400ing", async () => {
+  const mock = await startMockServer();
+  try {
+    await post(mock.baseUrl, "/projects/91/stories", { name: "aliased" });
+    const response = await fetch(`${mock.baseUrl}/projects/91/stories?fields=name`, {
+      headers: { "X-TrackerToken": "ea_token" },
+    });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), [{ story_id: 1, name: "aliased" }]);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("archived stories are hidden by default and admitted by include_archived", async () => {
+  const mock = await startMockServer();
+  try {
+    for (const name of ["live", "filed"]) {
+      await post(mock.baseUrl, "/projects/91/stories", { name });
+    }
+    mock.state.stories[91][1].archived_at = "2026-07-01T00:00:00Z";
+    const headers = { "X-TrackerToken": "ea_token" };
+    /** @param {string} query */
+    const titles = async (query) =>
+      (await (await fetch(`${mock.baseUrl}/projects/91/stories?${query}`, { headers })).json()).map(
+        (/** @type {any} */ r) => r.title,
+      );
+
+    assert.deepEqual(await titles(""), ["live"]);
+    assert.deepEqual(await titles("include_archived=true"), ["live", "filed"]);
+    assert.deepEqual(await titles("archived=include"), ["live", "filed"]);
+    assert.deepEqual(await titles("archived=only"), ["filed"]);
+    assert.deepEqual(await titles("archived=exclude"), ["live"]);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("an archived value outside exclude|include|only is 400 validation_failed", async () => {
+  const mock = await startMockServer();
+  try {
+    const response = await fetch(`${mock.baseUrl}/projects/91/stories?archived=maybe`, {
+      headers: { "X-TrackerToken": "ea_token" },
+    });
+
+    assert.equal(response.status, 400);
+    const payload = await response.json();
+    assert.equal(payload.code, "validation_failed");
+    assert.deepEqual(payload.details.fields, ["archived"]);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("Done-panel stories are hidden by default and admitted by include_done", async () => {
+  const mock = await startMockServer();
+  try {
+    for (const name of ["current", "done", "iceboxed"]) {
+      await post(mock.baseUrl, "/projects/91/stories", { name });
+    }
+    // The real filter reads iteration placement; the mock has no calendar, so a row
+    // carrying an iteration at all stands for one frozen on a past iteration.
+    mock.state.stories[91][1].iteration_id = 7;
+    Object.assign(mock.state.stories[91][2], { iteration_id: 7, icebox: true });
+    const headers = { "X-TrackerToken": "ea_token" };
+    /** @param {string} query */
+    const titles = async (query) =>
+      (await (await fetch(`${mock.baseUrl}/projects/91/stories?${query}`, { headers })).json()).map(
+        (/** @type {any} */ r) => r.title,
+      );
+
+    assert.deepEqual(await titles(""), ["current", "iceboxed"]);
+    assert.deepEqual(await titles("include_done=true"), ["current", "done", "iceboxed"]);
+  } finally {
+    await mock.close();
+  }
+});

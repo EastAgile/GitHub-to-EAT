@@ -3,7 +3,13 @@
  * Pure — `parity.e2e.test.js` runs them live, `parity-compare.test.js` on fixtures.
  */
 
-import { sliceBytes, TRUNCATION_NOTICE } from "../src/mapping.js";
+import {
+  FALLBACK_LIMITS,
+  SUB_ISSUE_OF_PREFIX,
+  SUB_ISSUES_PREFIX,
+  sliceBytes,
+  TRUNCATION_NOTICE,
+} from "../src/mapping.js";
 
 /**
  * @typedef {object} ParityRow
@@ -79,9 +85,13 @@ const UNAVAILABLE_FIELDS = new Set(["completed_at"]);
  * @returns {string | null} why the run is too thin to certify parity, or null
  */
 export function floorViolation({ compared }, minRows = 1) {
-  const floor = Math.max(1, Number.isFinite(minRows) ? minRows : 1);
-  if (compared >= floor) return null;
-  return `compared ${compared} row(s), below the floor of ${floor} — a run that compares nothing (or almost nothing) certifies nothing`;
+  // A NaN from `EAT_PARITY_MIN_ROWS=1O` used to fall back to 1, so a run configured
+  // to demand 50 rows certified itself on one.
+  if (!Number.isFinite(minRows) || minRows < 1) {
+    return `row floor ${String(minRows)} is not a row count — set EAT_PARITY_MIN_ROWS to an integer ≥ 1`;
+  }
+  if (compared >= minRows) return null;
+  return `compared ${compared} row(s), below the floor of ${minRows} — a run that compares nothing (or almost nothing) certifies nothing`;
 }
 
 const SCALAR_FIELDS = [
@@ -111,13 +121,42 @@ function backLinkFor(key, repo) {
     ? `${escapeRegExp(repo.owner)}/${escapeRegExp(repo.name)}`
     : "[^/\\s]+/[^/\\s]+";
   const release = /^release-(\d+)$/.exec(key);
-  const target = release
+  const releaseTarget = release
     ? `(?:api\\.github\\.com/repos/${scope}/releases/${release[1]}|github\\.com/${scope}/releases/tag/[^\\s)]+)`
+    : "";
+  // `dedup.js`'s `markerFor` writes /issues/ or /releases/ and reads /issues/ back, so
+  // an `Imported from …/pull/N` line is content the direct engine never wrote.
+  const marker = release ? releaseTarget : `github\\.com/${scope}/issues/${escapeRegExp(key)}`;
+  const original = release
+    ? releaseTarget
     : `github\\.com/${scope}/(?:issues|pull)/${escapeRegExp(key)}`;
   return new RegExp(
-    `^(?:Imported from https://${target}|\\[View original issue\\]\\(https://${target}\\))$`,
+    `^(?:Imported from https://${marker}|\\[View original issue\\]\\(https://${original}\\))$`,
     "i",
   );
+}
+
+/** The block `mapping.js` renders from a row's sub-issue links, at most its two lines. */
+const CROSS_LINK_LINE = new RegExp(
+  `^(?:${escapeRegExp(SUB_ISSUE_OF_PREFIX)} #\\d+|${escapeRegExp(SUB_ISSUES_PREFIX)} #\\d+(?:, #\\d+)*)$`,
+);
+
+/**
+ * Split a body from the cross-link block at its tail. `clampPlan` cuts the body *around*
+ * that block, so the truncation notice is not last and the clamp tolerance cannot see it.
+ *
+ * @param {string} body
+ * @returns {{ body: string, tail: string }}
+ */
+function popCrossLinks(body) {
+  const lines = body.split("\n");
+  /** @type {string[]} */
+  const tail = [];
+  while (lines.length && tail.length < 2 && CROSS_LINK_LINE.test(lines[lines.length - 1].trim())) {
+    tail.unshift(/** @type {string} */ (lines.pop()).trim());
+  }
+  if (!tail.length) return { body, tail: "" };
+  return { body: lines.join("\n").trimEnd(), tail: tail.join("\n") };
 }
 
 /**
@@ -157,60 +196,75 @@ const byteLen = (/** @type {string} */ s) => Buffer.byteLength(s, "utf8");
 
 /** The ellipsis `clampPlan` appends when it cuts a story name. */
 const NAME_ELLIPSIS = "…";
-/** `limits::STORY_NAME` — the same 255 both ends clamp to, in different units. */
-const NAME_LIMIT = 255;
 
 /**
- * True when `clamped` is `full` cut short by `clampBlock`: the notice closes it,
- * something precedes the notice, and the text it cut really was the longer one.
+ * True when `clamped` is `full` cut short by `clampBlock` at `limit`: the notice closes it,
+ * the cut landed on the limit, and the text it cut really was the longer one.
  *
  * @param {string} clamped
  * @param {string} full
+ * @param {number} limit the run's resolved byte limit for this field
  * @returns {boolean}
  */
-function clampedPrefixOf(clamped, full) {
-  const cut = clamped.indexOf(TRUNCATION_NOTICE);
+function clampedPrefixOf(clamped, full, limit) {
+  // The notice is only ever appended, so the anchor is the tail — an issue body that
+  // quotes the notice must not move it, or everything past the quote stops comparing.
+  const cut = clamped.length - TRUNCATION_NOTICE.length;
   if (cut <= 0 || !clamped.endsWith(TRUNCATION_NOTICE)) return false;
+  // `sliceBytes` cuts on a code-point boundary, so `clampBlock` lands within 3 bytes of
+  // the limit; anything shorter is the CLI losing text, not the limit taking it.
+  if (byteLen(clamped) < limit - 3) return false;
   return byteLen(full) > byteLen(clamped) && full.startsWith(clamped.slice(0, cut).trimEnd());
 }
 
 /**
  * True when `clamped` is what `clampPlan` would write for the title `full` came from. `full` is
- * a source prefix of ≥ `NAME_LIMIT` bytes, so the CLI's 252-byte cut is recoverable from it.
+ * a source prefix of ≥ `limit` bytes, so the CLI's `limit - 3` byte cut is recoverable from it.
  *
  * @param {string} clamped
  * @param {string} full
+ * @param {number} limit the run's resolved `storyName` byte limit
  * @returns {boolean}
  */
-function clampedNameOf(clamped, full) {
-  if (!clamped.endsWith(NAME_ELLIPSIS) || byteLen(full) < NAME_LIMIT) return false;
-  return clamped === `${sliceBytes(full, NAME_LIMIT - byteLen(NAME_ELLIPSIS))}${NAME_ELLIPSIS}`;
+function clampedNameOf(clamped, full, limit) {
+  if (!clamped.endsWith(NAME_ELLIPSIS) || byteLen(full) < limit) return false;
+  return clamped === `${sliceBytes(full, limit - byteLen(NAME_ELLIPSIS))}${NAME_ELLIPSIS}`;
 }
 
 /**
  * @typedef {object} Tolerance one accepted shape of difference for a text field
  * @property {string} reason the {@link DIVERGENCES} entry it is filed under
- * @property {(server: string, direct: string) => boolean} matches tried both ways round
+ * @property {(server: string, direct: string) => boolean} matches directional — every
+ *   divergence names which engine diverges, so the mirror image stays a mismatch
  */
 
+/** @param {number} limit @returns {Tolerance} */
+const clampTo = (limit) => ({
+  reason: DIVERGENCES.CLAMP,
+  matches: (server, direct) => clampedPrefixOf(direct, server, limit),
+});
+/** @param {number} limit @returns {Tolerance} */
+const nameClampTo = (limit) => ({
+  reason: DIVERGENCES.NAME_CLAMP,
+  matches: (server, direct) => clampedNameOf(direct, server, limit),
+});
 /** @type {Tolerance} */
-const CLAMP = { reason: DIVERGENCES.CLAMP, matches: clampedPrefixOf };
-/** @type {Tolerance} */
-const NAME_CLAMP = { reason: DIVERGENCES.NAME_CLAMP, matches: clampedNameOf };
-/** @type {Tolerance} */
-const COMMENT_TRIM = { reason: DIVERGENCES.COMMENT_TRIM, matches: (a, b) => a.trim() === b };
+const COMMENT_TRIM = {
+  reason: DIVERGENCES.COMMENT_TRIM,
+  matches: (server, direct) => server.trim() === direct,
+};
 
 /**
  * Compare one text field: equal, tolerated (the reason), or genuinely different.
  *
- * @param {string} a
- * @param {string} b
+ * @param {string} a the server engine's value
+ * @param {string} b the direct engine's value
  * @param {Tolerance[]} tolerances
  * @returns {"equal" | "differ" | string}
  */
 function compareText(a, b, tolerances) {
   if (a === b) return "equal";
-  for (const t of tolerances) if (t.matches(a, b) || t.matches(b, a)) return t.reason;
+  for (const t of tolerances) if (t.matches(a, b)) return t.reason;
   return "differ";
 }
 
@@ -231,7 +285,7 @@ function render(value) {
  * @param {ReturnType<typeof compareProjects>} result
  * @returns {string}
  */
-export function formatReport({ mismatches, tolerated, skipped, counts }) {
+export function formatReport({ mismatches, tolerated, skipped, counts, coverage }) {
   const issues = new Set(mismatches.map((m) => m.key)).size;
   const lines = [
     `PARITY: ${mismatches.length} mismatching field(s) across ${issues} issue(s)`,
@@ -240,6 +294,12 @@ export function formatReport({ mismatches, tolerated, skipped, counts }) {
   if (counts.server !== counts.serverKeys || counts.direct !== counts.directKeys) {
     lines.push(`distinct keys: server ${counts.serverKeys}, direct ${counts.directKeys}`);
   }
+  // "Equal" and "both sides read nothing" are the same verdict, so the run has to say
+  // how many rows each family was measured on rather than let an empty read pass as parity.
+  const families = Object.entries(coverage)
+    .map(([family, rows]) => `${family} ${rows}`)
+    .join(", ");
+  lines.push(`rows both engines carried data on: ${families}`);
   if (mismatches.length) lines.push("");
   for (const m of mismatches) {
     const gutter = `issue #${m.key}`.padEnd(16);
@@ -357,15 +417,22 @@ function countByKey(rows) {
 /**
  * @param {ParityRow[]} serverRows
  * @param {ParityRow[]} directRows
- * @param {{ unavailable?: Record<string, string>, repo?: { owner: string, name: string } }}
- *   [options] `unavailable` names fields no read path can supply, with the reason; they are
- *   reported, never silently dropped. `repo` pins the back-link footers to the run's repo.
+ * @param {{ unavailable?: Record<string, string>, repo?: { owner: string, name: string },
+ *   limits?: import("../src/mapping.js").FieldLimits }} [options] `unavailable` names fields
+ *   no read path can supply, with the reason; they are reported, never silently dropped.
+ *   `repo` pins the back-link footers to the run's repo. `limits` is the run's resolved
+ *   write limits, which is what the clamp tolerances check the cut against.
  * @returns {{ mismatches: Mismatch[], tolerated: Tolerated[],
  *   skipped: { field: string, reason: string }[],
  *   counts: { server: number, direct: number, compared: number,
- *     serverKeys: number, directKeys: number } }}
+ *     serverKeys: number, directKeys: number },
+ *   coverage: Record<string, number> }}
  */
-export function compareProjects(serverRows, directRows, { unavailable = {}, repo } = {}) {
+export function compareProjects(
+  serverRows,
+  directRows,
+  { unavailable = {}, repo, limits = FALLBACK_LIMITS } = {},
+) {
   for (const field of Object.keys(unavailable)) {
     if (!UNAVAILABLE_FIELDS.has(field)) {
       throw new TypeError(
@@ -380,6 +447,8 @@ export function compareProjects(serverRows, directRows, { unavailable = {}, repo
   /** @type {Tolerated[]} */
   const tolerated = [];
   let compared = 0;
+  /** @type {Record<string, number>} */
+  const coverage = { comments: 0, tasks: 0, labels: 0, owners: 0, requestor: 0 };
 
   const [serverCounts, directCounts] = [countByKey(serverRows), countByKey(directRows)];
   for (const key of new Set([...serverCounts.keys(), ...directCounts.keys()])) {
@@ -421,8 +490,8 @@ export function compareProjects(serverRows, directRows, { unavailable = {}, repo
       if (x !== y) mismatches.push({ key, field, server: x, direct: y });
     }
 
-    /** @param {string} field @param {string} x @param {string} y @param {Tolerance[]} [allow] */
-    const text = (field, x, y, allow = [CLAMP]) => {
+    /** @param {string} field @param {string} x @param {string} y @param {Tolerance[]} allow */
+    const text = (field, x, y, allow) => {
       const verdict = compareText(x, y, allow);
       if (verdict === "differ") mismatches.push({ key, field, server: x, direct: y });
       else if (verdict !== "equal") {
@@ -435,11 +504,20 @@ export function compareProjects(serverRows, directRows, { unavailable = {}, repo
       if (x !== y) mismatches.push({ key, field, server: x, direct: y });
     };
 
-    text("name", a.name ?? "", b.name ?? "", [NAME_CLAMP]);
+    text("name", a.name ?? "", b.name ?? "", [nameClampTo(limits.storyName)]);
 
     const [rawA, rawB] = [a.description ?? "", b.description ?? ""];
     const [popA, popB] = [popBackLink(rawA, key, repo), popBackLink(rawB, key, repo)];
-    if (text("description", popA.body, popB.body) === "equal" && rawA !== rawB) {
+    const [xlA, xlB] = [popCrossLinks(popA.body), popCrossLinks(popB.body)];
+    // The direct engine's own room: `clampPlan` reserves the marker footer, then cuts
+    // the body around the cross-link tail, so both come off the limit its notice sits on.
+    const bodyLimit =
+      limits.storyDescription -
+      (popB.footer ? byteLen(popB.footer) + 2 : 0) -
+      (xlB.tail ? byteLen(xlB.tail) + 2 : 0);
+    const body = text("description", xlA.body, xlB.body, [clampTo(bodyLimit)]);
+    same("description.cross-links", xlA.tail, xlB.tail);
+    if (body === "equal" && xlA.tail === xlB.tail && rawA !== rawB) {
       const entry = { key, field: "description", server: rawA, direct: rawB };
       // Only a footer that was really popped earns the tolerance; anything else
       // left over (trailing whitespace, say) is content the two engines disagree on.
@@ -448,21 +526,28 @@ export function compareProjects(serverRows, directRows, { unavailable = {}, repo
     }
 
     const [tasksA, tasksB] = [canonicalTasks(a.tasks), canonicalTasks(b.tasks)];
+    if (tasksA.length && tasksB.length) coverage.tasks += 1;
     if (tasksA.length !== tasksB.length) {
       same("tasks.length", tasksA.length, tasksB.length);
     } else {
       tasksA.forEach((task, i) => {
-        text(`tasks[${i}].description`, task.description, tasksB[i].description);
+        text(`tasks[${i}].description`, task.description, tasksB[i].description, [
+          clampTo(limits.taskDescription),
+        ]);
         same(`tasks[${i}].complete`, task.complete, tasksB[i].complete);
       });
     }
 
     const [commentsA, commentsB] = [canonicalComments(a.comments), canonicalComments(b.comments)];
+    if (commentsA.length && commentsB.length) coverage.comments += 1;
     if (commentsA.length !== commentsB.length) {
       same("comments.length", commentsA.length, commentsB.length);
     } else {
       commentsA.forEach((comment, i) => {
-        text(`comments[${i}].text`, comment.text, commentsB[i].text, [CLAMP, COMMENT_TRIM]);
+        text(`comments[${i}].text`, comment.text, commentsB[i].text, [
+          clampTo(limits.commentText),
+          COMMENT_TRIM,
+        ]);
         if (!sameSecond(comment.created, commentsB[i].created)) {
           same(`comments[${i}].created`, comment.created, commentsB[i].created);
         }
@@ -471,6 +556,7 @@ export function compareProjects(serverRows, directRows, { unavailable = {}, repo
     }
 
     const [labelsA, labelsB] = [canonicalLabels(a.labels), canonicalLabels(b.labels)];
+    if (labelsA.length && labelsB.length) coverage.labels += 1;
     if (labelsA.length !== labelsB.length) {
       same("labels.length", labelsA.length, labelsB.length);
     } else {
@@ -483,9 +569,13 @@ export function compareProjects(serverRows, directRows, { unavailable = {}, repo
     }
 
     same("requestor", actorKey(a.requestor), actorKey(b.requestor));
+    if (actorKey(a.requestor) !== "none" && actorKey(b.requestor) !== "none") {
+      coverage.requestor += 1;
+    }
     const people = (/** @type {unknown[]} */ owners) =>
       (owners ?? []).map(actorKey).sort().join(", ");
     same("owners", people(a.owners), people(b.owners));
+    if ((a.owners ?? []).length && (b.owners ?? []).length) coverage.owners += 1;
   }
 
   const skipped = Object.entries(unavailable).map(([field, reason]) => ({ field, reason }));
@@ -500,5 +590,6 @@ export function compareProjects(serverRows, directRows, { unavailable = {}, repo
       serverKeys: server.size,
       directKeys: direct.size,
     },
+    coverage,
   };
 }

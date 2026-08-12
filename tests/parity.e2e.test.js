@@ -27,9 +27,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { main, parseRepo } from "../src/cli.js";
+import { EATClient } from "../src/client.js";
 import { loadConfig } from "../src/config.js";
+import { FALLBACK_LIMITS } from "../src/mapping.js";
 import { capture } from "./helpers.js";
 import { compareProjects, DIVERGENCES, floorViolation, formatReport } from "./parity-compare.js";
+import { toParityRows } from "./parity-readback.js";
 
 const REQUIRED = [
   "EAT_AGENT_KEY",
@@ -38,29 +41,6 @@ const REQUIRED = [
   "EAT_PARITY_REPO",
 ];
 const missing = REQUIRED.filter((name) => !process.env[name]);
-
-/** Both engines' back-link footers, which carry the source id on rows with no provenance. */
-const BACK_LINK =
-  /(?:\[View original issue]\(|Imported from )https?:\/\/(?:api\.)?github\.com\/(?:repos\/)?[^/\s]+\/[^/\s]+\/(issues|pull|releases)\/(\d+)\)?$/i;
-
-/**
- * The row's cross-engine key: the provenance id both importers write, else the
- * back-link footer's id for a server too old to persist provenance.
- *
- * @param {any} row
- * @returns {string}
- */
-function keyOf(row) {
-  if (row.import_external_id != null) return String(row.import_external_id);
-  const last = String(row.description ?? "")
-    .trimEnd()
-    .split("\n")
-    .pop()
-    ?.trim();
-  const match = BACK_LINK.exec(last ?? "");
-  if (!match) return `unkeyed-story-${row.story_id}`;
-  return match[1].toLowerCase() === "releases" ? `release-${match[2]}` : match[2];
-}
 
 /**
  * Run `fn` over `items` with at most `width` in flight — the comment read is one
@@ -138,48 +118,19 @@ test("the direct engine imports the same repo as the server engine", {
 
   /**
    * @param {string} projectId
-   * @returns {Promise<import("./parity-compare.js").ParityRow[]>}
+   * @returns {Promise<{ rows: import("./parity-compare.js").ParityRow[], errors: string[] }>}
    */
   const readProject = async (projectId) => {
     const rows = await walk(projectId);
     // `tasks` embeds only when named in `fields=`, and `fields=` cannot carry
     // `requestor` — so the full row and the task arrays are two walks.
     const withTasks = await walk(projectId, "story_id,tasks");
-    const tasksById = new Map(withTasks.map((r) => [r.story_id, r.tasks ?? []]));
     const comments = await pooled(rows, 8, async (row) =>
       row.comment_count > 0
         ? await get(`/projects/${projectId}/stories/${row.story_id}/comments`)
         : [],
     );
-    return rows.map((row, i) => ({
-      key: keyOf(row),
-      name: row.name,
-      story_type: row.story_type,
-      current_state: row.current_state,
-      icebox: row.icebox,
-      created: row.created,
-      started: row.started,
-      rejected_at: row.rejected_at,
-      description: row.description ?? "",
-      import_source: row.import_source,
-      import_external_id: row.import_external_id,
-      tasks: (tasksById.get(row.story_id) ?? []).map((/** @type {any} */ t) => ({
-        description: t.task_desc,
-        complete: t.complete,
-      })),
-      comments: (comments[i] ?? []).map((/** @type {any} */ c) => ({
-        text: c.comment_text,
-        created: c.created,
-        author: c.author,
-      })),
-      labels: (row.labels ?? []).map((/** @type {any} */ l) => ({
-        name: l.label_name ?? l.name,
-        background_color_hex: l.background_color_hex ?? null,
-        text_color_hex: l.text_color_hex ?? null,
-      })),
-      requestor: row.requestor,
-      owners: row.owners ?? [],
-    }));
+    return toParityRows(rows, withTasks, comments);
   };
 
   for (const [engine, projectId] of Object.entries(projects)) {
@@ -211,10 +162,23 @@ test("the direct engine imports the same repo as the server engine", {
   // Split the same way the CLI did, so the footers this compares against are
   // scoped to exactly the owner/name the direct engine wrote into its markers.
   const [owner, name] = parseRepo(repo);
-  const [server, direct] = [await readProject(projects.server), await readProject(projects.direct)];
+  const read = {
+    server: await readProject(projects.server),
+    direct: await readProject(projects.direct),
+  };
+  const readErrors = [...read.server.errors, ...read.direct.errors];
+  assert.deepEqual(readErrors, [], `the readback itself is broken:\n${readErrors.join("\n")}`);
+  const [server, direct] = [read.server.rows, read.direct.rows];
+  // The same resolution `direct.js` writes by, so the clamp tolerances check the cut
+  // against the limit this run's server actually published.
+  const limits = {
+    ...FALLBACK_LIMITS,
+    ...(await new EATClient(config.apiBase, config.agentKey).fieldLimits()),
+  };
   const result = compareProjects(server, direct, {
     unavailable: { completed_at: DIVERGENCES.AGENT_KEY_COMPLETED_AT },
     repo: { owner, name },
+    limits,
   });
   const report = formatReport(result);
   console.log(report);

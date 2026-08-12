@@ -42,10 +42,10 @@ function issueTypeLine() {
 export const PULL_REQUEST_LABEL = "pull-request";
 export const PULL_REQUEST_LINK_TYPE = "pull_request";
 
-// One definition of each opener, so the legend below and the description assembly
-// far below cannot drift apart.
-const SUB_ISSUE_OF_PREFIX = "Sub-issue of";
-const SUB_ISSUES_PREFIX = "Sub-issues:";
+// One definition of each opener, so the legend, the description assembly far below,
+// and the parity harness that has to re-recognise the block cannot drift apart.
+export const SUB_ISSUE_OF_PREFIX = "Sub-issue of";
+export const SUB_ISSUES_PREFIX = "Sub-issues:";
 // Direct-only for the same reason as the two lines above. Built from the prefixes the
 // assembly itself renders, so renaming one cannot leave this line describing the old text.
 const SUB_ISSUES_LINE =

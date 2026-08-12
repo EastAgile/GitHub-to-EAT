@@ -175,6 +175,7 @@ const STORY_FIELDS = new Set([
   "story_ref",
   "project_id",
   "title",
+  "name",
   "description",
   "story_type",
   "current_state",
@@ -487,6 +488,27 @@ async function handle(state, req, res) {
     m = path.match(/^\/projects\/(\d+)\/stories$/);
     if (m) {
       let stories = state.stories[Number(m[1])] ?? [];
+      // Story #275/#25174 — archived rows are excluded by default; the tri-state
+      // `archived` wins, and the legacy `include_archived=true` aliases `include`.
+      const archivedParam = url.searchParams.get("archived");
+      if (archivedParam !== null && !["exclude", "include", "only"].includes(archivedParam)) {
+        send(res, 400, {
+          code: "validation_failed",
+          details: { fields: ["archived"] },
+          error: `archived must be one of exclude|include|only; got '${archivedParam}'`,
+        });
+        return;
+      }
+      const archivedMode =
+        archivedParam ??
+        (url.searchParams.get("include_archived") === "true" ? "include" : "exclude");
+      if (archivedMode === "exclude") stories = stories.filter((row) => row.archived_at == null);
+      else if (archivedMode === "only") stories = stories.filter((row) => row.archived_at != null);
+      // Story #25177 — rows frozen on a PAST iteration are hidden unless `include_done=true`;
+      // with no iteration calendar here, carrying any `iteration_id` stands for that.
+      if (url.searchParams.get("include_done") !== "true") {
+        stories = stories.filter((row) => row.icebox === true || row.iteration_id == null);
+      }
       // EAT #31427 provenance list filters — only on a server that advertises the pair.
       if (state.provenance) {
         const src = url.searchParams.get("import_source");
@@ -660,7 +682,8 @@ const LABEL_DEFAULT_TEXT = "#ffffff";
  */
 function toStoryPayload(row) {
   const { comments, people, links, ...payload } = row;
-  return payload;
+  // The read row publishes the title under both spellings, and both are in STORY_FIELDS.
+  return { ...payload, name: payload.title };
 }
 
 /**

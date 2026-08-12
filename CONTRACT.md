@@ -145,7 +145,15 @@ The API base is `.../api/v1`. Shapes the CLI parses:
   `title`/`name`); also `project_id`, `project_desc`, etc.
 - **Stories** (`GET .../projects/{id}/stories`): with `?limit=` (or `?cursor=`) it
   returns a cursor page `{ "items": [...], "next_cursor": <str|null> }`; with no
-  query it returns a bare JSON array.
+  query it returns a bare JSON array. Each row carries the title under **both**
+  `title` and its `name` alias, and both are in the `fields=` allowlist.
+  **Two filters hide rows by default**, so a reader that wants a whole project
+  must opt into them: `include_done=true` admits Done-panel stories (those frozen
+  on a *past* iteration — a row that is iceboxed or on no iteration is never
+  hidden), and `include_archived=true` admits archived rows. The latter is a
+  back-compat alias for the tri-state `archived=exclude|include|only` (default
+  `exclude`), which wins when both are sent; any other `archived` value is
+  `400 validation_failed` with `details.fields=["archived"]`.
 
 These shapes are mirrored by the bundled mock server (`src/mockserver.js`).
 
@@ -1156,7 +1164,8 @@ real server 2026-07-16 and mirrored by `src/mockserver.js`):
   colliding with a plain label is the same 409 naming `Label`. Callers must
   therefore list first and treat a 409 as "look again" — see "Milestones →
   epics" above.
-- **`POST /stories`** — body requires `name` (the read-side field is `title`;
+- **`POST /stories`** — body requires `name` (the read side publishes it as
+  `title` *and* under a `name` alias, both in the `fields=` allowlist;
   missing → `400 validation_failed`); optional `description`, `story_type`,
   `current_state`, `estimate`, `icebox`, `created_at`, `started_at`,
   `completed_at`, `import_source`, `import_external_id`, `requestor`, `owners`,

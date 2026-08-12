@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { TRUNCATION_NOTICE } from "../src/mapping.js";
+import { FALLBACK_LIMITS, TRUNCATION_NOTICE } from "../src/mapping.js";
 import { compareProjects, DIVERGENCES, floorViolation, formatReport } from "./parity-compare.js";
+
+const byteLen = (/** @type {string} */ s) => Buffer.byteLength(s, "utf8");
+
+/** What `clampBlock` really writes: the prefix that fits `limit`, then the notice. */
+const clampBlock = (/** @type {string} */ fill, /** @type {number} */ limit) =>
+  `${fill.repeat(limit - byteLen(TRUNCATION_NOTICE) - 2)}\n\n${TRUNCATION_NOTICE}`;
 
 const row = (/** @type {any} */ over = {}) => {
   const key = over.key ?? "7";
@@ -437,7 +443,7 @@ test("the story name is compared", () => {
 });
 
 test("a name the CLI cut in bytes where the importer cut in chars is tolerated (#35629)", () => {
-  // A 300-char, 600-byte title: the importer keeps 255 chars, the CLI keeps
+  // The importer's 255 chars of a longer title — 510 bytes — against the CLI's
   // 252 bytes (126 of these chars) plus the ellipsis it appends.
   const result = compareProjects(
     [row({ name: "é".repeat(255) })],
@@ -524,4 +530,234 @@ test("labels whose names collate equal are still ordered totally", () => {
   );
 
   assert.deepEqual(result.mismatches, []);
+});
+
+// --- a clamp anchored on content, not on the cut the CLI actually made ------
+
+test("an issue body that quotes the truncation notice cannot anchor the clamp comparison", () => {
+  const result = compareProjects(
+    [row({ description: `A${"S".repeat(30_000)}` })],
+    [row({ description: `A${TRUNCATION_NOTICE}${"D".repeat(500)}\n\n${TRUNCATION_NOTICE}` })],
+  );
+
+  assert.deepEqual(
+    result.mismatches.map((m) => m.field),
+    ["description"],
+  );
+  assert.deepEqual(result.tolerated, []);
+});
+
+test("text past a quoted notice is compared, not swallowed as everything after the cut", () => {
+  const result = compareProjects(
+    [row({ description: `AB${TRUNCATION_NOTICE} ${"Z".repeat(4000)}` })],
+    [
+      row({
+        description: `AB${TRUNCATION_NOTICE}\n\nNOTHING ALIKE HERE AT ALL\n\n${TRUNCATION_NOTICE}`,
+      }),
+    ],
+  );
+
+  assert.deepEqual(
+    result.mismatches.map((m) => m.field),
+    ["description"],
+  );
+  assert.deepEqual(result.tolerated, []);
+});
+
+test("the clamp anchor is the trailing notice even when the clamp is exactly at the limit", () => {
+  const limit = FALLBACK_LIMITS.storyDescription;
+  const head = `A${TRUNCATION_NOTICE}`;
+  const clamped = `${head}${"D".repeat(limit - byteLen(head) - byteLen(TRUNCATION_NOTICE) - 2)}\n\n${TRUNCATION_NOTICE}`;
+  assert.equal(byteLen(clamped), limit, "the fixture must sit on the limit, not below it");
+
+  const result = compareProjects(
+    [row({ description: `A${"S".repeat(30_000)}` })],
+    [row({ description: clamped })],
+  );
+
+  assert.deepEqual(
+    result.mismatches.map((m) => m.field),
+    ["description"],
+  );
+});
+
+test("a clamp far below the limit it was supposedly cut to is a mismatch", () => {
+  const result = compareProjects(
+    [row({ description: `A${"z".repeat(20_000)}` })],
+    [row({ description: `A${TRUNCATION_NOTICE}` })],
+  );
+
+  assert.deepEqual(
+    result.mismatches.map((m) => m.field),
+    ["description"],
+  );
+  assert.deepEqual(result.tolerated, []);
+});
+
+// --- tolerances are directional: each names which engine diverges -----------
+
+test("a clamp on the SERVER side is a mismatch — only the CLI cuts to the write limit", () => {
+  const result = compareProjects(
+    [row({ description: clampBlock("x", FALLBACK_LIMITS.storyDescription) })],
+    [row({ description: "x".repeat(20_000) })],
+  );
+
+  assert.deepEqual(
+    result.mismatches.map((m) => m.field),
+    ["description"],
+  );
+});
+
+test("a name clamped on the SERVER side is a mismatch, not the byte-vs-char divergence", () => {
+  const result = compareProjects(
+    [row({ name: `${"é".repeat(126)}…` })],
+    [row({ name: "é".repeat(255) })],
+  );
+
+  assert.deepEqual(
+    result.mismatches.map((m) => m.field),
+    ["name"],
+  );
+});
+
+test("the trim divergence runs one way: the CLI trims, so a trimmed SERVER body is a mismatch", () => {
+  const at = "2026-01-01T00:00:00Z";
+  const result = compareProjects(
+    [row({ comments: [{ text: "Looks good to me", created: at, author: null }] })],
+    [row({ comments: [{ text: "Looks good to me\n", created: at, author: null }] })],
+  );
+
+  assert.deepEqual(
+    result.mismatches.map((m) => m.field),
+    ["comments[0].text"],
+  );
+});
+
+// --- the back-link footer each engine actually writes -----------------------
+
+test("'Imported from …/pull/N' is not a marker the direct engine ever writes", () => {
+  const result = compareProjects(
+    [row({ description: "Body\n\n[View original issue](https://github.com/o/r/pull/7)" })],
+    [row({ description: "Body\n\nImported from https://github.com/o/r/pull/7" })],
+  );
+
+  assert.deepEqual(
+    result.mismatches.map((m) => m.field),
+    ["description"],
+  );
+});
+
+test("the server's own '[View original issue](…/pull/N)' footer is still popped", () => {
+  const result = compareProjects(
+    [row({ description: "Body\n\n[View original issue](https://github.com/o/r/pull/7)" })],
+    [row({ description: "Body\n\nImported from https://github.com/o/r/issues/7" })],
+  );
+
+  assert.deepEqual(result.mismatches, []);
+  assert.deepEqual(
+    result.tolerated.map((t) => t.reason),
+    [DIVERGENCES.BACKLINK],
+  );
+});
+
+// --- the cross-link block clampPlan cuts the body around ---------------------
+
+test("a body clamped around its cross-link block is still the clamp divergence", () => {
+  const tail = "\n\nSub-issue of #3";
+  const bodyLimit = FALLBACK_LIMITS.storyDescription - byteLen(tail);
+  const result = compareProjects(
+    [row({ description: `${"X".repeat(30_000)}${tail}` })],
+    [row({ description: `${clampBlock("X", bodyLimit)}${tail}` })],
+  );
+
+  assert.deepEqual(result.mismatches, []);
+  assert.deepEqual(
+    result.tolerated.map((t) => t.reason),
+    [DIVERGENCES.CLAMP],
+  );
+});
+
+test("two engines disagreeing on the cross-link block itself is a mismatch", () => {
+  const result = compareProjects(
+    [row({ description: "Body\n\nSub-issue of #3" })],
+    [row({ description: "Body\n\nSub-issue of #4" })],
+  );
+
+  assert.equal(result.mismatches.length, 1);
+  assert.match(result.mismatches[0].field, /cross-link/);
+});
+
+test("a cross-link block is only popped off the tail, never out of the body", () => {
+  const result = compareProjects(
+    [row({ description: "Sub-issues: #1, #2\n\nreal body" })],
+    [row({ description: "Sub-issues: #9\n\nreal body" })],
+  );
+
+  assert.deepEqual(
+    result.mismatches.map((m) => m.field),
+    ["description"],
+  );
+});
+
+// --- the row floor, and the families a run actually measured ----------------
+
+test("a malformed row floor is a violation, never a quiet fallback to 1", () => {
+  const counts = { compared: 1 };
+
+  assert.match(String(floorViolation(counts, Number("1O"))), /NaN/);
+  assert.match(String(floorViolation(counts, Number("50 rows"))), /NaN/);
+  assert.match(String(floorViolation({ compared: 50 }, Number(""))), /0/);
+  assert.equal(floorViolation(counts, 1), null);
+});
+
+test("the report counts the rows each field family was actually measured on", () => {
+  const at = "2026-01-01T00:00:00Z";
+  const rich = {
+    comments: [{ text: "hi", created: at, author: null }],
+    tasks: [{ description: "one", complete: true }],
+    labels: [{ name: "bug", background_color_hex: "#0f0", text_color_hex: "#000" }],
+    owners: [ext("sam", 1)],
+    requestor: ext("kim", 2),
+  };
+  const result = compareProjects(
+    [row({ key: "7", ...rich }), row({ key: "8" })],
+    [row({ key: "7", ...rich }), row({ key: "8" })],
+  );
+
+  assert.deepEqual(result.mismatches, []);
+  assert.deepEqual(result.coverage, {
+    comments: 1,
+    tasks: 1,
+    labels: 1,
+    owners: 1,
+    requestor: 1,
+  });
+  assert.match(formatReport(result), /comments 1, tasks 1, labels 1, owners 1, requestor 1/);
+});
+
+test("a family neither engine read shows as zero, so an unmeasured family is visible", () => {
+  const result = compareProjects([row({ key: "7" })], [row({ key: "7" })]);
+
+  assert.equal(result.coverage.comments, 0);
+  assert.match(formatReport(result), /comments 0/);
+});
+
+test("the report names the distinct-key counts whenever a key was written twice", () => {
+  const result = compareProjects([row({ key: "7" }), row({ key: "7" })], [row({ key: "7" })]);
+
+  assert.match(formatReport(result), /distinct keys: server 1, direct 1/);
+});
+
+test("the story-name limit is the run's resolved one, not a hand-copied 255", () => {
+  const limits = { ...FALLBACK_LIMITS, storyName: 40 };
+  const source = "é".repeat(40);
+  const result = compareProjects([row({ name: source })], [row({ name: `${"é".repeat(18)}…` })], {
+    limits,
+  });
+
+  assert.deepEqual(result.mismatches, []);
+  assert.deepEqual(
+    result.tolerated.map((t) => t.reason),
+    [DIVERGENCES.NAME_CLAMP],
+  );
 });
