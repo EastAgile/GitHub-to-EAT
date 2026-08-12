@@ -78,10 +78,7 @@ test("the direct engine imports the same repo as the server engine", {
   };
   assert.notEqual(projects.server, projects.direct, "the two engines need separate projects");
 
-  /**
-   * @param {string} path
-   * @returns {Promise<any>}
-   */
+  /** @param {string} path @returns {Promise<any>} */
   const get = async (path) => {
     const response = await fetch(`${config.apiBase}${path}`, {
       headers: { "X-TrackerToken": config.agentKey, Accept: "application/json" },

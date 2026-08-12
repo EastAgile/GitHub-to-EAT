@@ -1,7 +1,6 @@
 /**
- * Wire shape → {@link import("./parity-compare.js").ParityRow} for the two-engine parity harness
- * (#32775). Split from `parity.e2e.test.js` so the default suite can pin the EAT read shape:
- * the e2e is opt-in, and a drift there would otherwise vanish instead of failing red.
+ * Wire shape → {@link import("./parity-compare.js").ParityRow} for the parity harness (#32775).
+ * Split from the opt-in `parity.e2e.test.js` so the default suite pins the EAT read shape.
  */
 
 /** Both engines' back-link footers, which carry the source id on rows with no provenance. */
@@ -28,13 +27,8 @@ export function keyOf(row) {
 }
 
 /**
- * Assemble one project's parity rows from the three reads the harness makes: the full list
- * walk, the `fields=story_id,tasks` walk, and one comment page per row.
- *
- * `errors` are the harness's own, not parity mismatches: an embed that came back empty makes
- * both engines read nothing, and "nothing equals nothing" is the one verdict a parity run
- * must never reach on its own. The counts checked against are the server's, on the same row,
- * behind the same `expired IS NULL` filter as the embed.
+ * `errors` are the harness's own: an empty embed makes both engines read nothing, and "nothing
+ * equals nothing" must never pass as parity; counts are the server's own `expired IS NULL` count.
  *
  * @param {any[]} rows the full list walk
  * @param {any[]} withTasks the `fields=story_id,tasks` walk, one entry per row

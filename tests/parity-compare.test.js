@@ -137,7 +137,6 @@ test("completed_at on a rejected row is tolerated (#36701), on an accepted row i
 });
 
 test("a body the CLI clamped to the write route's maxLength is tolerated (#35629)", () => {
-  // What `clampBlock` really writes: the prefix that fits, then the notice.
   const source = "x".repeat(20_000);
   const clamped = `${"x".repeat(16_000 - TRUNCATION_NOTICE.length - 2)}\n\n${TRUNCATION_NOTICE}`;
   const result = compareProjects([row({ description: source })], [row({ description: clamped })]);

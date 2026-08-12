@@ -41,9 +41,7 @@ import {
  * @property {unknown} direct
  */
 
-/**
- * @typedef {Mismatch & { reason: string }} Tolerated
- */
+/** @typedef {Mismatch & { reason: string }} Tolerated */
 
 /** Divergences this harness accepts, each naming the ask that tracks it; all else fails the run. */
 export const DIVERGENCES = {
@@ -418,10 +416,9 @@ function countByKey(rows) {
  * @param {ParityRow[]} serverRows
  * @param {ParityRow[]} directRows
  * @param {{ unavailable?: Record<string, string>, repo?: { owner: string, name: string },
- *   limits?: import("../src/mapping.js").FieldLimits }} [options] `unavailable` names fields
- *   no read path can supply, with the reason; they are reported, never silently dropped.
- *   `repo` pins the back-link footers to the run's repo. `limits` is the run's resolved
- *   write limits, which is what the clamp tolerances check the cut against.
+ *   limits?: import("../src/mapping.js").FieldLimits }} [options]
+ *   `unavailable` fields are reported, never silently dropped; `repo` pins the back-link footers,
+ *   and `limits` are the write limits the clamp tolerances check the cut against.
  * @returns {{ mismatches: Mismatch[], tolerated: Tolerated[],
  *   skipped: { field: string, reason: string }[],
  *   counts: { server: number, direct: number, compared: number,
