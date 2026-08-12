@@ -146,16 +146,32 @@ The API base is `.../api/v1`. Shapes the CLI parses:
 - **Stories** (`GET .../projects/{id}/stories`): with `?limit=` (or `?cursor=`) it
   returns a cursor page `{ "items": [...], "next_cursor": <str|null> }`; with no
   query it returns a bare JSON array. Each row carries the title under **both**
-  `title` and its `name` alias, and both are in the `fields=` allowlist.
+  `title` and its `name` alias, and both are in the `fields=` allowlist (real
+  server 2026-08-12: `handlers/stories.rs` projects `"title": row.title,
+  "name": row.title` on the list path and again on the detail path, and both keys
+  are members of its `STORY_FIELDS` allowlist).
   **Two filters hide rows by default**, so a reader that wants a whole project
   must opt into them: `include_done=true` admits Done-panel stories (those frozen
-  on a *past* iteration — a row that is iceboxed or on no iteration is never
-  hidden), and `include_archived=true` admits archived rows. The latter is a
+  on a *past* iteration — a row that is iceboxed, on no iteration, or on the
+  iteration covering `now()` is never hidden), and `include_archived=true` admits
+  archived rows. The latter is a
   back-compat alias for the tri-state `archived=exclude|include|only` (default
   `exclude`), which wins when both are sent; any other `archived` value is
-  `400 validation_failed` with `details.fields=["archived"]`.
+  `400 validation_failed` with `details.fields=["archived"]`. Both booleans
+  deserialise as `Option<bool>`, so `true` / `false` are the only spellings that
+  reach the handler — anything else is rejected by the query extractor as
+  `400 validation_failed` with an empty `details.fields`.
+- **Story comments** (`GET .../projects/{id}/stories/{sid}/comments`): with no
+  query it returns a **bare JSON array** ordered by `created`; sending any of
+  `cursor` / `limit` / `order` switches the response to the
+  `{ "items": [...], "next_cursor": <str|null> }` envelope, ordered by
+  `story_comment_id`. A reader must tolerate both shapes.
 
-These shapes are mirrored by the bundled mock server (`src/mockserver.js`).
+These shapes are mirrored by the bundled mock server (`src/mockserver.js`), with
+two caveats: it serves only `POST` on the comments route, and — having no
+iteration calendar — its `include_done` filter stands in for "frozen on a past
+iteration" with "carries any `iteration_id`", so it hides current-iteration rows
+the real server returns.
 
 ### GitHub identity mapping (both engines)
 

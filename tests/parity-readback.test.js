@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { keyOf, toParityRows } from "./parity-readback.js";
+import { commentsFrom, keyOf, toParityRows } from "./parity-readback.js";
 
 /** One EAT list row as the agent-key `GET /stories` walk returns it, recorded 2026-08-06. */
 const listRow = (/** @type {any} */ over = {}) => ({
@@ -222,6 +222,62 @@ test("the two walks returning different row counts is an error on its own", () =
   assert.match(errors.join("\n"), /walk/i);
 });
 
+// --- absence is a broken readback, never agreement --------------------------
+
+test("a row with no `name` reads its `title`, the spelling every server version publishes", () => {
+  const noAlias = listRow();
+  delete noAlias.name;
+  const { rows, errors } = toParityRows([noAlias], [taskRow()], [[commentRow()]]);
+
+  assert.deepEqual(errors, []);
+  assert.equal(rows[0].name, "Fix the flaky import");
+});
+
+test("a row carrying neither name nor title is an error, not an empty name", () => {
+  const nameless = listRow();
+  delete nameless.name;
+  delete nameless.title;
+  const { errors } = toParityRows([nameless], [taskRow()], [[commentRow()]]);
+
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /name/);
+  assert.match(errors[0], /title/);
+});
+
+for (const field of [
+  "description",
+  "story_type",
+  "current_state",
+  "icebox",
+  "created",
+  "started",
+  "rejected_at",
+  "import_source",
+  "import_external_id",
+  "requestor",
+  "owners",
+  "labels",
+]) {
+  test(`a row carrying no ${field} is an error — absent on both sides is not agreement`, () => {
+    const row = listRow();
+    delete row[field];
+    const { errors } = toParityRows([row], [taskRow()], [[commentRow()]]);
+
+    assert.equal(errors.length, 1, `expected one error, got ${JSON.stringify(errors)}`);
+    assert.match(errors[0], new RegExp(field));
+  });
+}
+
+test("a null value is compared, so only an absent key is a readback error", () => {
+  const { errors } = toParityRows(
+    [listRow({ requestor: null, import_source: null, import_external_id: null, labels: [] })],
+    [taskRow()],
+    [[commentRow()]],
+  );
+
+  assert.deepEqual(errors, []);
+});
+
 test("a clean read reports no errors, so the check cannot be vacuously satisfied", () => {
   const { errors } = toParityRows(
     [listRow(), listRow({ story_id: 4212, import_external_id: "8", comment_count: 0 })],
@@ -230,4 +286,19 @@ test("a clean read reports no errors, so the check cannot be vacuously satisfied
   );
 
   assert.deepEqual(errors, []);
+});
+
+// --- the comment route's two response shapes ---------------------------------
+
+test("the comment route's bare array — its no-params shape — reads straight through", () => {
+  assert.deepEqual(commentsFrom([commentRow()]), [commentRow()]);
+});
+
+test("the cursor envelope any of cursor/limit/order opts into is unwrapped, not crashed on", () => {
+  assert.deepEqual(commentsFrom({ items: [commentRow()], next_cursor: null }), [commentRow()]);
+});
+
+test("a shape carrying neither reads empty, which the row's own comment_count then catches", () => {
+  assert.deepEqual(commentsFrom(null), []);
+  assert.deepEqual(commentsFrom({ next_cursor: null }), []);
 });

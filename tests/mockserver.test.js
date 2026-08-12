@@ -1281,3 +1281,59 @@ test("Done-panel stories are hidden by default and admitted by include_done", as
     await mock.close();
   }
 });
+
+test("the tri-state archived wins over include_archived when both are sent", async () => {
+  const mock = await startMockServer();
+  try {
+    for (const name of ["live", "filed"]) {
+      await post(mock.baseUrl, "/projects/91/stories", { name });
+    }
+    mock.state.stories[91][1].archived_at = "2026-07-01T00:00:00Z";
+    const headers = { "X-TrackerToken": "ea_token" };
+    /** @param {string} query */
+    const titles = async (query) =>
+      (await (await fetch(`${mock.baseUrl}/projects/91/stories?${query}`, { headers })).json()).map(
+        (/** @type {any} */ r) => r.title,
+      );
+
+    assert.deepEqual(await titles("archived=exclude&include_archived=true"), ["live"]);
+    assert.deepEqual(await titles("archived=only&include_archived=true"), ["filed"]);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a boolean list param outside true|false is 400, the way Option<bool> rejects it", async () => {
+  const mock = await startMockServer();
+  try {
+    for (const query of ["include_archived=yes", "include_done=1", "include_archived=TRUE"]) {
+      const response = await fetch(`${mock.baseUrl}/projects/91/stories?${query}`, {
+        headers: { "X-TrackerToken": "ea_token" },
+      });
+
+      assert.equal(response.status, 400, query);
+      const payload = await response.json();
+      assert.equal(payload.code, "validation_failed", query);
+      assert.deepEqual(payload.details.fields, []);
+    }
+  } finally {
+    await mock.close();
+  }
+});
+
+test("false is a spelling Option<bool> takes, so it reads as the default", async () => {
+  const mock = await startMockServer();
+  try {
+    await post(mock.baseUrl, "/projects/91/stories", { name: "filed" });
+    mock.state.stories[91][0].archived_at = "2026-07-01T00:00:00Z";
+    const response = await fetch(
+      `${mock.baseUrl}/projects/91/stories?include_archived=false&include_done=false`,
+      { headers: { "X-TrackerToken": "ea_token" } },
+    );
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), []);
+  } finally {
+    await mock.close();
+  }
+});

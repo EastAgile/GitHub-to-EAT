@@ -10,6 +10,11 @@
  *     EAT_PARITY_REPO              public GitHub repo as OWNER/NAME
  *     EAT_PARITY_INCLUDE           (optional) --include types; default `issues`
  *     EAT_PARITY_MIN_ROWS          (optional) floor on rows compared; default 1
+ *     EAT_PARITY_MIN_COMMENTS      (optional) floor on rows both engines read comments on;
+ *     EAT_PARITY_MIN_TASKS         default 1 each. AC 2 claims equivalence for these five
+ *     EAT_PARITY_MIN_LABELS        families, so a fixture repo that exercises none of one
+ *     EAT_PARITY_MIN_OWNERS        certifies nothing about it; set a family's floor to `0`
+ *     EAT_PARITY_MIN_REQUESTOR     to say so out loud.
  *     EAT_API_BASE                 (optional) override the API base URL
  *     GITHUB_TOKEN                 (optional) read by the CLI itself; a local stack with no
  *                                  platform PAT needs it for the server engine
@@ -21,6 +26,12 @@
  *
  * NOT COMPARED — `completed_at` (no agent-key read path, #44442; `/search`'s value is too
  * indirect). Outside AC 2: blockers, PR links, epics, `estimate`, iteration placement (#36735).
+ *
+ * FIXTURE CONSTRAINT — a repo whose issues carry GitHub's org issue-type field must add
+ * `story_type: DIVERGENCES.ISSUE_TYPE` to `unavailable` below: the direct engine maps that
+ * field and the importer cannot see it, and no read tells the two rules apart. The other two
+ * direct-only exceptions (the sub-issue block, the closed-reason state and label) are
+ * tolerated directionally by the comparator and need no fixture constraint.
  */
 
 import assert from "node:assert/strict";
@@ -31,8 +42,15 @@ import { EATClient } from "../src/client.js";
 import { loadConfig } from "../src/config.js";
 import { FALLBACK_LIMITS } from "../src/mapping.js";
 import { capture } from "./helpers.js";
-import { compareProjects, DIVERGENCES, floorViolation, formatReport } from "./parity-compare.js";
-import { toParityRows } from "./parity-readback.js";
+import {
+  compareProjects,
+  coverageFloors,
+  coverageViolations,
+  DIVERGENCES,
+  floorViolation,
+  formatReport,
+} from "./parity-compare.js";
+import { commentsFrom, toParityRows } from "./parity-readback.js";
 
 const REQUIRED = [
   "EAT_AGENT_KEY",
@@ -124,7 +142,7 @@ test("the direct engine imports the same repo as the server engine", {
     const withTasks = await walk(projectId, "story_id,tasks");
     const comments = await pooled(rows, 8, async (row) =>
       row.comment_count > 0
-        ? await get(`/projects/${projectId}/stories/${row.story_id}/comments`)
+        ? commentsFrom(await get(`/projects/${projectId}/stories/${row.story_id}/comments`))
         : [],
     );
     return toParityRows(rows, withTasks, comments);
@@ -186,4 +204,6 @@ test("the direct engine imports the same repo as the server engine", {
   assert.equal(result.counts.server, result.counts.direct, report);
   const floor = Number(process.env.EAT_PARITY_MIN_ROWS ?? 1);
   assert.equal(floorViolation(result.counts, floor), null, report);
+  const thin = coverageViolations(result.coverage, coverageFloors(process.env));
+  assert.deepEqual(thin, [], `${thin.join("\n")}\n${report}`);
 });

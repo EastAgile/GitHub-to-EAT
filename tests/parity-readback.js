@@ -27,8 +27,43 @@ export function keyOf(row) {
 }
 
 /**
+ * One page of `GET …/stories/{id}/comments`: a bare array with no query, and an
+ * `{items, next_cursor}` envelope the moment `cursor`/`limit`/`order` is sent. Neither
+ * shape may throw — an unknown one reads empty and the row's own `comment_count` catches it.
+ *
+ * @param {any} page
+ * @returns {any[]}
+ */
+export function commentsFrom(page) {
+  if (Array.isArray(page)) return page;
+  return Array.isArray(page?.items) ? page.items : [];
+}
+
+/**
+ * Every key the comparison reads off a list row. A key absent on both sides compares
+ * equal to itself, so its absence is a broken readback rather than agreement.
+ */
+const COMPARED_KEYS = [
+  "description",
+  "story_type",
+  "current_state",
+  "icebox",
+  "created",
+  "started",
+  "rejected_at",
+  "import_source",
+  "import_external_id",
+  "requestor",
+  "owners",
+  "labels",
+];
+
+/**
  * `errors` are the harness's own: an empty embed makes both engines read nothing, and "nothing
- * equals nothing" must never pass as parity; counts are the server's own `expired IS NULL` count.
+ * equals nothing" must never pass as parity. `tasks_count` is the server's own `expired IS NULL`
+ * count; `comment_count` has no such predicate (`fetch_counts_for_page` counts every
+ * `story_comment` row) where `GET …/comments` filters on it, so a soft-deleted comment reads
+ * as a broken readback here.
  *
  * @param {any[]} rows the full list walk
  * @param {any[]} withTasks the `fields=story_id,tasks` walk, one entry per row
@@ -57,6 +92,21 @@ export function toParityRows(rows, withTasks, commentsByRow) {
     }
   };
 
+  /** @param {any} row */
+  const checkCompared = (row) => {
+    const where = `story ${row.story_id} (#${keyOf(row)})`;
+    for (const field of COMPARED_KEYS) {
+      if (!(field in row)) {
+        errors.push(`${where}: the list row carries no ${field}, so it cannot be compared`);
+      }
+    }
+    // `name` is the newer alias of `title`; a server that publishes neither leaves the
+    // comparison reading undefined on both sides, which is not agreement on the title.
+    if (!("name" in row) && !("title" in row)) {
+      errors.push(`${where}: the list row carries neither name nor title`);
+    }
+  };
+
   const parity = rows.map((row, i) => {
     const tasks = tasksById.get(row.story_id);
     if (tasks === undefined) {
@@ -64,6 +114,7 @@ export function toParityRows(rows, withTasks, commentsByRow) {
     }
     checkCount(row, "comment_count", commentsByRow[i] ?? []);
     checkCount(row, "tasks_count", tasks ?? []);
+    checkCompared(row);
     return toParityRow(row, tasks ?? [], commentsByRow[i] ?? []);
   });
   return { rows: parity, errors };
@@ -78,7 +129,7 @@ export function toParityRows(rows, withTasks, commentsByRow) {
 function toParityRow(row, tasks, comments) {
   return {
     key: keyOf(row),
-    name: row.name,
+    name: row.name ?? row.title,
     story_type: row.story_type,
     current_state: row.current_state,
     icebox: row.icebox,

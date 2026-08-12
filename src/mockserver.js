@@ -438,6 +438,20 @@ function buildImportJob(state, projectId, importId, result) {
 }
 
 /**
+ * A query flag read the way the backend's `Option<bool>` deserialises one: `true` / `false`
+ * and nothing else, absent meaning false.
+ *
+ * @param {URL} url
+ * @param {string} name
+ * @returns {boolean | undefined} undefined for a spelling serde would reject
+ */
+function queryBool(url, name) {
+  const raw = url.searchParams.get(name);
+  if (raw === null || raw === "false") return false;
+  return raw === "true" ? true : undefined;
+}
+
+/**
  * @param {http.ServerResponse} res
  * @param {number} code
  * @param {unknown} [payload]
@@ -488,6 +502,18 @@ async function handle(state, req, res) {
     m = path.match(/^\/projects\/(\d+)\/stories$/);
     if (m) {
       let stories = state.stories[Number(m[1])] ?? [];
+      const flags = ["include_archived", "include_done"].map((name) => queryBool(url, name));
+      if (flags.some((flag) => flag === undefined)) {
+        // The backend's `Option<bool>` never reaches the handler on a bad spelling —
+        // its Query extractor rejects the whole string with this envelope.
+        send(res, 400, {
+          code: "validation_failed",
+          details: { fields: [] },
+          error: "Some of the request parameters are invalid.",
+        });
+        return;
+      }
+      const [includeArchived, includeDone] = flags;
       // Story #275/#25174 — archived rows are excluded by default; the tri-state
       // `archived` wins, and the legacy `include_archived=true` aliases `include`.
       const archivedParam = url.searchParams.get("archived");
@@ -499,14 +525,12 @@ async function handle(state, req, res) {
         });
         return;
       }
-      const archivedMode =
-        archivedParam ??
-        (url.searchParams.get("include_archived") === "true" ? "include" : "exclude");
+      const archivedMode = archivedParam ?? (includeArchived ? "include" : "exclude");
       if (archivedMode === "exclude") stories = stories.filter((row) => row.archived_at == null);
       else if (archivedMode === "only") stories = stories.filter((row) => row.archived_at != null);
       // Story #25177 — rows frozen on a PAST iteration are hidden unless `include_done=true`;
-      // with no iteration calendar here, carrying any `iteration_id` stands for that.
-      if (url.searchParams.get("include_done") !== "true") {
+      // the real third disjunct (an iteration covering now()) needs a calendar this mock lacks.
+      if (!includeDone) {
         stories = stories.filter((row) => row.icebox === true || row.iteration_id == null);
       }
       // EAT #31427 provenance list filters — only on a server that advertises the pair.

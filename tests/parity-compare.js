@@ -4,6 +4,7 @@
  */
 
 import {
+  CLOSED_REASON_LABELS,
   FALLBACK_LIMITS,
   SUB_ISSUE_OF_PREFIX,
   SUB_ISSUES_PREFIX,
@@ -54,13 +55,38 @@ export const DIVERGENCES = {
   CLAMP:
     "long text (description / task / comment) cut by the CLI to the write route's published " +
     "maxLength and closed with the truncation notice, where the importer writes the column " +
-    "directly and keeps the source whole — server ask #35629",
+    "directly and is bound only by its own column widths (see TASK_TRUNCATE) — server ask #35629",
+  TASK_TRUNCATE:
+    "task description cut to 255 chars by the importer's own column width " +
+    "(`task.desc.chars().take(255)` in services/import/writer.rs), where the CLI writes the " +
+    "checklist entry whole — the mirror of CLAMP, and why CLAMP alone cannot cover tasks",
+  CROSS_LINKS:
+    "sub-issue cross-link block: the direct engine renders '" +
+    SUB_ISSUE_OF_PREFIX +
+    " #n' / '" +
+    SUB_ISSUES_PREFIX +
+    " #n' as the description's last paragraph and the importer never fetches /sub_issues — " +
+    "one of the three direct-only exceptions named in src/mapping.js's header and in " +
+    "CONTRACT.md's 'issues → stories' section",
+  CLOSED_REASON:
+    "closed as not planned / duplicate: the direct engine rejects the story (a chore stays " +
+    "accepted, having no rejected state) and attaches the reason label, where the importer " +
+    "flattens every closed issue to accepted — src/mapping.js's CLOSED_REASON_LABELS and " +
+    "header, and CONTRACT.md's 'issues → stories' section",
+  ISSUE_TYPE:
+    "story_type read off GitHub's org issue-type field, which the direct engine maps and the " +
+    "importer cannot see (its GhIssue has no `type`, so serde drops it) — src/mapping.js's " +
+    "header and CONTRACT.md's 'issues → stories' section; a fixture repo that uses issue " +
+    "types must name story_type unavailable, because no read tells the two rules apart",
   NAME_CLAMP:
     "story name clamped at 255 bytes by the CLI (what the public route validates) vs 255 chars " +
     "by the importer (`title.chars().take(255)`) — server ask #35629 (/s/y9q8ea68)",
   COMMENT_TRIM:
     "comment body: the CLI trims it before sending, the server importer stores it verbatim " +
     "(it only calls trim() to skip blank comments) — declared in CONTRACT.md's people section",
+  COMMENT_TRIM_CLAMP:
+    "comment body both whitespace-led and over the limit: the CLI trims it and then clamps " +
+    "the remainder, so neither the trim nor the clamp divergence explains it on its own",
   TASK_ORDER:
     "task order: the public create cannot set task_order (it defaults to 0.0) where the importer " +
     "writes the entry index, and the story projection orders by task_order with no tiebreaker, " +
@@ -72,7 +98,7 @@ export const DIVERGENCES = {
 };
 
 /** The only fields `unavailable` can name, because they are the only ones it gates. */
-const UNAVAILABLE_FIELDS = new Set(["completed_at"]);
+const UNAVAILABLE_FIELDS = new Set(["completed_at", "story_type"]);
 
 /**
  * A run that compared too few rows proves nothing, so the caller fails on this
@@ -90,6 +116,58 @@ export function floorViolation({ compared }, minRows = 1) {
   }
   if (compared >= minRows) return null;
   return `compared ${compared} row(s), below the floor of ${minRows} — a run that compares nothing (or almost nothing) certifies nothing`;
+}
+
+/** The row families AC 2 claims equivalence for, each counted only where both engines read data. */
+export const COVERAGE_FAMILIES = ["comments", "tasks", "labels", "owners", "requestor"];
+
+/** @param {string} family @returns {string} */
+const floorVar = (family) => `EAT_PARITY_MIN_${family.toUpperCase()}`;
+
+/**
+ * Per-family row floors, read the way `EAT_PARITY_MIN_ROWS` is. Blank is not zero: an
+ * unset floor defaults to 1, and only an explicit `0` opts a family out of the gate.
+ *
+ * @param {Record<string, string | undefined>} [env]
+ * @returns {Record<string, number>}
+ */
+export function coverageFloors(env = {}) {
+  return Object.fromEntries(
+    COVERAGE_FAMILIES.map((family) => {
+      const raw = env[floorVar(family)];
+      if (raw === undefined) return [family, 1];
+      return [family, raw.trim() === "" ? Number.NaN : Number(raw)];
+    }),
+  );
+}
+
+/**
+ * A family both engines read nothing for was never compared, so "equal" is not a finding
+ * about it. Malformed floors fail the same way {@link floorViolation}'s do.
+ *
+ * @param {Record<string, number>} coverage
+ * @param {Record<string, number>} floors
+ * @returns {string[]} one line per family that cannot certify parity
+ */
+export function coverageViolations(coverage, floors) {
+  /** @type {string[]} */
+  const out = [];
+  for (const family of COVERAGE_FAMILIES) {
+    const floor = floors[family];
+    if (!Number.isInteger(floor) || floor < 0) {
+      out.push(
+        `coverage floor ${String(floor)} for ${family} is not a row count — set ${floorVar(family)} to an integer ≥ 0`,
+      );
+      continue;
+    }
+    const rows = coverage[family] ?? 0;
+    if (rows < floor) {
+      out.push(
+        `${family}: both engines carried data on ${rows} row(s), below the floor of ${floor} — a family measured on nothing certifies nothing`,
+      );
+    }
+  }
+  return out;
 }
 
 const SCALAR_FIELDS = [
@@ -140,21 +218,25 @@ const CROSS_LINK_LINE = new RegExp(
 );
 
 /**
- * Split a body from the cross-link block at its tail. `clampPlan` cuts the body *around*
- * that block, so the truncation notice is not last and the clamp tolerance cannot see it.
+ * Split the DIRECT body from the cross-link block at its tail. Only that engine writes the
+ * block, so a look-alike line the server body carries too is the issue author's content and
+ * stays put. `clampPlan` cuts the body *around* the block, so the truncation notice is not
+ * last and the clamp tolerance cannot see it.
  *
- * @param {string} body
+ * @param {string} body the direct engine's description body
+ * @param {string} serverBody the server engine's, which never carries the block
  * @returns {{ body: string, tail: string }}
  */
-function popCrossLinks(body) {
+function popCrossLinks(body, serverBody) {
   const lines = body.split("\n");
   /** @type {string[]} */
   const tail = [];
   while (lines.length && tail.length < 2 && CROSS_LINK_LINE.test(lines[lines.length - 1].trim())) {
     tail.unshift(/** @type {string} */ (lines.pop()).trim());
   }
-  if (!tail.length) return { body, tail: "" };
-  return { body: lines.join("\n").trimEnd(), tail: tail.join("\n") };
+  const block = tail.join("\n");
+  if (!block || serverBody.trimEnd().endsWith(block)) return { body, tail: "" };
+  return { body: lines.join("\n").trimEnd(), tail: block };
 }
 
 /**
@@ -205,14 +287,16 @@ const NAME_ELLIPSIS = "…";
  * @returns {boolean}
  */
 function clampedPrefixOf(clamped, full, limit) {
-  // The notice is only ever appended, so the anchor is the tail — an issue body that
-  // quotes the notice must not move it, or everything past the quote stops comparing.
-  const cut = clamped.length - TRUNCATION_NOTICE.length;
-  if (cut <= 0 || !clamped.endsWith(TRUNCATION_NOTICE)) return false;
+  // Anchored on exactly what `clampBlock` writes — `sliceBytes(text, room)` then "\n\n" then
+  // the notice — so a quoted notice cannot move the anchor and no trim can empty it.
+  const suffix = `\n\n${TRUNCATION_NOTICE}`;
+  if (!clamped.endsWith(suffix)) return false;
+  const anchor = clamped.slice(0, clamped.length - suffix.length);
+  if (!anchor) return false;
   // `sliceBytes` cuts on a code-point boundary, so `clampBlock` lands within 3 bytes of
   // the limit; anything shorter is the CLI losing text, not the limit taking it.
   if (byteLen(clamped) < limit - 3) return false;
-  return byteLen(full) > byteLen(clamped) && full.startsWith(clamped.slice(0, cut).trimEnd());
+  return byteLen(full) > byteLen(clamped) && full.startsWith(anchor);
 }
 
 /**
@@ -251,6 +335,28 @@ const COMMENT_TRIM = {
   reason: DIVERGENCES.COMMENT_TRIM,
   matches: (server, direct) => server.trim() === direct,
 };
+/** The CLI trims a comment and then clamps it, so the two divergences can land together. */
+const trimmedClampTo = (/** @type {number} */ limit) => ({
+  reason: DIVERGENCES.COMMENT_TRIM_CLAMP,
+  matches: (/** @type {string} */ server, /** @type {string} */ direct) =>
+    clampedPrefixOf(direct, server.trim(), limit),
+});
+
+/** The importer's own column width for a task description (`chars().take(255)`). */
+const IMPORTER_TASK_CHARS = 255;
+
+/** @type {Tolerance} */
+const TASK_TRUNCATE = {
+  reason: DIVERGENCES.TASK_TRUNCATE,
+  matches: (server, direct) => {
+    const [cut, whole] = [[...server], [...direct]];
+    return (
+      cut.length === IMPORTER_TASK_CHARS &&
+      whole.length > IMPORTER_TASK_CHARS &&
+      whole.slice(0, IMPORTER_TASK_CHARS).join("") === server
+    );
+  },
+};
 
 /**
  * Compare one text field: equal, tolerated (the reason), or genuinely different.
@@ -266,15 +372,36 @@ function compareText(a, b, tolerances) {
   return "differ";
 }
 
+const WINDOW = 200;
+/** Context kept before the first difference, so the window reads in its surroundings. */
+const WINDOW_LEAD = 40;
+
+/** @param {string} text @param {number} start @returns {string} */
+function windowAt(text, start) {
+  if (text.length <= WINDOW) return text;
+  const end = Math.min(text.length, start + WINDOW);
+  const [head, tail] = [start > 0 ? "…" : "", end < text.length ? "…" : ""];
+  return `${head}${text.slice(start, end)}${tail} (${text.length} chars)`;
+}
+
 /**
- * A cut value keeps its true length, so a difference past the cut never reads as equal.
+ * Both sides are cut at the same offset, around the first character they differ at — a
+ * cut at 0 prints two identical heads for a difference deep in a long body.
  *
- * @param {unknown} value
- * @returns {string}
+ * @param {unknown} server
+ * @param {unknown} direct
+ * @returns {[string, string]}
  */
-function render(value) {
-  const text = JSON.stringify(value) ?? String(value);
-  return text.length <= 200 ? text : `${text.slice(0, 200)}… (${text.length} chars)`;
+function renderPair(server, direct) {
+  const [x, y] = [
+    JSON.stringify(server) ?? String(server),
+    JSON.stringify(direct) ?? String(direct),
+  ];
+  if (x.length <= WINDOW && y.length <= WINDOW) return [x, y];
+  let i = 0;
+  while (i < x.length && i < y.length && x[i] === y[i]) i += 1;
+  const start = Math.max(0, i - WINDOW_LEAD);
+  return [windowAt(x, start), windowAt(y, start)];
 }
 
 /**
@@ -301,8 +428,9 @@ export function formatReport({ mismatches, tolerated, skipped, counts, coverage 
   if (mismatches.length) lines.push("");
   for (const m of mismatches) {
     const gutter = `issue #${m.key}`.padEnd(16);
-    lines.push(`  ${gutter} ${m.field.padEnd(26)} server=${render(m.server)}`);
-    lines.push(`  ${" ".repeat(16)} ${" ".repeat(26)} direct=${render(m.direct)}`);
+    const [server, direct] = renderPair(m.server, m.direct);
+    lines.push(`  ${gutter} ${m.field.padEnd(26)} server=${server}`);
+    lines.push(`  ${" ".repeat(16)} ${" ".repeat(26)} direct=${direct}`);
   }
 
   /** @type {Map<string, string[]>} */
@@ -390,6 +518,29 @@ const canonicalComments = (comments) =>
 const canonicalLabels = (labels) =>
   canonical(labels, (l) => [l.name, l.background_color_hex, l.text_color_hex]);
 
+/** The names `mapping.js` attaches for a closed `state_reason`; the importer writes none of them. */
+const CLOSURE_LABEL_NAMES = new Set(CLOSED_REASON_LABELS.values());
+
+/**
+ * The one closure-reason label the direct engine added on top of the server's set, or null.
+ * Positive evidence for {@link DIVERGENCES.CLOSED_REASON} — without it a state or label
+ * difference is an ordinary mismatch, in either direction.
+ *
+ * @param {ParityRow["labels"]} serverLabels
+ * @param {ParityRow["labels"]} directLabels
+ * @returns {string | null}
+ */
+function closureLabel(serverLabels, directLabels) {
+  if (directLabels.length !== serverLabels.length + 1) return null;
+  const remaining = [...directLabels];
+  for (const label of serverLabels) {
+    const at = remaining.findIndex((l) => l.name === label.name);
+    if (at < 0) return null;
+    remaining.splice(at, 1);
+  }
+  return CLOSURE_LABEL_NAMES.has(remaining[0].name) ? remaining[0].name : null;
+}
+
 /**
  * Position carries no cross-engine meaning ({@link DIVERGENCES.TASK_ORDER}), so
  * the comparison canonicalises it away rather than pairing tasks by index.
@@ -467,10 +618,17 @@ export function compareProjects(
     }
     compared += 1;
 
+    const [labelsA, labelsB] = [canonicalLabels(a.labels), canonicalLabels(b.labels)];
+    const closure = closureLabel(labelsA, labelsB);
+
     for (const field of INSTANT_FIELDS) {
       const x = /** @type {string | null} */ (a[/** @type {keyof ParityRow} */ (field)]);
       const y = /** @type {string | null} */ (b[/** @type {keyof ParityRow} */ (field)]);
-      if (!sameSecond(x, y)) mismatches.push({ key, field, server: x, direct: y });
+      if (sameSecond(x, y)) continue;
+      const entry = { key, field, server: x, direct: y };
+      if (field === "rejected_at" && closure && x == null && y != null) {
+        tolerated.push({ ...entry, reason: DIVERGENCES.CLOSED_REASON });
+      } else mismatches.push(entry);
     }
 
     if (!("completed_at" in unavailable) && !sameSecond(a.completed_at, b.completed_at)) {
@@ -482,9 +640,14 @@ export function compareProjects(
     }
 
     for (const field of SCALAR_FIELDS) {
+      if (field in unavailable) continue;
       const x = a[/** @type {keyof ParityRow} */ (field)];
       const y = b[/** @type {keyof ParityRow} */ (field)];
-      if (x !== y) mismatches.push({ key, field, server: x, direct: y });
+      if (x === y) continue;
+      const entry = { key, field, server: x, direct: y };
+      if (field === "current_state" && closure && x === "accepted" && y === "rejected") {
+        tolerated.push({ ...entry, reason: DIVERGENCES.CLOSED_REASON });
+      } else mismatches.push(entry);
     }
 
     /** @param {string} field @param {string} x @param {string} y @param {Tolerance[]} allow */
@@ -505,21 +668,24 @@ export function compareProjects(
 
     const [rawA, rawB] = [a.description ?? "", b.description ?? ""];
     const [popA, popB] = [popBackLink(rawA, key, repo), popBackLink(rawB, key, repo)];
-    const [xlA, xlB] = [popCrossLinks(popA.body), popCrossLinks(popB.body)];
+    const xlB = popCrossLinks(popB.body, popA.body);
+    if (xlB.tail) {
+      const field = "description.cross-links";
+      tolerated.push({ key, field, server: "", direct: xlB.tail, reason: DIVERGENCES.CROSS_LINKS });
+    }
     // The direct engine's own room: `clampPlan` reserves the marker footer, then cuts
     // the body around the cross-link tail, so both come off the limit its notice sits on.
     const bodyLimit =
       limits.storyDescription -
       (popB.footer ? byteLen(popB.footer) + 2 : 0) -
       (xlB.tail ? byteLen(xlB.tail) + 2 : 0);
-    const body = text("description", xlA.body, xlB.body, [clampTo(bodyLimit)]);
-    same("description.cross-links", xlA.tail, xlB.tail);
-    if (body === "equal" && xlA.tail === xlB.tail && rawA !== rawB) {
+    const body = text("description", popA.body, xlB.body, [clampTo(bodyLimit)]);
+    if (body === "equal" && rawA !== rawB) {
       const entry = { key, field: "description", server: rawA, direct: rawB };
-      // Only a footer that was really popped earns the tolerance; anything else
-      // left over (trailing whitespace, say) is content the two engines disagree on.
-      if (popA.footer || popB.footer) tolerated.push({ ...entry, reason: DIVERGENCES.BACKLINK });
-      else mismatches.push(entry);
+      // Only the DIRECT side's own marker earns the tolerance: a direct row without it lost
+      // `dedup.js`'s re-import key, which is the whole dedup on a server with no provenance.
+      if (popB.footer) tolerated.push({ ...entry, reason: DIVERGENCES.BACKLINK });
+      else if (popA.footer || !xlB.tail) mismatches.push(entry);
     }
 
     const [tasksA, tasksB] = [canonicalTasks(a.tasks), canonicalTasks(b.tasks)];
@@ -530,6 +696,7 @@ export function compareProjects(
       tasksA.forEach((task, i) => {
         text(`tasks[${i}].description`, task.description, tasksB[i].description, [
           clampTo(limits.taskDescription),
+          TASK_TRUNCATE,
         ]);
         same(`tasks[${i}].complete`, task.complete, tasksB[i].complete);
       });
@@ -544,6 +711,7 @@ export function compareProjects(
         text(`comments[${i}].text`, comment.text, commentsB[i].text, [
           clampTo(limits.commentText),
           COMMENT_TRIM,
+          trimmedClampTo(limits.commentText),
         ]);
         if (!sameSecond(comment.created, commentsB[i].created)) {
           same(`comments[${i}].created`, comment.created, commentsB[i].created);
@@ -552,15 +720,28 @@ export function compareProjects(
       });
     }
 
-    const [labelsA, labelsB] = [canonicalLabels(a.labels), canonicalLabels(b.labels)];
     if (labelsA.length && labelsB.length) coverage.labels += 1;
-    if (labelsA.length !== labelsB.length) {
-      same("labels.length", labelsA.length, labelsB.length);
+    // The closure-reason label is the direct engine's alone, so it comes off before the
+    // sets are paired; without it a size difference stays an ordinary mismatch.
+    const dropAt = closure ? labelsB.findIndex((l) => l.name === closure) : -1;
+    const pairedB =
+      dropAt < 0 ? labelsB : [...labelsB.slice(0, dropAt), ...labelsB.slice(dropAt + 1)];
+    if (closure) {
+      tolerated.push({
+        key,
+        field: "labels",
+        server: "",
+        direct: closure,
+        reason: DIVERGENCES.CLOSED_REASON,
+      });
+    }
+    if (labelsA.length !== pairedB.length) {
+      same("labels.length", labelsA.length, pairedB.length);
     } else {
       labelsA.forEach((label, i) => {
         for (const part of ["name", "background_color_hex", "text_color_hex"]) {
           const field = /** @type {keyof typeof label} */ (part);
-          same(`labels[${i}].${part}`, label[field], labelsB[i][field]);
+          same(`labels[${i}].${part}`, label[field], pairedB[i][field]);
         }
       });
     }

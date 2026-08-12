@@ -2,7 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { FALLBACK_LIMITS, TRUNCATION_NOTICE } from "../src/mapping.js";
-import { compareProjects, DIVERGENCES, floorViolation, formatReport } from "./parity-compare.js";
+import {
+  COVERAGE_FAMILIES,
+  compareProjects,
+  coverageFloors,
+  coverageViolations,
+  DIVERGENCES,
+  floorViolation,
+  formatReport,
+} from "./parity-compare.js";
 
 const byteLen = (/** @type {string} */ s) => Buffer.byteLength(s, "utf8");
 
@@ -266,9 +274,11 @@ test("the report names every mismatching field, keyed by issue, and never trunca
 });
 
 test("the report aggregates tolerated divergences and lists what went uncompared", () => {
+  const viewLink = (/** @type {string} */ key) =>
+    `Body\n\n[View original issue](https://github.com/o/r/issues/${key})`;
   const result = compareProjects(
+    [row({ key: "7", description: viewLink("7") }), row({ key: "8", description: viewLink("8") })],
     [row({ key: "7" }), row({ key: "8" })],
-    [row({ key: "7", description: "Body" }), row({ key: "8", description: "Body" })],
     { unavailable: { completed_at: "no read path on this server" } },
   );
   const report = formatReport(result);
@@ -665,25 +675,27 @@ test("a body clamped around its cross-link block is still the clamp divergence",
   const tail = "\n\nSub-issue of #3";
   const bodyLimit = FALLBACK_LIMITS.storyDescription - byteLen(tail);
   const result = compareProjects(
-    [row({ description: `${"X".repeat(30_000)}${tail}` })],
+    [row({ description: "X".repeat(30_000) })],
     [row({ description: `${clampBlock("X", bodyLimit)}${tail}` })],
   );
 
   assert.deepEqual(result.mismatches, []);
   assert.deepEqual(
     result.tolerated.map((t) => t.reason),
-    [DIVERGENCES.CLAMP],
+    [DIVERGENCES.CROSS_LINKS, DIVERGENCES.CLAMP],
   );
 });
 
-test("two engines disagreeing on the cross-link block itself is a mismatch", () => {
+test("a cross-link line the SERVER body carries is content, so a differing block is a mismatch", () => {
   const result = compareProjects(
     [row({ description: "Body\n\nSub-issue of #3" })],
     [row({ description: "Body\n\nSub-issue of #4" })],
   );
 
-  assert.equal(result.mismatches.length, 1);
-  assert.match(result.mismatches[0].field, /cross-link/);
+  assert.deepEqual(
+    result.mismatches.map((m) => [m.field, m.server, m.direct]),
+    [["description", "Body\n\nSub-issue of #3", "Body"]],
+  );
 });
 
 test("a cross-link block is only popped off the tail, never out of the body", () => {
@@ -758,5 +770,391 @@ test("the story-name limit is the run's resolved one, not a hand-copied 255", ()
   assert.deepEqual(
     result.tolerated.map((t) => t.reason),
     [DIVERGENCES.NAME_CLAMP],
+  );
+});
+
+// --- the clamp anchor cannot degenerate to startsWith("") -------------------
+
+test("an all-whitespace body clamped to the limit cannot anchor on the empty string", () => {
+  const limit = FALLBACK_LIMITS.storyDescription;
+  const clamped = clampBlock(" ", limit);
+  assert.equal(byteLen(clamped), limit, "the fixture must sit on the limit");
+
+  const result = compareProjects(
+    [row({ description: "Z".repeat(50_000) })],
+    [row({ description: clamped })],
+  );
+
+  assert.deepEqual(
+    result.mismatches.map((m) => m.field),
+    ["description"],
+  );
+  assert.deepEqual(result.tolerated, []);
+});
+
+test("a clamp that is nothing but the notice has no anchor at all", () => {
+  const result = compareProjects(
+    [row({ description: "Z".repeat(50_000) })],
+    [row({ description: `\n\n${TRUNCATION_NOTICE}` })],
+  );
+
+  assert.deepEqual(
+    result.mismatches.map((m) => m.field),
+    ["description"],
+  );
+});
+
+// --- the back-link tolerance is directional ---------------------------------
+
+test("a direct row that lost its dedup marker is a mismatch, not a tolerated back-link", () => {
+  const result = compareProjects(
+    [row({ description: "Body\n\n[View original issue](https://github.com/o/r/issues/7)" })],
+    [row({ description: "Body" })],
+  );
+
+  assert.deepEqual(
+    result.mismatches.map((m) => m.field),
+    ["description"],
+  );
+  assert.deepEqual(result.tolerated, []);
+});
+
+test("a PR row, whose importer writes no link at all, still needs the direct marker", () => {
+  const result = compareProjects([row({ description: "Body" })], [row({ description: "Body" })]);
+
+  assert.deepEqual(result.mismatches, []);
+});
+
+// --- the sub-issue cross-link block: direct-only, so never popped off the server
+
+test("a cross-link block only the direct engine wrote is tolerated, never a mismatch", () => {
+  const marker = "Imported from https://github.com/o/r/issues/7";
+  const result = compareProjects(
+    [row({ description: `Body\n\n[View original issue](https://github.com/o/r/issues/7)` })],
+    [row({ description: `Body\n\nSub-issue of #3\n\n${marker}` })],
+  );
+
+  assert.deepEqual(result.mismatches, []);
+  assert.deepEqual(
+    result.tolerated.map((t) => [t.field, t.reason]).sort(),
+    [
+      ["description", DIVERGENCES.BACKLINK],
+      ["description.cross-links", DIVERGENCES.CROSS_LINKS],
+    ].sort(),
+  );
+});
+
+test("a look-alike line both bodies carry is the author's content, not the engine's block", () => {
+  const result = compareProjects(
+    [row({ description: "Body\n\nSub-issues: #5" })],
+    [row({ description: "Body\n\nSub-issues: #5" })],
+  );
+
+  assert.deepEqual(result.mismatches, []);
+  assert.deepEqual(result.tolerated, []);
+});
+
+test("an author's look-alike line survives the direct engine's own block being popped", () => {
+  const result = compareProjects(
+    [row({ description: "Body\n\nSub-issues: #5" })],
+    [row({ description: "Body\n\nSub-issues: #5\n\nSub-issue of #3" })],
+  );
+
+  assert.deepEqual(result.mismatches, []);
+  assert.deepEqual(
+    result.tolerated.map((t) => t.reason),
+    [DIVERGENCES.CROSS_LINKS],
+  );
+});
+
+test("the cross-link divergence runs one way: a block only the SERVER carries is a mismatch", () => {
+  const result = compareProjects(
+    [row({ description: "Body\n\nSub-issue of #3" })],
+    [row({ description: "Body" })],
+  );
+
+  assert.deepEqual(
+    result.mismatches.map((m) => m.field),
+    ["description"],
+  );
+  assert.deepEqual(result.tolerated, []);
+});
+
+// --- the closed-reason exception: direct rejects and labels, the server flattens
+
+const label = (/** @type {string} */ name) => ({
+  name,
+  background_color_hex: "#cccccc",
+  text_color_hex: "#000000",
+});
+
+test("closed as not planned: the direct rejection and its reason label are tolerated", () => {
+  const result = compareProjects(
+    [row({ current_state: "accepted", rejected_at: null, labels: [label("bug")] })],
+    [
+      row({
+        current_state: "rejected",
+        rejected_at: "2026-03-01T00:00:00Z",
+        labels: [label("bug"), label("not-planned")],
+      }),
+    ],
+  );
+
+  assert.deepEqual(result.mismatches, []);
+  assert.deepEqual(
+    new Set(result.tolerated.map((t) => t.reason)),
+    new Set([DIVERGENCES.CLOSED_REASON]),
+  );
+});
+
+test("a chore closed as duplicate keeps the server's state, so only the label diverges", () => {
+  const result = compareProjects(
+    [row({ story_type: "chore", current_state: "accepted", labels: [] })],
+    [row({ story_type: "chore", current_state: "accepted", labels: [label("duplicate")] })],
+  );
+
+  assert.deepEqual(result.mismatches, []);
+  assert.deepEqual(
+    result.tolerated.map((t) => t.reason),
+    [DIVERGENCES.CLOSED_REASON],
+  );
+});
+
+test("the closed-reason divergence runs one way: a SERVER-only rejection is a mismatch", () => {
+  const result = compareProjects(
+    [
+      row({
+        current_state: "rejected",
+        rejected_at: "2026-03-01T00:00:00Z",
+        labels: [label("bug"), label("not-planned")],
+      }),
+    ],
+    [row({ current_state: "accepted", rejected_at: null, labels: [label("bug")] })],
+  );
+
+  assert.ok(result.mismatches.length >= 1);
+  assert.ok(result.mismatches.some((m) => m.field === "current_state"));
+});
+
+test("an extra label that is not a closure reason is still a mismatch", () => {
+  const result = compareProjects(
+    [row({ labels: [label("bug")] })],
+    [row({ labels: [label("bug"), label("wontfix")] })],
+  );
+
+  assert.deepEqual(
+    result.mismatches.map((m) => m.field),
+    ["labels.length"],
+  );
+});
+
+test("a rejection with no closure label behind it is a mismatch", () => {
+  const result = compareProjects(
+    [row({ current_state: "accepted", labels: [label("bug")] })],
+    [row({ current_state: "rejected", labels: [label("bug")] })],
+  );
+
+  assert.ok(result.mismatches.some((m) => m.field === "current_state"));
+});
+
+// --- the org issue-type field the server never reads ------------------------
+
+test("a fixture using GitHub's issue type can name story_type unavailable, and it is reported", () => {
+  const result = compareProjects([row({ story_type: "feature" })], [row({ story_type: "bug" })], {
+    unavailable: { story_type: DIVERGENCES.ISSUE_TYPE },
+  });
+
+  assert.deepEqual(result.mismatches, []);
+  assert.deepEqual(result.skipped, [{ field: "story_type", reason: DIVERGENCES.ISSUE_TYPE }]);
+});
+
+test("story_type is compared by default, so the exception has to be named to apply", () => {
+  const result = compareProjects([row({ story_type: "feature" })], [row({ story_type: "bug" })]);
+
+  assert.deepEqual(
+    result.mismatches.map((m) => m.field),
+    ["story_type"],
+  );
+});
+
+test("each direct-only exception cites the documentation it is filed under", () => {
+  for (const reason of [
+    DIVERGENCES.CROSS_LINKS,
+    DIVERGENCES.CLOSED_REASON,
+    DIVERGENCES.ISSUE_TYPE,
+  ]) {
+    assert.match(reason, /mapping\.js|CONTRACT\.md/);
+  }
+});
+
+// --- the importer's own 255-char cuts, which CLAMP never described ----------
+
+test("a task the importer cut at 255 chars is the documented server-side truncation", () => {
+  const desc = "t".repeat(300);
+  const result = compareProjects(
+    [row({ tasks: [{ description: desc.slice(0, 255), complete: false }] })],
+    [row({ tasks: [{ description: desc, complete: false }] })],
+  );
+
+  assert.deepEqual(result.mismatches, []);
+  assert.deepEqual(
+    result.tolerated.map((t) => t.reason),
+    [DIVERGENCES.TASK_TRUNCATE],
+  );
+});
+
+test("the task-truncation divergence runs one way: a shorter DIRECT task is a mismatch", () => {
+  const desc = "t".repeat(300);
+  const result = compareProjects(
+    [row({ tasks: [{ description: desc, complete: false }] })],
+    [row({ tasks: [{ description: desc.slice(0, 255), complete: false }] })],
+  );
+
+  assert.deepEqual(
+    result.mismatches.map((m) => m.field),
+    ["tasks[0].description"],
+  );
+});
+
+test("a server task cut somewhere other than 255 chars is a mismatch", () => {
+  const desc = "t".repeat(300);
+  const result = compareProjects(
+    [row({ tasks: [{ description: desc.slice(0, 100), complete: false }] })],
+    [row({ tasks: [{ description: desc, complete: false }] })],
+  );
+
+  assert.deepEqual(
+    result.mismatches.map((m) => m.field),
+    ["tasks[0].description"],
+  );
+});
+
+test("the CLAMP reason no longer claims the importer keeps every source field whole", () => {
+  assert.doesNotMatch(DIVERGENCES.CLAMP, /keeps the source whole/);
+  assert.match(DIVERGENCES.TASK_TRUNCATE, /255/);
+});
+
+// --- divergences that compose ------------------------------------------------
+
+test("a comment both whitespace-led and over the limit is tolerated, not a mismatch", () => {
+  const limit = FALLBACK_LIMITS.commentText;
+  const at = "2026-01-01T00:00:00Z";
+  const source = `\n\n${"c".repeat(limit * 2)}`;
+  const result = compareProjects(
+    [row({ comments: [{ text: source, created: at, author: null }] })],
+    [row({ comments: [{ text: clampBlock("c", limit), created: at, author: null }] })],
+  );
+
+  assert.deepEqual(result.mismatches, []);
+  assert.equal(result.tolerated.length, 1);
+  assert.match(result.tolerated[0].reason, /trim/i);
+});
+
+test("the composed comment divergence runs one way: a trimmed, clamped SERVER body is a mismatch", () => {
+  const limit = FALLBACK_LIMITS.commentText;
+  const at = "2026-01-01T00:00:00Z";
+  const result = compareProjects(
+    [row({ comments: [{ text: clampBlock("c", limit), created: at, author: null }] })],
+    [row({ comments: [{ text: `\n\n${"c".repeat(limit * 2)}`, created: at, author: null }] })],
+  );
+
+  assert.deepEqual(
+    result.mismatches.map((m) => m.field),
+    ["comments[0].text"],
+  );
+});
+
+// --- a failure report a human can actually read ------------------------------
+
+test("the report windows a long mismatch around the first differing character", () => {
+  const [head, tail] = ["A".repeat(5_000), "A".repeat(2_000)];
+  const server = `${head}SERVER-SIDE${tail}`;
+  const result = compareProjects(
+    [row({ description: server })],
+    [row({ description: `${head}DIRECT-SIDE${tail}` })],
+  );
+  const report = formatReport(result);
+
+  assert.match(report, /SERVER-SIDE/);
+  assert.match(report, /DIRECT-SIDE/);
+  assert.match(report, new RegExp(`\\(${JSON.stringify(server).length} chars\\)`));
+});
+
+test("a short mismatch is still printed whole, with no window markers", () => {
+  const result = compareProjects([row({})], [row({ story_type: "bug" })]);
+
+  assert.match(formatReport(result), /server="feature"\n/);
+});
+
+// --- coverage is a gate, not decoration --------------------------------------
+
+test("a family both engines read nothing for is a coverage violation", () => {
+  const result = compareProjects([row({ key: "7" })], [row({ key: "7" })]);
+  const violations = coverageViolations(result.coverage, coverageFloors({}));
+
+  assert.equal(violations.length, COVERAGE_FAMILIES.length);
+  assert.match(violations.join("\n"), /comments/);
+  assert.match(violations.join("\n"), /requestor/);
+});
+
+test("a run that measured every family clears the default floors", () => {
+  const at = "2026-01-01T00:00:00Z";
+  const rich = {
+    comments: [{ text: "hi", created: at, author: null }],
+    tasks: [{ description: "one", complete: true }],
+    labels: [label("bug")],
+    owners: [{ kind: "external", id: 1, name: "sam", username: "sam", source: "github" }],
+    requestor: { kind: "external", id: 2, name: "kim", username: "kim", source: "github" },
+  };
+  const result = compareProjects([row({ ...rich })], [row({ ...rich })]);
+
+  assert.deepEqual(coverageViolations(result.coverage, coverageFloors({})), []);
+});
+
+test("a family floor of 0 is an explicit opt-out, named in the environment", () => {
+  const result = compareProjects([row({ key: "7" })], [row({ key: "7" })]);
+  const floors = coverageFloors({
+    EAT_PARITY_MIN_COMMENTS: "0",
+    EAT_PARITY_MIN_TASKS: "0",
+    EAT_PARITY_MIN_LABELS: "0",
+    EAT_PARITY_MIN_OWNERS: "0",
+    EAT_PARITY_MIN_REQUESTOR: "0",
+  });
+
+  assert.deepEqual(coverageViolations(result.coverage, floors), []);
+});
+
+test("a malformed coverage floor is a violation, never a quiet fallback", () => {
+  const measured = Object.fromEntries(COVERAGE_FAMILIES.map((f) => [f, 50]));
+
+  for (const raw of ["1O", "50 rows", "", "  ", "-1", "1.5"]) {
+    const floors = coverageFloors({ EAT_PARITY_MIN_COMMENTS: raw });
+    const violations = coverageViolations(measured, floors);
+    assert.equal(violations.length, 1, `expected ${JSON.stringify(raw)} to be rejected`);
+    assert.match(violations[0], /EAT_PARITY_MIN_COMMENTS/);
+  }
+});
+
+test("the coverage floor names the family and the rows it was measured on", () => {
+  const measured = Object.fromEntries(COVERAGE_FAMILIES.map((f) => [f, 3]));
+  const violations = coverageViolations(measured, coverageFloors({ EAT_PARITY_MIN_TASKS: "10" }));
+
+  assert.equal(violations.length, 1);
+  assert.match(violations[0], /tasks/);
+  assert.match(violations[0], /3/);
+  assert.match(violations[0], /10/);
+});
+
+// --- every remaining tolerance, in both directions ---------------------------
+
+test("the rejected completed_at divergence runs one way: a direct-only value is a mismatch", () => {
+  const result = compareProjects(
+    [row({ current_state: "rejected", completed_at: null })],
+    [row({ current_state: "rejected", completed_at: "2026-02-03T04:05:06Z" })],
+  );
+
+  assert.deepEqual(
+    result.mismatches.map((m) => m.field),
+    ["completed_at"],
   );
 });
