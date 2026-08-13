@@ -113,13 +113,22 @@ test("the transport POSTs operationName, query and variables to {apiBase}/graphq
   });
 });
 
-test("the GraphQL request sends GitHub's Accept header and a User-Agent", async () => {
+test("the GraphQL request sends GitHub's Accept, Content-Type and User-Agent headers", async () => {
   const { handler, seen } = envelope({ data: {} });
   await withGitHub(handler, async (base) => {
     await clientAt(base).client.query("Op", QUERY, {});
   });
   assert.equal(seen.headers?.accept, "application/vnd.github+json");
-  assert.ok((seen.headers?.["user-agent"] ?? "").length > 0);
+  assert.equal(seen.headers?.["content-type"], "application/json");
+  // Exact, not merely present: undici supplies its own default for both, so a
+  // length check would pass with the headers deleted.
+  assert.equal(seen.headers?.["user-agent"], "github-to-eat");
+});
+
+test("a client cannot be built without a token: GraphQL has no anonymous mode", () => {
+  assert.throws(() => new GitHubGraphQLClient("o", "r", {}), GitHubAuthError);
+  assert.throws(() => new GitHubGraphQLClient("o", "r", { token: "" }), GitHubAuthError);
+  assert.throws(() => new GitHubGraphQLClient("o", "r"), GitHubAuthError);
 });
 
 test("a token rides the Authorization header as a Bearer credential", async () => {
@@ -181,6 +190,34 @@ test("a 200 body of literal null maps to GitHubError, not a raw TypeError", asyn
   });
 });
 
+test("a 200 whose data is a JSON array is not handed back as a payload", async () => {
+  const { handler } = envelope({ data: [{ number: 1 }] });
+  await withGitHub(handler, async (base) => {
+    await assert.rejects(clientAt(base).client.query("Op", QUERY, {}), (err) => {
+      assert.ok(err instanceof GitHubError);
+      assert.match(/** @type {Error} */ (err).message, /carried no data/);
+      return true;
+    });
+  });
+});
+
+test("an errors field that is not an array is a shape error, not a discarded refusal", async () => {
+  const { handler } = envelope({
+    errors: { type: "NOT_FOUND", message: "gone" },
+    data: { repository: { id: "R_1" } },
+  });
+  await withGitHub(handler, async (base) => {
+    await assert.rejects(clientAt(base).client.query("Op", QUERY, {}), (err) => {
+      assert.ok(err instanceof GitHubError);
+      assert.match(/** @type {Error} */ (err).message, /unexpected response shape/);
+      // Its own tail: the refusal was unreadable, which is not the same fault as
+      // a body that was never an envelope.
+      assert.match(/** @type {Error} */ (err).message, /errors were not a list/);
+      return true;
+    });
+  });
+});
+
 test("an envelope carrying neither data nor errors maps to GitHubError", async () => {
   const { handler } = envelope({ data: null, errors: [] });
   await withGitHub(handler, async (base) => {
@@ -210,6 +247,45 @@ test("a 200 body that is not JSON at all maps to GitHubError, not a raw SyntaxEr
   );
 });
 
+test("a socket reset mid-body reports a reachability failure, not an unexpected envelope", async () => {
+  await withGitHub(
+    (_req, res) => {
+      // Headers first (fetch resolves on them), then kill the socket while the
+      // body is still streaming — otherwise the request phase catches it.
+      res.writeHead(200, { "Content-Type": "application/json", "Content-Length": "64" });
+      res.write('{"data"');
+      setTimeout(() => res.socket?.destroy(), 50);
+    },
+    async (base) => {
+      await assert.rejects(clientAt(base).client.query("Op", QUERY, {}), (err) => {
+        assert.ok(err instanceof GitHubTransportError);
+        assert.match(/** @type {Error} */ (err).message, /could not reach GitHub/);
+        assert.doesNotMatch(/** @type {Error} */ (err).message, /unexpected response shape/);
+        return true;
+      });
+    },
+  );
+});
+
+test("a redirect is refused rather than followed, so no other origin's envelope is trusted", async () => {
+  await withGitHub(
+    (req, res) => {
+      if (req.url === "/graphql") {
+        res.writeHead(302, { Location: "/elsewhere" });
+        res.end();
+        return;
+      }
+      json(res, 200, { data: { repository: { id: "R_REDIRECTED" } } });
+    },
+    async (base) => {
+      await assert.rejects(clientAt(base).client.query("Op", QUERY, {}), (err) => {
+        assert.ok(err instanceof GitHubTransportError);
+        return true;
+      });
+    },
+  );
+});
+
 // --- errors classification ---------------------------------------------------
 
 test("a RATE_LIMITED error maps to RateLimitError", async () => {
@@ -227,6 +303,9 @@ test("a NOT_FOUND error maps to RepoNotFoundError naming the repo", async () => 
       (err) => {
         assert.ok(err instanceof RepoNotFoundError);
         assert.match(/** @type {Error} */ (err).message, /ghost\/nope/);
+        // One logical condition, one shape: callers branch on `.status === 404`
+        // (src/github.js) and must not have to know which transport raised it.
+        assert.equal(/** @type {GitHubError} */ (err).status, 404);
         return true;
       },
     );
@@ -241,6 +320,7 @@ test("a repository: null payload is GraphQL's 404 and maps to RepoNotFoundError"
       (err) => {
         assert.ok(err instanceof RepoNotFoundError);
         assert.match(/** @type {Error} */ (err).message, /ghost\/nope/);
+        assert.equal(/** @type {GitHubError} */ (err).status, 404);
         return true;
       },
     );
@@ -349,6 +429,7 @@ test("an HTTP 404 maps to RepoNotFoundError naming the repo", async () => {
       (err) => {
         assert.ok(err instanceof RepoNotFoundError);
         assert.match(/** @type {Error} */ (err).message, /ghost\/nope/);
+        assert.equal(/** @type {GitHubError} */ (err).status, 404);
         return true;
       },
     );
@@ -462,9 +543,11 @@ test("a rateLimit at or below 100 points warns on stderr with the reset time", a
   });
 });
 
-test("a rateLimit above 100 points warns about nothing", async () => {
+test("a rateLimit one point above the threshold warns about nothing", async () => {
+  // 101, not 4999: the threshold has to be pinned from both sides, or raising
+  // LOW_POINT_BUDGET leaves the pair green.
   const { handler } = envelope({
-    data: { rateLimit: { remaining: 4999, resetAt: "2030-01-01T00:00:00Z" }, repository: {} },
+    data: { rateLimit: { remaining: 101, resetAt: "2030-01-01T00:00:00Z" }, repository: {} },
   });
   await withGitHub(handler, async (base) => {
     const { client, warned } = clientAt(base);
@@ -482,12 +565,55 @@ test("a payload without rateLimit is not a warning", async () => {
   });
 });
 
-test("a rateLimit with a non-numeric remaining is ignored rather than read as exhausted", async () => {
-  const { handler } = envelope({ data: { rateLimit: { resetAt: null }, repository: {} } });
+for (const [label, remaining] of /** @type {[string, unknown][]} */ ([
+  ["absent", undefined],
+  ["null", null],
+  ["a numeric string", "5"],
+  ["NaN", Number.NaN],
+])) {
+  test(`a rateLimit whose remaining is ${label} is ignored, not read as exhausted`, async () => {
+    const rateLimit = /** @type {Record<string, unknown>} */ ({ resetAt: "2030-01-01T00:00:00Z" });
+    if (label !== "absent") rateLimit.remaining = remaining;
+    const { handler } = envelope({ data: { rateLimit, repository: {} } });
+    await withGitHub(handler, async (base) => {
+      const { client, warned } = clientAt(base);
+      await client.query("Op", QUERY, {});
+      assert.equal(warned.buf, "");
+    });
+  });
+}
+
+test("the point-budget warning is emitted once per client, not once per query", async () => {
+  const { handler } = envelope({
+    data: { rateLimit: { remaining: 5, resetAt: "2030-01-01T00:00:00Z" }, repository: {} },
+  });
   await withGitHub(handler, async (base) => {
     const { client, warned } = clientAt(base);
     await client.query("Op", QUERY, {});
-    assert.equal(warned.buf, "");
+    await client.query("Op", QUERY, {});
+    assert.equal(warned.buf.match(/warning:/g)?.length, 1);
+  });
+});
+
+test("terminal escapes in the point budget's resetAt are stripped before it reaches stderr", async () => {
+  const { handler } = envelope({
+    data: {
+      rateLimit: {
+        remaining: 5,
+        resetAt: `\x1b[2J2030-01-01T00:00:00Z\r\n\x1b]0;pwned\x07${"A".repeat(300)}TAIL`,
+      },
+      repository: {},
+    },
+  });
+  await withGitHub(handler, async (base) => {
+    const { client, warned } = clientAt(base);
+    await client.query("Op", QUERY, {});
+    assert.match(warned.buf, /2030-01-01T00:00:00Z/);
+    assert.ok(warned.buf.endsWith("\n"));
+    // Only the deliberate line terminator may survive; the \r that redraws the
+    // progress line, and the length cap, are the point of the assertion.
+    assert.doesNotMatch(warned.buf.slice(0, -1), /\p{Cc}/u);
+    assert.doesNotMatch(warned.buf, /TAIL/);
   });
 });
 
@@ -527,13 +653,28 @@ test("a trailing slash on the API base does not double up the /graphql path", as
 // --- the wiring CONTRACT.md promises has not happened yet --------------------
 
 test("no fetch stage imports the transport yet, as CONTRACT.md claims", async () => {
-  const dir = new URL("../src/", import.meta.url);
+  // Static `from`, `export * from`, dynamic `await import()` and `require()` all
+  // count as wiring, and bin/ ships too — a narrower scan would claim more than it checks.
+  const REFERENCE = /(?:from|import|require)\s*\(?\s*["'][^"']*github-graphql\.js["']/;
   /** @type {string[]} */
   const importers = [];
-  for (const name of await readdir(dir)) {
-    if (!name.endsWith(".js") || name === "github-graphql.js") continue;
-    const source = await readFile(new URL(name, dir), "utf8");
-    if (/from\s+["']\.\/github-graphql\.js["']/.test(source)) importers.push(name);
+  /**
+   * @param {URL} dir
+   * @param {string} prefix
+   */
+  const scan = async (dir, prefix) => {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        await scan(new URL(`${entry.name}/`, dir), `${prefix}${entry.name}/`);
+        continue;
+      }
+      if (!entry.name.endsWith(".js") || entry.name === "github-graphql.js") continue;
+      const source = await readFile(new URL(entry.name, dir), "utf8");
+      if (REFERENCE.test(source)) importers.push(`${prefix}${entry.name}`);
+    }
+  };
+  for (const dir of ["src/", "bin/"]) {
+    await scan(new URL(`../${dir}`, import.meta.url), dir);
   }
   // Wiring it (story #57630) must land with CONTRACT.md's "not yet wired" truthed up.
   assert.deepEqual(importers, []);

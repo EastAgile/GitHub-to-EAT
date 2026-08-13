@@ -532,6 +532,20 @@ test("403 with a zeroed rate-limit maps to RateLimitError with the reset time", 
   );
 });
 
+test("an x-ratelimit-reset past Date's range stays a RateLimitError, not a RangeError", async () => {
+  await withGitHub(
+    (_req, res) =>
+      json(res, 429, { message: "too many requests" }, { "x-ratelimit-reset": "1e18" }),
+    async (base) => {
+      await assert.rejects(new GitHubClient("o", "r", { apiBase: base }).listIssues(), (err) => {
+        assert.ok(err instanceof RateLimitError);
+        assert.match(err.message, /resets later/);
+        return true;
+      });
+    },
+  );
+});
+
 test("429 maps to RateLimitError with the reset time and the --token hint", async () => {
   const reset = 1893456000; // 2030-01-01T00:00:00Z
   await withGitHub(

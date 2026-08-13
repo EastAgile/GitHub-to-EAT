@@ -65,9 +65,13 @@ export class RateBudgetError extends GitHubError {}
  * @returns {RepoNotFoundError}
  */
 export function repoNotFound(owner, repo) {
-  return new RepoNotFoundError(
+  const notFound = new RepoNotFoundError(
     `repo ${owner}/${repo} not found (private, renamed, or no access with this token)`,
   );
+  // Callers branch on `.status === 404` (see #listBlockedBy's route detection), so
+  // the shape must not depend on whether an HTTP 404 or a GraphQL error raised it.
+  notFound.status = 404;
+  return notFound;
 }
 
 /**
@@ -97,11 +101,7 @@ export function transportError(err, timeout) {
  * @returns {Promise<GitHubError | null>} null when the status is not an error
  */
 export async function statusError(response, { owner, repo }) {
-  if (response.status === 404) {
-    const notFound = repoNotFound(owner, repo);
-    notFound.status = 404;
-    return notFound;
-  }
+  if (response.status === 404) return repoNotFound(owner, repo);
   // Rate limits arrive as 429, primary-limit 403 (remaining 0), or
   // secondary-limit 403 (retry-after with budget left).
   const retryAfter = response.headers.get("retry-after");
@@ -117,7 +117,10 @@ export async function statusError(response, { owner, repo }) {
     if (retryAfter !== null && Number.isFinite(Number(retryAfter))) {
       resets = `resets in ${Number(retryAfter)}s`;
     } else if (Number.isFinite(reset) && reset > 0) {
-      resets = `resets at ${new Date(reset * 1000).toISOString()}`;
+      // An absurd reset is past Date's range, where toISOString throws: keep the
+      // typed RateLimitError rather than crashing on a header.
+      const at = new Date(reset * 1000);
+      if (!Number.isNaN(at.getTime())) resets = `resets at ${at.toISOString()}`;
     }
     return new RateLimitError(
       `GitHub rate limit exhausted; ${resets}. Pass --token / GITHUB_TOKEN to raise the limit (5000/h).`,

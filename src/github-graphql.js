@@ -30,6 +30,9 @@ export class GitHubGraphQLClient {
   /** @type {(message: string) => void} */
   #warn;
 
+  /** @type {boolean} */
+  #lowBudgetWarned = false;
+
   /**
    * @param {string} owner
    * @param {string} repo
@@ -39,6 +42,13 @@ export class GitHubGraphQLClient {
    *   forgets it cannot swallow a spent point budget in silence.
    */
   constructor(owner, repo, { token, timeout = 30, apiBase = GITHUB_API_BASE, warn } = {}) {
+    // GitHub's GraphQL endpoint answers anonymous requests 401, so a tokenless
+    // client can only buy a wasted round-trip: refuse it here (CONTRACT.md).
+    if (!token) {
+      throw new GitHubAuthError(
+        "GitHub's GraphQL API has no anonymous mode — pass --token / GITHUB_TOKEN",
+      );
+    }
     this.owner = owner;
     this.repo = repo;
     this.timeout = timeout;
@@ -51,7 +61,7 @@ export class GitHubGraphQLClient {
       "User-Agent": "github-to-eat",
       // The token rides this header only — never the query, the variables, an
       // error message, or a log line.
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      Authorization: `Bearer ${token}`,
     };
   }
 
@@ -70,6 +80,9 @@ export class GitHubGraphQLClient {
         method: "POST",
         headers: this.#headers,
         body: JSON.stringify({ operationName, query, variables }),
+        // A redirect target's envelope would be parsed as trusted GitHub data;
+        // the REST path confines its own hops for the same reason.
+        redirect: "error",
         signal: AbortSignal.timeout(this.timeout * 1000),
       });
     } catch (err) {
@@ -90,6 +103,11 @@ export class GitHubGraphQLClient {
     }
     if (envelope === null || typeof envelope !== "object" || Array.isArray(envelope)) {
       throw new GitHubError(`${UNEXPECTED_SHAPE} (expected a GraphQL envelope)`);
+    }
+    // A non-array `errors` is a refusal this code cannot read; returning the
+    // partial `data` as success would silently discard it.
+    if ("errors" in envelope && !Array.isArray(envelope.errors)) {
+      throw new GitHubError(`${UNEXPECTED_SHAPE} (the GraphQL envelope's errors were not a list)`);
     }
     const classified = this.#classify(Array.isArray(envelope.errors) ? envelope.errors : []);
     if (classified) throw classified;
@@ -151,11 +169,15 @@ export class GitHubGraphQLClient {
    */
   #observeRateLimit(rateLimit) {
     const remaining = rateLimit?.remaining;
-    // A missing field must not read as exhausted (`Number(undefined)` is NaN, but
-    // `Number(null)` is 0).
-    if (typeof remaining !== "number" || !Number.isFinite(remaining)) return;
+    // Absent, null or "5" must not read as exhausted; `Number.isFinite` does not
+    // coerce, so it rejects all three without a typeof guard.
+    if (!Number.isFinite(remaining)) return;
     if (remaining > LOW_POINT_BUDGET) return;
-    const resetAt = typeof rateLimit?.resetAt === "string" ? rateLimit.resetAt : "unknown";
+    if (this.#lowBudgetWarned) return;
+    this.#lowBudgetWarned = true;
+    // Server text on the `\r`-redrawn progress stream: scrub and cap it, exactly
+    // as the error paths do.
+    const resetAt = scrubControl(rateLimit?.resetAt, 40) || "unknown";
     this.#warn(
       `warning: GitHub's GraphQL point budget is nearly exhausted — ${remaining} point(s) left, ` +
         `resets at ${resetAt}. A large repo may not finish; re-run after the reset.\n`,
