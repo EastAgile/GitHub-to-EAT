@@ -35,8 +35,8 @@ export class GitHubGraphQLClient {
    * @param {string} repo
    * @param {{ token?: string, timeout?: number, apiBase?: string,
    *   warn?: (message: string) => void }} [options]
-   *   `timeout` is per-request, in seconds (default 30); `warn` defaults to stderr, so a
-   *   construction site that forgets it cannot swallow a spent point budget in silence.
+   *   `timeout` is per-request, in seconds; `warn` defaults to stderr so a caller that
+   *   forgets it cannot swallow a spent point budget in silence.
    */
   constructor(owner, repo, { token, timeout = 30, apiBase = GITHUB_API_BASE, warn } = {}) {
     this.owner = owner;
