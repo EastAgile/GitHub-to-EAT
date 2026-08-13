@@ -145,9 +145,52 @@ The API base is `.../api/v1`. Shapes the CLI parses:
   `title`/`name`); also `project_id`, `project_desc`, etc.
 - **Stories** (`GET .../projects/{id}/stories`): with `?limit=` (or `?cursor=`) it
   returns a cursor page `{ "items": [...], "next_cursor": <str|null> }`; with no
-  query it returns a bare JSON array.
+  query it returns a bare JSON array. Each row carries the title under **both**
+  `title` and its `name` alias, and both are in the `fields=` allowlist (real
+  server 2026-08-12: `handlers/stories.rs` projects `"title": row.title,
+  "name": row.title` on the list path and again on the detail path, and both keys
+  are members of its `STORY_FIELDS` allowlist).
+  **Two filters hide rows by default**, so a reader that wants a whole project
+  must opt into them: `include_done=true` admits Done-panel stories (those frozen
+  on a *past* iteration — a row that is iceboxed, on no iteration, or on the
+  iteration covering `now()` is never hidden), and `include_archived=true` admits
+  archived rows. The latter is a back-compat alias for the tri-state
+  `archived=exclude|include|only` (default `exclude`), which wins when both are
+  sent; any other `archived` value is `400 validation_failed` with
+  `details.fields=["archived"]`. Both booleans deserialise as `Option<bool>`, so
+  `true` / `false` are the only spellings that reach the handler — anything else
+  is rejected by the query extractor as `400 validation_failed` with an **empty**
+  `details.fields`. Those are two distinct 400 shapes: the extractor's names no
+  field, the handler's names the offending one.
+- **Story comments** (`GET .../projects/{id}/stories/{sid}/comments`) — **not read
+  by today's CLI** (which only `POST`s here); documented for readback and parity
+  consumers. With no query it returns a **bare JSON array** ordered by `created`;
+  any *non-empty* `cursor` / `limit` / `order` switches the response to the
+  `{ "items": [...], "next_cursor": <str|null> }` envelope, ordered by
+  `story_comment_id`. `?cursor=` and `?order=` empty stay the bare array
+  (`empty_string_as_none`). A reader must tolerate both shapes.
 
-These shapes are mirrored by the bundled mock server (`src/mockserver.js`).
+These shapes are mirrored by the bundled mock server (`src/mockserver.js`). Where
+it knowingly diverges — verified against the real server 2026-08-13, so a test
+built on the mock is not misread as proof about the server:
+
+- It serves only `POST` on the comments route.
+- Having no iteration calendar, its `include_done` filter stands in for "frozen on
+  a past iteration" with "carries any `iteration_id`", so it hides
+  current-iteration rows the real server returns.
+- Its read row omits `archived` / `archived_at`, which the real list and detail
+  paths always project. The mock also has no route that archives a story.
+- Validation **order** differs: the mock checks `archived` before `fields=`,
+  `limit` and `cursor`, where the real handler validates those three first and
+  `archived` last. Only a request carrying two invalid params can tell, and it
+  names a different field on each side.
+- A non-numeric `limit` is an extractor rejection on the server (empty
+  `details.fields`), where the mock answers `details.fields=["limit"]`; only
+  `limit=0` and `limit>200` reach the real handler and legitimately name it.
+- The mock's `fields=` allowlist mirrors the published `openapi.json` list, which
+  omits `archived` / `archived_at` / `iteration_id` that the server's own
+  `STORY_FIELDS` accepts — so `fields=archived` 400s on the mock and 200s on the
+  server.
 
 ### GitHub identity mapping (both engines)
 
@@ -1158,7 +1201,8 @@ real server 2026-07-16 and mirrored by `src/mockserver.js`):
   colliding with a plain label is the same 409 naming `Label`. Callers must
   therefore list first and treat a 409 as "look again" — see "Milestones →
   epics" above.
-- **`POST /stories`** — body requires `name` (the read-side field is `title`;
+- **`POST /stories`** — body requires `name` (the read side publishes it as
+  `title` *and* under a `name` alias, both in the `fields=` allowlist;
   missing → `400 validation_failed`); optional `description`, `story_type`,
   `current_state`, `estimate`, `icebox`, `created_at`, `started_at`,
   `completed_at`, `import_source`, `import_external_id`, `requestor`, `owners`,
