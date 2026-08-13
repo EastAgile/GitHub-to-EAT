@@ -57,6 +57,89 @@ export class GitHubAuthError extends GitHubError {}
 export class RateBudgetError extends GitHubError {}
 
 /**
+ * The repo-not-found error, worded once: both transports must name a missing
+ * repo identically, and GraphQL reaches it without an HTTP 404.
+ *
+ * @param {string} owner
+ * @param {string} repo
+ * @returns {RepoNotFoundError}
+ */
+export function repoNotFound(owner, repo) {
+  return new RepoNotFoundError(
+    `repo ${owner}/${repo} not found (private, renamed, or no access with this token)`,
+  );
+}
+
+/**
+ * Map a transport-level rejection to the right GitHubError. The abort clock stays armed
+ * while the body streams, so the request and body-read phases must say the same thing.
+ *
+ * @param {unknown} err
+ * @param {number} timeout per-request timeout in seconds, for the message
+ * @returns {GitHubError}
+ */
+export function transportError(err, timeout) {
+  const e = /** @type {{ name?: string, message?: string, cause?: { message?: string } }} */ (err);
+  if (e?.name === "TimeoutError" || e?.name === "AbortError") {
+    return new GitHubTransportError(`GitHub request timed out after ${Math.round(timeout)}s`);
+  }
+  return new GitHubTransportError(
+    `could not reach GitHub: ${e?.cause?.message ?? e?.message ?? err}`,
+  );
+}
+
+/**
+ * GitHub's error statuses → the typed hierarchy, shared by the REST and GraphQL
+ * transports so a 404 or a limit reads the same however it was requested.
+ *
+ * @param {Response} response
+ * @param {{ owner: string, repo: string }} target
+ * @returns {Promise<GitHubError | null>} null when the status is not an error
+ */
+export async function statusError(response, { owner, repo }) {
+  if (response.status === 404) {
+    const notFound = repoNotFound(owner, repo);
+    notFound.status = 404;
+    return notFound;
+  }
+  // Rate limits arrive as 429, primary-limit 403 (remaining 0), or
+  // secondary-limit 403 (retry-after with budget left).
+  const retryAfter = response.headers.get("retry-after");
+  if (
+    response.status === 429 ||
+    (response.status === 403 &&
+      (response.headers.get("x-ratelimit-remaining") === "0" || retryAfter !== null))
+  ) {
+    const reset = Number(response.headers.get("x-ratelimit-reset"));
+    let resets = "resets later";
+    // retry-after is the authoritative wait when present (secondary limits);
+    // x-ratelimit-reset only describes the primary hourly window.
+    if (retryAfter !== null && Number.isFinite(Number(retryAfter))) {
+      resets = `resets in ${Number(retryAfter)}s`;
+    } else if (Number.isFinite(reset) && reset > 0) {
+      resets = `resets at ${new Date(reset * 1000).toISOString()}`;
+    }
+    return new RateLimitError(
+      `GitHub rate limit exhausted; ${resets}. Pass --token / GITHUB_TOKEN to raise the limit (5000/h).`,
+    );
+  }
+  if (response.status === 401) {
+    return new GitHubAuthError("GitHub token rejected (401) — check --token / GITHUB_TOKEN");
+  }
+  if (response.status >= 400) {
+    // An unreadable or hostile error body must not upgrade a clean HTTP error
+    // into a crash, nor reach the terminal with control characters intact.
+    const text = await response.text().catch(() => "");
+    const failed = new GitHubError(
+      `GitHub request failed (${response.status}): ${scrubControl(text)}`,
+    );
+    failed.status = response.status;
+    return failed;
+  }
+  return null;
+}
+
+/**
  * Extract the `rel="next"` URL from a `Link` response header, if present.
  *
  * @param {string | null} link
@@ -139,26 +222,11 @@ export class GitHubClient {
   }
 
   /**
-   * Map a transport-level rejection to the right GitHubError.
-   *
-   * Shared by the request and the body-read phases — the abort clock stays armed
-   * while the body streams, so both can fail the same way and must say the same thing.
-   *
    * @param {unknown} err
    * @returns {GitHubError}
    */
   #transportError(err) {
-    const e = /** @type {{ name?: string, message?: string, cause?: { message?: string } }} */ (
-      err
-    );
-    if (e?.name === "TimeoutError" || e?.name === "AbortError") {
-      return new GitHubTransportError(
-        `GitHub request timed out after ${Math.round(this.timeout)}s`,
-      );
-    }
-    return new GitHubTransportError(
-      `could not reach GitHub: ${e?.cause?.message ?? e?.message ?? err}`,
-    );
+    return transportError(err, this.timeout);
   }
 
   /**
@@ -185,47 +253,8 @@ export class GitHubClient {
       this.#remaining = Number(remaining);
     }
 
-    if (response.status === 404) {
-      const notFound = new RepoNotFoundError(
-        `repo ${this.owner}/${this.repo} not found (private, renamed, or no access with this token)`,
-      );
-      notFound.status = 404;
-      throw notFound;
-    }
-    // Rate limits arrive as 429, primary-limit 403 (remaining 0), or
-    // secondary-limit 403 (retry-after with budget left).
-    const retryAfter = response.headers.get("retry-after");
-    if (
-      response.status === 429 ||
-      (response.status === 403 &&
-        (response.headers.get("x-ratelimit-remaining") === "0" || retryAfter !== null))
-    ) {
-      const reset = Number(response.headers.get("x-ratelimit-reset"));
-      let resets = "resets later";
-      // retry-after is the authoritative wait when present (secondary limits);
-      // x-ratelimit-reset only describes the primary hourly window.
-      if (retryAfter !== null && Number.isFinite(Number(retryAfter))) {
-        resets = `resets in ${Number(retryAfter)}s`;
-      } else if (Number.isFinite(reset) && reset > 0) {
-        resets = `resets at ${new Date(reset * 1000).toISOString()}`;
-      }
-      throw new RateLimitError(
-        `GitHub rate limit exhausted; ${resets}. Pass --token / GITHUB_TOKEN to raise the limit (5000/h).`,
-      );
-    }
-    if (response.status === 401) {
-      throw new GitHubAuthError("GitHub token rejected (401) — check --token / GITHUB_TOKEN");
-    }
-    if (response.status >= 400) {
-      // An unreadable or hostile error body must not upgrade a clean HTTP error
-      // into a crash, nor reach the terminal with control characters intact.
-      const text = await response.text().catch(() => "");
-      const failed = new GitHubError(
-        `GitHub request failed (${response.status}): ${scrubControl(text)}`,
-      );
-      failed.status = response.status;
-      throw failed;
-    }
+    const failed = await statusError(response, { owner: this.owner, repo: this.repo });
+    if (failed) throw failed;
     return response;
   }
 

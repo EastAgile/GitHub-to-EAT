@@ -643,6 +643,65 @@ with `x-ratelimit-remaining: 0`, or a secondary-limit 403 carrying
 `retry-after` — → rate-limit (the message prefers `retry-after` when present,
 falling back to the `x-ratelimit-reset` time); 401 → token rejected.
 
+#### GraphQL transport — present, not yet wired
+
+The server engine moved its issue fetch to GraphQL (server story #47449) and the
+direct engine is following it (tracker story #57629). The transport primitive
+lands first: **no fetch stage calls it yet.** Every listing above is still the
+REST path, and a run's observable behaviour — request count, rows, errors — is
+unchanged by its presence. The listing queries, the REST-shape rename layer and
+the removal of the REST issue path are separate stories.
+
+The transport (`src/github-graphql.js`) is one `POST {apiBase}/graphql` carrying
+`{ operationName, query, variables }` under
+`Accept: application/vnd.github+json`. **The token rides the
+`Authorization: Bearer` header only** — never the query, never the variables,
+never an error message, never a log line: the same invariant the server states
+for its own `graphql()`, restated here because moving transports is the one
+change that could break it. A token is not optional the way it is for the REST
+listings: GitHub's GraphQL endpoint answers an anonymous request `401`, which
+maps to token-rejected; the transport has no separate anonymous mode.
+
+GraphQL answers most refusals with HTTP 200 plus an `errors` array, so the
+envelope carries its own classification onto the **same** error hierarchy the
+REST path uses. The first error in the array decides, matched
+case-insensitively, exactly as `classify_gql_errors` does on the server:
+
+| GraphQL `errors[0].type`             | Error                              |
+| ------------------------------------ | ---------------------------------- |
+| `RATE_LIMITED`                       | rate-limit                         |
+| `NOT_FOUND`                          | repo-not-found                     |
+| `FORBIDDEN`, `INSUFFICIENT_SCOPES`   | token rejected                     |
+| `UNAUTHORIZED`, `BAD_CREDENTIALS`    | token rejected                     |
+| anything else                        | fetch error, quoting the message   |
+
+A `data.repository` that is present and `null` is GraphQL's other way of saying
+404, and maps to repo-not-found too. A 200 that is not a GraphQL envelope (a
+JSON array, a bare `null`, a proxy's HTML) and an envelope carrying no `data`
+are both fetch errors naming an "unexpected response shape". HTTP statuses keep
+the REST mapping above unchanged — 404, the `x-ratelimit-remaining: 0` /
+`retry-after` rate-limit discrimination, 401, and the generic `>=400` with the
+body scrubbed of control characters — because both transports call the same
+status mapper, not a copy of it.
+
+**The point budget is a separate bucket.** GraphQL bills 5000 *points* per hour,
+scored on the nodes a query returns; it does **not** draw on the REST request
+budget that the releases and `--include deps` stages spend, and the two are not
+interchangeable. The transport reads `rateLimit { remaining resetAt }` whenever a
+query asks for one and warns on stderr at 100 points or fewer. Nothing feeds that
+number into the `--include deps` preflight above, which still gates on the REST
+`x-ratelimit-remaining` its own responses reported.
+
+**No schema ladder, deliberately.** The server walks a `SchemaLevel` ladder
+(`Full` → `NoSubIssues` → `Core`), retrying a listing one rung lower when a host
+refuses a field it asked for. The direct engine omits it: the server's own
+import-mapping doc marks the GHES GraphQL endpoint unreachable, so the fallback
+is aspirational there and untestable here. The consequence is precise — an
+`undefinedField` error, or one whose message says a field "doesn't exist on
+type", lands in the generic fetch-error bucket instead of triggering a retry.
+**This is an intended omission, not engine drift**; should a reachable GHES
+appear, the ladder is the thing to port.
+
 ### Default mapping profile (issues → stories)
 
 The direct engine maps fetched GitHub JSON to an EAT write-op plan client-side
