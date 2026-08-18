@@ -700,6 +700,15 @@ it; the cost is wording on an already-failed run (SAML enforcement or an IP
 allow-list reads as an unclassified fetch error rather than "check your token"),
 never a different row.
 
+**The transport does not retry a rate limit.** The server re-issues a
+rate-limited request after the advertised `retry-after`, or after a one-minute
+floor when the header is absent, for at most three attempts — abandoning the
+wait when it would exceed two minutes, since that is the hourly budget resetting
+rather than GitHub's secondary limit (its story #145337). This transport
+classifies such a refusal identically and then raises it. Tracked as story
+#259659; until that lands, a run meeting the secondary limit stops where the
+server engine would have waited it out.
+
 **The point budget is a separate bucket.** GraphQL bills 5000 *points* per hour,
 scored on the nodes a query returns; it does **not** draw on the REST request
 budget that the releases and `--include deps` stages spend, and the two are not
@@ -711,15 +720,19 @@ characters and capped before it is printed, like every other server string.
 Nothing feeds that number into the `--include deps` preflight above, which still
 gates on the REST `x-ratelimit-remaining` its own responses reported.
 
-**No schema ladder, deliberately.** The server walks a `SchemaLevel` ladder
-(`Full` → `NoSubIssues` → `Core`), retrying a listing one rung lower when a host
-refuses a field it asked for. The direct engine omits it: the server's own
-import-mapping doc marks the GHES GraphQL endpoint unreachable, so the fallback
-is aspirational there and untestable here. The consequence is precise — an
-`undefinedField` error, or one whose message says a field "doesn't exist on
-type", lands in the generic fetch-error bucket instead of triggering a retry.
+**No schema degradation, deliberately.** The server drops an optional selection
+when a host refuses it. Since its story #146020 that is three independent flags
+(`dependencies`, `sub_issues`, `issue_type`) where a refusal costs only the field
+it names — replacing the linear `Full` → `NoSubIssues` → `Core` ladder it used to
+walk. The direct engine omits the whole apparatus: the server's own
+import-mapping doc still marks the GHES GraphQL endpoint unreachable (a gap
+raised 2026-08-10, unresolved), so the fallback is aspirational there and
+untestable here. The consequence is precise — an `undefinedField` error, or one
+whose message says a field "doesn't exist on type", lands in the generic
+fetch-error bucket instead of triggering a retry, and so does a refusal GitHub
+scopes to a single field through the error's `path`.
 **This is an intended omission, not engine drift**; should a reachable GHES
-appear, the ladder is the thing to port.
+appear, the per-field degradation is the thing to port.
 
 ### Default mapping profile (issues → stories)
 
