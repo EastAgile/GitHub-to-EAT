@@ -643,6 +643,97 @@ with `x-ratelimit-remaining: 0`, or a secondary-limit 403 carrying
 `retry-after` — → rate-limit (the message prefers `retry-after` when present,
 falling back to the `x-ratelimit-reset` time); 401 → token rejected.
 
+#### GraphQL transport — present, not yet wired
+
+The server engine moved its issue fetch to GraphQL (server story #47449) and the
+direct engine is following it (tracker story #57629). The transport primitive
+lands first: **no fetch stage calls it yet.** Every listing above is still the
+REST path, and a run's observable behaviour — request count, rows, errors — is
+unchanged by its presence. The listing queries, the REST-shape rename layer and
+the removal of the REST issue path are separate stories.
+
+The transport (`src/github-graphql.js`) is one `POST {apiBase}/graphql` carrying
+`{ operationName, query, variables }` under
+`Accept: application/vnd.github+json`. **The token rides the
+`Authorization: Bearer` header only** — never the query, never the variables,
+never an error message, never a log line: the same invariant the server states
+for its own `graphql()`, restated here because moving transports is the one
+change that could break it. A token is not optional the way it is for the REST
+listings: GitHub's GraphQL endpoint answers an anonymous request `401`, which
+maps to token-rejected; the transport has no separate anonymous mode, and the
+constructor refuses a missing or empty token outright rather than spend a
+round-trip to be told. The POST also refuses redirects (`redirect: "error"`)
+instead of following one — a redirect target's envelope would otherwise be
+parsed as trusted GitHub data, the same confinement the REST path applies to an
+off-origin `rel=next`.
+
+GraphQL answers most refusals with HTTP 200 plus an `errors` array, so the
+envelope carries its own classification onto the **same** error hierarchy the
+REST path uses. The first error in the array decides, matched
+case-insensitively, exactly as `classify_gql_errors` does on the server:
+
+| GraphQL `errors[0].type`             | Error                              |
+| ------------------------------------ | ---------------------------------- |
+| `RATE_LIMITED`                       | rate-limit                         |
+| `NOT_FOUND`                          | repo-not-found                     |
+| `FORBIDDEN`, `INSUFFICIENT_SCOPES`   | token rejected                     |
+| `UNAUTHORIZED`, `BAD_CREDENTIALS`    | token rejected                     |
+| anything else                        | fetch error, quoting the message   |
+
+A `data.repository` that is present and `null` is GraphQL's other way of saying
+404, and maps to repo-not-found too. A 200 that is not a GraphQL envelope (a
+JSON array, a bare `null`, a proxy's HTML), an `errors` field that is not an
+array, and an envelope whose `data` is missing or itself an array are all fetch
+errors naming an "unexpected response shape". HTTP statuses keep
+the REST mapping above unchanged — 404, the `x-ratelimit-remaining: 0` /
+`retry-after` rate-limit discrimination, 401, and the generic `>=400` with the
+body scrubbed of control characters — because both transports call the same
+status mapper, not a copy of it. A repo-not-found carries `status = 404`
+whichever route raised it (an HTTP 404, a `NOT_FOUND` error, or
+`repository: null`), so a caller inspecting it cannot tell the transports apart.
+
+**One status divergence, named.** A bare HTTP 403 — budget left, no
+`retry-after` — stays a generic fetch error here, where the server's
+`http_status_error` maps `403 => Forbidden`. It follows from both transports
+keeping today's REST status mapping rather than growing a GraphQL-only copy of
+it; the cost is wording on an already-failed run (SAML enforcement or an IP
+allow-list reads as an unclassified fetch error rather than "check your token"),
+never a different row.
+
+**The transport does not retry a rate limit.** The server re-issues a
+rate-limited request after the advertised `retry-after`, or after a one-minute
+floor when the header is absent, for at most three attempts — abandoning the
+wait when it would exceed two minutes, since that is the hourly budget resetting
+rather than GitHub's secondary limit (its story #145337). This transport
+classifies such a refusal identically and then raises it. Tracked as story
+#259659; until that lands, a run meeting the secondary limit stops where the
+server engine would have waited it out.
+
+**The point budget is a separate bucket.** GraphQL bills 5000 *points* per hour,
+scored on the nodes a query returns; it does **not** draw on the REST request
+budget that the releases and `--include deps` stages spend, and the two are not
+interchangeable. The transport reads `rateLimit { remaining resetAt }` whenever a
+query asks for one and warns on stderr at 100 points or fewer — **once per
+client**, not once per query, since that stream is the one the progress line
+redraws with `\r`; the server-supplied reset time is scrubbed of control
+characters and capped before it is printed, like every other server string.
+Nothing feeds that number into the `--include deps` preflight above, which still
+gates on the REST `x-ratelimit-remaining` its own responses reported.
+
+**No schema degradation, deliberately.** The server drops an optional selection
+when a host refuses it. Since its story #146020 that is three independent flags
+(`dependencies`, `sub_issues`, `issue_type`) where a refusal costs only the field
+it names — replacing the linear `Full` → `NoSubIssues` → `Core` ladder it used to
+walk. The direct engine omits the whole apparatus: the server's own
+import-mapping doc still marks the GHES GraphQL endpoint unreachable (a gap
+raised 2026-08-10, unresolved), so the fallback is aspirational there and
+untestable here. The consequence is precise — an `undefinedField` error, or one
+whose message says a field "doesn't exist on type", lands in the generic
+fetch-error bucket instead of triggering a retry, and so does a refusal GitHub
+scopes to a single field through the error's `path`.
+**This is an intended omission, not engine drift**; should a reachable GHES
+appear, the per-field degradation is the thing to port.
+
 ### Default mapping profile (issues → stories)
 
 The direct engine maps fetched GitHub JSON to an EAT write-op plan client-side
