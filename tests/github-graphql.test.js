@@ -653,9 +653,8 @@ test("a trailing slash on the API base does not double up the /graphql path", as
 // --- the wiring CONTRACT.md promises has not happened yet --------------------
 
 /**
- * Which `src/` and `bin/` modules import `module`. Static `from`, `export * from`,
- * dynamic `await import()` and `require()` all count as wiring, and bin/ ships too — a
- * narrower scan would claim more than it checks.
+ * Which `src/` and `bin/` modules import `module`. Static `from`, `export * from`, dynamic
+ * `await import()` and `require()` all count, and bin/ ships too — a narrower scan lies.
  *
  * @param {string} module the imported module's file name
  * @returns {Promise<string[]>}

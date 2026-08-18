@@ -1,10 +1,6 @@
 /**
- * The `ImportIssues` listing and the REST-shape rename layer, ported from the server's
- * `github.rs`. GraphQL returns one issue graph — the issue, its comments and its
- * sub-issues in one node — where REST needed three listings; the rows this module hands
- * back keep REST's field names, so `src/mapping.js` maps either transport unchanged.
- *
- * Nothing calls it yet: the direct engine still fetches over REST (CONTRACT.md).
+ * The `ImportIssues` listing and the REST-shape rename layer (github.rs), whose rows keep
+ * REST's field names so `src/mapping.js` maps either transport. Not wired yet: CONTRACT.md.
  */
 
 import { GITHUB_API_BASE, GitHubError } from "./github.js";
