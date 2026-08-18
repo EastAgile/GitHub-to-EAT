@@ -51,17 +51,17 @@ export function commentsSelection() {
 }
 
 /**
- * The fields every issue-like node shares, split where each inserts its own state field:
+ * The fields every issue-like node shares, split where each inserts its own state detail:
  * an issue's `stateReason`, a pull request's `mergedAt` (story #57633).
  *
- * @param {string} stateField the node type's own state field, or "" for none
+ * @param {string} stateDetail the node type's own state-detail field, or "" for none
  * @param {string[]} extras sub-selections this node type adds
  * @returns {string}
  */
-function nodeSelection(stateField, extras) {
+export function nodeSelection(stateDetail, extras) {
   return [
     "number title body state",
-    stateField,
+    stateDetail,
     "createdAt closedAt url",
     `author { ${ACTOR_SELECTION} }`,
     `assignees(first: ${PER_PAGE}) { nodes { login databaseId url } }`,
@@ -132,6 +132,17 @@ function connectionNodes(connection) {
 }
 
 /**
+ * A node's issue number as a string, or null for anything that is not a positive integer
+ * (`GitHubClient`'s `issueNumberFromRow`): only digits may key a row or reach a warning.
+ *
+ * @param {any} value
+ * @returns {string | null}
+ */
+function issueNumber(value) {
+  return Number.isSafeInteger(value) && value > 0 ? String(value) : null;
+}
+
+/**
  * @param {unknown} value
  * @returns {string}
  */
@@ -185,11 +196,16 @@ function milestoneRow(milestone) {
 }
 
 /**
+ * Where a connection resumes: null when it is complete, "" when GitHub reported rows past
+ * this page but sent no cursor, else the cursor. Sending "" back re-reads the same page.
+ *
  * @param {any} connection
- * @returns {boolean} the connection reports rows past the page that was fetched
+ * @returns {string | null}
  */
-function overflows(connection) {
-  return connection?.pageInfo?.hasNextPage === true;
+function nextCursor(connection) {
+  if (connection?.pageInfo?.hasNextPage !== true) return null;
+  const cursor = connection.pageInfo.endCursor;
+  return typeof cursor === "string" && cursor !== "" ? cursor : "";
 }
 
 /**
@@ -232,13 +248,13 @@ function issueRow(node) {
  */
 function commentRows(node, issueUrl) {
   return connectionNodes(node.comments)
-    .filter((comment) => String(comment.body ?? "").trim() !== "")
     .map((comment) => ({
-      body: comment.body,
+      body: String(comment.body ?? ""),
       created_at: comment.createdAt ?? null,
       issue_url: issueUrl,
       user: authorOrGhost(comment.author),
-    }));
+    }))
+    .filter((comment) => comment.body.trim() !== "");
 }
 
 /**
@@ -249,33 +265,31 @@ function commentRows(node, issueUrl) {
  * @returns {string[]}
  */
 function subIssueNumbers(node) {
-  const parent = String(node.number);
+  const parent = issueNumber(node.number);
   /** @type {string[]} */
   const kept = [];
   for (const row of connectionNodes(node.subIssues)) {
-    const number = row.number;
-    if (!Number.isSafeInteger(number) || number <= 0) continue;
-    const kid = String(number);
-    if (kid !== parent && !kept.includes(kid)) kept.push(kid);
+    const kid = issueNumber(row.number);
+    if (kid !== null && kid !== parent && !kept.includes(kid)) kept.push(kid);
   }
   return kept;
 }
 
 /**
  * One issue with the enrichment that used to cost a request each (github.rs `FetchedIssue`).
- * `truncated` names a connection whose first page fell short; hydrating it is story #57632.
+ * `truncated` carries each short connection's resume cursor, which story #57632 hydrates from.
  *
  * @param {any} node one `ImportIssues` node
  * @param {string} issueUrl the issue's REST API URL, for its comments' `issue_url`
  * @returns {{ issue: any, comments: any[], subIssues: string[],
- *   truncated: { comments: boolean, subIssues: boolean } }}
+ *   truncated: { comments: string | null, subIssues: string | null } }}
  */
 export function fetchedIssue(node, issueUrl) {
   return {
     issue: issueRow(node),
     comments: commentRows(node, issueUrl),
     subIssues: subIssueNumbers(node),
-    truncated: { comments: overflows(node.comments), subIssues: overflows(node.subIssues) },
+    truncated: { comments: nextCursor(node.comments), subIssues: nextCursor(node.subIssues) },
   };
 }
 
@@ -351,13 +365,13 @@ export class GitHubGraphQLFetcher {
   /**
    * The REST API URL of one issue, which its comment rows carry as `issue_url`.
    *
-   * @param {unknown} number
+   * @param {string} number a number {@link issueNumber} has already validated
    * @returns {string}
    */
   #issueUrl(number) {
     const owner = encodeURIComponent(this.owner);
     const repo = encodeURIComponent(this.repo);
-    return `${this.apiBase}/repos/${owner}/${repo}/issues/${encodeURIComponent(String(number))}`;
+    return `${this.apiBase}/repos/${owner}/${repo}/issues/${encodeURIComponent(number)}`;
   }
 
   /**
@@ -387,15 +401,14 @@ export class GitHubGraphQLFetcher {
       }
       onPage?.(connection, pager.page);
       out.push(...connectionNodes(connection));
-      const pageInfo = connection.pageInfo;
-      const next = pageInfo?.hasNextPage === true ? (pageInfo.endCursor ?? null) : null;
-      if (pageInfo?.hasNextPage === true && next === null) {
+      const cursor = nextCursor(connection);
+      if (cursor === "") {
         this.#warn(
           `warning: GitHub reported another page of ${label} but sent no cursor to read it; ` +
             "the rest of that listing is not imported.\n",
         );
       }
-      if (!pager.advance(next)) return out;
+      if (!pager.advance(cursor === "" ? null : cursor)) return out;
     }
   }
 
@@ -409,8 +422,9 @@ export class GitHubGraphQLFetcher {
   #reportPage(connection, page) {
     if (!this.#onProgress) return;
     const total = connection.totalCount;
+    // A repo that gains issues mid-walk would otherwise render `fetching 3/2`.
     const pages = Number.isFinite(total)
-      ? Math.max(1, Math.ceil(Math.max(0, total) / PER_PAGE))
+      ? Math.max(Math.ceil(Math.max(0, total) / PER_PAGE), page)
       : null;
     this.#onProgress({ status: "fetching", progress_current: page, progress_total: pages });
   }
@@ -447,7 +461,7 @@ export class GitHubGraphQLFetcher {
   async fetchAll(options = {}) {
     for (const name of UNIMPLEMENTED) {
       if (options[name]) {
-        throw new Error(
+        throw new GitHubError(
           `the GraphQL fetch does not list ${name} yet; it lists issues, their comments, ` +
             "the repo's labels and the sub-issue hierarchy",
         );
@@ -475,14 +489,27 @@ export class GitHubGraphQLFetcher {
     const overflowedComments = [];
     /** @type {string[]} */
     const overflowedSubIssues = [];
+    let unnumbered = 0;
     for (const node of nodes) {
-      const number = String(node.number);
-      const fetched = fetchedIssue(node, this.#issueUrl(node.number));
+      const number = issueNumber(node.number);
+      const fetched = fetchedIssue(node, number === null ? "" : this.#issueUrl(number));
       issues.push(fetched.issue);
+      // The row still ships, as the REST path ships one whose number it could not read;
+      // only the number-keyed stages skip it, because nothing can join to an unreadable id.
+      if (number === null) {
+        unnumbered += 1;
+        continue;
+      }
       comments.push(...fetched.comments);
       if (fetched.subIssues.length) subIssues.set(number, fetched.subIssues);
-      if (fetched.truncated.comments) overflowedComments.push(number);
-      if (fetched.truncated.subIssues) overflowedSubIssues.push(number);
+      if (fetched.truncated.comments !== null) overflowedComments.push(number);
+      if (fetched.truncated.subIssues !== null) overflowedSubIssues.push(number);
+    }
+    if (unnumbered > 0) {
+      this.#warn(
+        `warning: ${unnumbered} issue(s) arrived without a usable issue number — their ` +
+          "comments and sub-issue cross-links are not imported.\n",
+      );
     }
     this.#warnOverflow("comments", overflowedComments);
     this.#warnOverflow("sub-issues", overflowedSubIssues);

@@ -763,7 +763,11 @@ null actor and REST as the `ghost` account, becomes that account again (id
 member-mapping key. An actor whose implementer carries no `databaseId` becomes
 id 0, the id `src/mapping.js` refuses, rather than being dropped here: that
 filter is `externalPerson` one layer down, exactly as the server filters in
-`issue_to_record` and not in its shape conversion.
+`issue_to_record` and not in its shape conversion. An issue whose `number` is
+not a positive integer keeps its row, as the REST fetch keeps a row whose number
+it cannot read. That row takes no comments and no sub-issue cross-links: nothing
+joins those to an id that is not digits. The fetch reports how many issues
+arrived that way, so the loss is not silent.
 
 Three things this listing does that the server's does not, each because this
 engine's mapper needs it:
@@ -781,7 +785,8 @@ engine's mapper needs it:
 
 Pagination follows Relay cursors and refuses to drift. A cursor that stops
 advancing, or a walk past 50 000 pages, fails the fetch instead of looping or
-truncating quietly, and a page that promises a successor without a cursor warns.
+truncating quietly. A page that promises a successor without a cursor warns. An
+empty cursor counts as no cursor: sending it back only re-reads the same page.
 `totalCount` gives the fetch an exact `fetching X/Y` page count, where REST's
 `rel="last"` was only a hint. An empty or whitespace-only comment body is
 dropped in the listing, as github.rs `comment_nodes_to_records` drops it; on the

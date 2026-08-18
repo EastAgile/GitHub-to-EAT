@@ -12,6 +12,7 @@ import {
   issuesQuery,
   labelsQuery,
   MAX_LISTING_PAGES,
+  nodeSelection,
   Pager,
   personFromActor,
 } from "../src/github-graphql-issues.js";
@@ -186,6 +187,16 @@ test("the issue node selects issueType and subIssues unconditionally, and no blo
   assert.doesNotMatch(selection, /blockedBy/);
 });
 
+test("the shared node selection is exported, so a pull-request node can reuse it", () => {
+  const selection = nodeSelection("mergedAt", [commentsSelection()]);
+  assert.match(selection, /^number title body state mergedAt createdAt closedAt url /);
+  assert.ok(selection.includes(ACTOR_SELECTION));
+  assert.ok(selection.includes(commentsSelection()));
+  assert.doesNotMatch(selection, /stateReason|issueType|subIssues/);
+  // A node type with no state-detail field leaves no gap where one would have gone.
+  assert.match(nodeSelection("", []), /^number title body state createdAt closedAt url /);
+});
+
 test("the labels query walks the repository's own label listing", () => {
   const query = labelsQuery();
   assert.match(query, /query ImportLabels/);
@@ -339,6 +350,59 @@ test("a whitespace-only comment body is dropped, as comment_nodes_to_records dro
   assert.deepEqual(comments[0].user, GHOST_USER);
 });
 
+test("a non-string comment body is coerced, so mapping.js can trim it", () => {
+  const { issue, comments } = fetchedIssue(
+    issueNode({
+      comments: {
+        pageInfo: { hasNextPage: false, endCursor: null },
+        nodes: [{ body: 42, createdAt: "2026-01-03T00:00:00Z", author: null }],
+      },
+    }),
+    ISSUE_URL,
+  );
+  assert.equal(comments[0].body, "42");
+  const story = mapRepo({ issues: [issue], comments, labels: [] }).stories[0];
+  assert.match(story.comments[0].text, /42/);
+});
+
+test("a node the token cannot read is dropped from its connection, not carried as null", () => {
+  const { issue, comments, subIssues } = fetchedIssue(
+    issueNode({
+      labels: { nodes: [null, { name: "bug", color: "d73a4a" }] },
+      assignees: { nodes: [null, { login: "hubot", databaseId: 5, url: "u" }] },
+      comments: {
+        pageInfo: { hasNextPage: false, endCursor: null },
+        nodes: [null, { body: "kept", createdAt: "2026-01-03T00:00:00Z", author: null }],
+      },
+      subIssues: {
+        pageInfo: { hasNextPage: false, endCursor: null },
+        nodes: [null, { number: 8 }],
+      },
+    }),
+    ISSUE_URL,
+  );
+  assert.deepEqual(issue.labels, [{ name: "bug", color: "d73a4a" }]);
+  assert.deepEqual(issue.assignees, [{ id: 5, login: "hubot", html_url: "u" }]);
+  assert.equal(comments.length, 1);
+  assert.deepEqual(subIssues, ["8"]);
+});
+
+test("a connection that sends no nodes array reads as empty rather than crashing", () => {
+  const { issue, comments, subIssues } = fetchedIssue(
+    issueNode({
+      labels: {},
+      assignees: { nodes: null },
+      comments: { pageInfo: { hasNextPage: false, endCursor: null } },
+      subIssues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: "nope" },
+    }),
+    ISSUE_URL,
+  );
+  assert.deepEqual(issue.labels, []);
+  assert.deepEqual(issue.assignees, []);
+  assert.deepEqual(comments, []);
+  assert.deepEqual(subIssues, []);
+});
+
 test("sub-issue numbers land under their parent, self-references and non-numbers dropped", () => {
   const { subIssues } = fetchedIssue(
     issueNode({
@@ -352,7 +416,7 @@ test("sub-issue numbers land under their parent, self-references and non-numbers
   assert.deepEqual(subIssues, ["8", "9"]);
 });
 
-test("a connection with a further page is reported as truncated", () => {
+test("a connection with a further page reports the cursor that resumes it", () => {
   const { truncated } = fetchedIssue(
     issueNode({
       comments: { pageInfo: { hasNextPage: true, endCursor: "c1" }, nodes: [] },
@@ -360,7 +424,18 @@ test("a connection with a further page is reported as truncated", () => {
     }),
     ISSUE_URL,
   );
-  assert.deepEqual(truncated, { comments: true, subIssues: false });
+  assert.deepEqual(truncated, { comments: "c1", subIssues: null });
+});
+
+test("a further page with no cursor is still truncated, so the shortfall stays loud", () => {
+  const { truncated } = fetchedIssue(
+    issueNode({
+      comments: { pageInfo: { hasNextPage: true, endCursor: "" }, nodes: [] },
+      subIssues: { pageInfo: { hasNextPage: true }, nodes: [] },
+    }),
+    ISSUE_URL,
+  );
+  assert.deepEqual(truncated, { comments: "", subIssues: "" });
 });
 
 // --- the cursor walk ----------------------------------------------------------
@@ -582,6 +657,118 @@ test("an issue whose sub-issues overflow one page warns too", async () => {
   assert.match(warned.buf, /sub-issues/);
 });
 
+test("an empty endCursor is no cursor: the walk warns and stops instead of re-reading", async () => {
+  const warned = capture();
+  const respond = oneRepo([issueNode()], { hasNextPage: true, endCursor: "" });
+  await withGraphQL(respond, async (base, seen) => {
+    const { issues } = await fetcherAt(base, {
+      warn: (message) => void warned.write(message),
+    }).fetchAll();
+    assert.equal(issues.length, 1);
+    assert.equal(seen.filter((request) => request.operationName === "ImportIssues").length, 1);
+  });
+  assert.match(warned.buf, /another page of issues but sent no cursor/);
+});
+
+test("an overflowing connection that sends no cursor still warns", async () => {
+  /** @type {string[]} */
+  const warnings = [];
+  const respond = oneRepo([
+    issueNode({
+      comments: { pageInfo: { hasNextPage: true, endCursor: null }, nodes: [] },
+    }),
+  ]);
+  await withGraphQL(respond, async (base) => {
+    await fetcherAt(base, { warn: (message) => warnings.push(message) }).fetchAll();
+  });
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /#7/);
+  assert.match(warnings[0], /comments/);
+});
+
+test("many overflowing issues are summarised in one line, not one line each", async () => {
+  /** @type {string[]} */
+  const warnings = [];
+  const nodes = Array.from({ length: 12 }, (_, index) =>
+    issueNode({
+      number: index + 1,
+      comments: { pageInfo: { hasNextPage: true, endCursor: `c${index}` }, nodes: [] },
+    }),
+  );
+  await withGraphQL(oneRepo(nodes), async (base) => {
+    await fetcherAt(base, { warn: (message) => warnings.push(message) }).fetchAll();
+  });
+  assert.equal(warnings.length, 1, `one aggregated warning, got ${warnings.length}`);
+  assert.match(warnings[0], /12 issue\(s\) carry more than 100 comments/);
+  // The list of numbers is capped, so a repo-wide overflow cannot render one line per issue.
+  assert.match(warnings[0], /and 2 more/);
+  assert.equal((warnings[0].match(/#\d+/g) ?? []).length, 10);
+});
+
+test("a fetcher built without a warn sink still reports an overflow, on stderr", async () => {
+  const respond = oneRepo([
+    issueNode({ comments: { pageInfo: { hasNextPage: true, endCursor: "c1" }, nodes: [] } }),
+  ]);
+  /** @type {string[]} */
+  const written = [];
+  const realWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = /** @type {any} */ (
+    (/** @type {any} */ chunk) => {
+      written.push(String(chunk));
+      return true;
+    }
+  );
+  try {
+    await withGraphQL(respond, async (base) => {
+      await fetcherAt(base).fetchAll();
+    });
+  } finally {
+    process.stderr.write = realWrite;
+  }
+  assert.equal(written.length, 1);
+  assert.match(written[0], /#7/);
+});
+
+test("a repo that gains issues mid-walk never renders a page count below the page", async () => {
+  /** @type {any[]} */
+  const reported = [];
+  const respond = (/** @type {any} */ request) => {
+    if (request.operationName === "ImportLabels") return labelsEnvelope([]);
+    return request.variables.after
+      ? issuesEnvelope([issueNode({ number: 8 })], { totalCount: 100 })
+      : issuesEnvelope([issueNode()], { hasNextPage: true, endCursor: "c1", totalCount: 100 });
+  };
+  await withGraphQL(respond, async (base) => {
+    await fetcherAt(base, { onProgress: (status) => reported.push(status) }).fetchAll();
+    assert.deepEqual(reported.map(formatImportStatus), ["fetching 1/1", "fetching 2/2"]);
+  });
+});
+
+test("an issue whose number is unusable keeps its row, loses its links, and says so", async () => {
+  const warned = capture();
+  const respond = oneRepo([
+    issueNode({
+      number: "7\r\u001b[2Kgotcha",
+      comments: {
+        pageInfo: { hasNextPage: true, endCursor: "c1" },
+        nodes: [{ body: "orphan", createdAt: "2026-01-03T00:00:00Z", author: null }],
+      },
+      subIssues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ number: 8 }] },
+    }),
+  ]);
+  await withGraphQL(respond, async (base) => {
+    const fetched = await fetcherAt(base, {
+      warn: (message) => void warned.write(message),
+    }).fetchAll();
+    // The REST path keeps such a row too; only the number-keyed stages skip it.
+    assert.equal(fetched.issues.length, 1);
+    assert.equal(fetched.comments.length, 0);
+    assert.equal(fetched.subIssues.size, 0);
+  });
+  assert.match(warned.buf, /1 issue\(s\) arrived without a usable issue number/);
+  assert.doesNotMatch(warned.buf, /gotcha/);
+});
+
 // --- what the transport already decides, reaching the fetcher unchanged -------
 
 test("the fetcher refuses to be built without a token, as the transport does", () => {
@@ -613,10 +800,16 @@ test("a repository without the listing is an unexpected shape, not an empty repo
   );
 });
 
-test("fetchAll refuses the listings it does not implement yet", async () => {
+test("fetchAll refuses the listings it does not implement yet, as a GitHubError", async () => {
   await withGraphQL(oneRepo([]), async (base) => {
     for (const option of ["pullRequests", "releases", "dependencies"]) {
-      await assert.rejects(fetcherAt(base).fetchAll({ [option]: true }), new RegExp(option));
+      // src/cli.js formats only EATError and GitHubError; anything else reaches the
+      // user as an unhandled rejection with a Node stack trace.
+      await assert.rejects(fetcherAt(base).fetchAll({ [option]: true }), (err) => {
+        assert.ok(err instanceof GitHubError);
+        assert.match(err.message, new RegExp(option));
+        return true;
+      });
     }
   });
 });
