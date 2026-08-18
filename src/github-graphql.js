@@ -16,7 +16,8 @@ import { scrubControl } from "./progress.js";
 
 const GRAPHQL_PATH = "/graphql";
 
-const UNEXPECTED_SHAPE = "GitHub returned an unexpected response shape";
+/** Shared with the listing module, so both layers word a malformed payload alike. */
+export const UNEXPECTED_SHAPE = "GitHub returned an unexpected response shape";
 
 // GraphQL bills a 5000-point/hour budget scored on nodes returned, a separate
 // bucket from the REST request budget — a run this low is about to die mid-fetch.
