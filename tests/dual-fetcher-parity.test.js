@@ -105,6 +105,15 @@ const COMMENTS = [
     author: null,
   },
   { id: 9007, issue: 47, body: "shipped", created_at: "2026-01-11T09:00:00Z", author: HUMAN },
+  // A comment on an issue this repo no longer lists, which REST's repo-wide listing still
+  // serves: only its `issue_url` join drops it, where GraphQL's nesting never carries it.
+  {
+    id: 9008,
+    issue: 42,
+    body: "transferred out of this repo",
+    created_at: "2026-01-12T09:00:00Z",
+    author: HUMAN,
+  },
 ];
 
 /** The repo's issues, newest first — the order both transports are asked for. */
@@ -118,8 +127,9 @@ const ISSUES = [
     created_at: "2026-01-04T09:00:00Z",
     closed_at: null,
     author: HUMAN,
-    // COPILOT is REST-only by GraphQL's schema, not by this fixture's choice.
-    assignees: [MAINTAINER, COPILOT],
+    // Two humans, so assignee order and multiplicity are measured; COPILOT is REST-only by
+    // GraphQL's schema, not by this fixture's choice.
+    assignees: [MAINTAINER, HUMAN, COPILOT],
     labels: ["bug", "junk color"],
     milestone: MILESTONES.openDue,
     issueType: "Bug",
@@ -323,7 +333,8 @@ function restComments(base) {
 function restSubIssues(number, base) {
   const parent = ISSUES.find((issue) => issue.number === number);
   return (parent?.subIssues ?? []).map((child) => {
-    const row = ISSUES.find((issue) => issue.number === child) ?? parent;
+    const row = ISSUES.find((issue) => issue.number === child);
+    assert.ok(row, `the fixture has no issue numbered ${child}`);
     return restIssue(row, base);
   });
 }
@@ -401,13 +412,32 @@ function gqlIssueNode(issue) {
   };
 }
 
+// Every sub-selection the renderings above answer with. Real GitHub sends a field only when
+// the query asks for it, so a fixture that answers regardless hides a dropped selection.
+const ISSUE_SELECTIONS = [
+  /\bnumber title body state stateReason\b/,
+  /\bcreatedAt closedAt url\b/,
+  /author \{ __typename login url /,
+  /\.\.\. on User \{ databaseId \}/,
+  /\.\.\. on Bot \{ databaseId \}/,
+  /assignees\(first: \d+\) \{ nodes \{ login databaseId url \} \}/,
+  /labels\(first: \d+\) \{ nodes \{ name color \} \}/,
+  /milestone \{ title dueOn state \}/,
+  /issueType \{ name \}/,
+  /comments\(first: \d+\) \{[^}]*\} nodes \{ body createdAt author \{/,
+  /subIssues\(first: \d+\) \{[^}]*\} nodes \{ number \} \}/,
+];
+
+const LABEL_SELECTIONS = [/labels\(first: \$first, after: \$after\)/, /nodes \{ name color \}/];
+
 /**
- * @param {{ operationName: string }} request
+ * @param {{ operationName: string, query: string }} request
  * @returns {any}
  */
 function graphqlResponse(request) {
   const rateLimit = { remaining: 4998, resetAt: "2030-01-01T00:00:00Z" };
   if (request.operationName === "ImportLabels") {
+    for (const selection of LABEL_SELECTIONS) assert.match(request.query, selection);
     return {
       data: {
         rateLimit,
@@ -417,6 +447,7 @@ function graphqlResponse(request) {
       },
     };
   }
+  for (const selection of ISSUE_SELECTIONS) assert.match(request.query, selection);
   const nodes = ISSUES.map(gqlIssueNode);
   return {
     data: {
@@ -460,28 +491,36 @@ async function runBothFetchers() {
   let base = "";
 
   const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url ?? "", "http://fixture");
-    /** @type {unknown} */
-    let payload;
-    if (url.pathname === "/graphql") {
-      const request = JSON.parse(await readBody(req));
-      graphqlRequests.push(request);
-      payload = graphqlResponse(request);
-    } else {
-      restPaths.push(url.pathname);
-      const subIssues = url.pathname.match(new RegExp(`^${PREFIX}/issues/(\\d+)/sub_issues$`));
-      if (url.pathname === `${PREFIX}/issues`) payload = ISSUES.map((i) => restIssue(i, base));
-      else if (url.pathname === `${PREFIX}/issues/comments`) payload = restComments(base);
-      else if (url.pathname === `${PREFIX}/labels`) payload = LABELS.map((l) => restLabel(l.name));
-      else if (subIssues) payload = restSubIssues(Number(subIssues[1]), base);
-      else {
-        res.writeHead(404, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ message: `the fixture serves no ${url.pathname}` }));
-        return;
+    try {
+      const url = new URL(req.url ?? "", "http://fixture");
+      /** @type {unknown} */
+      let payload;
+      if (url.pathname === "/graphql") {
+        const request = JSON.parse(await readBody(req));
+        graphqlRequests.push(request);
+        payload = graphqlResponse(request);
+      } else {
+        restPaths.push(url.pathname);
+        const subIssues = url.pathname.match(new RegExp(`^${PREFIX}/issues/(\\d+)/sub_issues$`));
+        if (url.pathname === `${PREFIX}/issues`) payload = ISSUES.map((i) => restIssue(i, base));
+        else if (url.pathname === `${PREFIX}/issues/comments`) payload = restComments(base);
+        else if (url.pathname === `${PREFIX}/labels`)
+          payload = LABELS.map((l) => restLabel(l.name));
+        else if (subIssues) payload = restSubIssues(Number(subIssues[1]), base);
+        else {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ message: `the fixture serves no ${url.pathname}` }));
+          return;
+        }
       }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(payload));
+    } catch (err) {
+      // An unanswered request stalls the fetch to its 30s timeout, and a dozen timeouts bury
+      // whichever fixture guard actually fired. Hand the message back as the failure instead.
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ message: err instanceof Error ? err.message : String(err) }));
     }
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(payload));
   });
 
   await new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(undefined)));
@@ -516,8 +555,8 @@ let fetched = null;
 const fetchBoth = () => (fetched ??= runBothFetchers());
 
 // --- normalization -----------------------------------------------------------
-// The rename layer's own field list. Every one is compared; a row that grows, loses or
-// renames a field fails the shape guard below rather than slipping past the deep-equal.
+// The rename layer's own field list, nested rows included: a row that grows, loses or renames
+// a field fails the shape guard below rather than being projected away by the mappers under it.
 
 const ISSUE_FIELDS = [
   "assignees",
@@ -536,6 +575,17 @@ const ISSUE_FIELDS = [
 ];
 const COMMENT_FIELDS = ["body", "created_at", "issue_url", "user"];
 const LABEL_FIELDS = ["color", "name"];
+const PERSON_FIELDS = ["html_url", "id", "login"];
+const MILESTONE_FIELDS = ["due_on", "state", "title"];
+const TYPE_FIELDS = ["name"];
+
+/**
+ * No message: the key diff is the evidence, and a message would replace it.
+ *
+ * @param {any} row
+ * @param {string[]} fields
+ */
+const assertShape = (row, fields) => assert.deepEqual(Object.keys(row).sort(), fields);
 
 /**
  * @param {any} row
@@ -590,15 +640,14 @@ const commentOf = (row) => ({
 });
 
 /**
- * The two transports order comments differently and neither is wrong: REST lists them
- * repo-wide by date, GraphQL nests them under their issue. Sort before comparing.
+ * Group by issue and no further: the two transports disagree on the grouping, but within one
+ * issue the order feeds writer.js's key, and a stable sort leaves each side's sequence to compare.
  *
  * @param {any} a
  * @param {any} b
  * @returns {number}
  */
-const byComment = (a, b) =>
-  a.issue_url.localeCompare(b.issue_url) || a.created_at.localeCompare(b.created_at);
+const byComment = (a, b) => a.issue_url.localeCompare(b.issue_url);
 
 /**
  * Both transports' `{ issues, comments, labels }` in one shape. A blank comment body is
@@ -666,16 +715,30 @@ function withoutRestOnlyAssignees(issues) {
  * @param {any} graphql
  */
 function assertEquivalent(rest, graphql) {
-  for (const row of graphql.issues) assert.deepEqual(Object.keys(row).sort(), ISSUE_FIELDS);
-  for (const row of graphql.comments) assert.deepEqual(Object.keys(row).sort(), COMMENT_FIELDS);
-  for (const row of graphql.labels) assert.deepEqual(Object.keys(row).sort(), LABEL_FIELDS);
+  for (const row of graphql.issues) {
+    assertShape(row, ISSUE_FIELDS);
+    assertShape(row.user, PERSON_FIELDS);
+    for (const person of row.assignees) assertShape(person, PERSON_FIELDS);
+    for (const label of row.labels) assertShape(label, LABEL_FIELDS);
+    if (row.milestone !== null) assertShape(row.milestone, MILESTONE_FIELDS);
+    if (row.type !== null) assertShape(row.type, TYPE_FIELDS);
+  }
+  for (const row of graphql.comments) {
+    assertShape(row, COMMENT_FIELDS);
+    assertShape(row.user, PERSON_FIELDS);
+  }
+  for (const row of graphql.labels) assertShape(row, LABEL_FIELDS);
 
   const { issues, lifted } = withoutRestOnlyAssignees(rest.issues);
   assert.deepEqual(lifted, REST_ONLY_ASSIGNEES, "the REST rows must still carry a bot assignee");
   for (const row of graphql.issues) {
     for (const person of row.assignees) {
+      // Matched on the id too: the assignee sub-selection carries no `__typename`, so the
+      // widening this pin exists to catch spells the login without its `[bot]` suffix.
       assert.ok(
-        !REST_ONLY_ASSIGNEES.some((pinned) => pinned.login === person.login),
+        !REST_ONLY_ASSIGNEES.some(
+          (pinned) => pinned.id === person.id || pinned.login === person.login,
+        ),
         `${person.login} reached the GraphQL assignees of issue #${row.number}: ${WHY_PINNED}`,
       );
     }
@@ -700,10 +763,11 @@ function assertEquivalent(rest, graphql) {
 test("both fetchers read the whole fixture repo in one page, without a warning", async () => {
   const { restPaths, graphqlRequests, warnings } = await fetchBoth();
   assert.deepEqual(warnings, [], "a degraded fetch would make the comparison below meaningless");
+  // Sorted, not ordered: both walks race inside one `Promise.all` on separate sockets.
   assert.deepEqual(
-    graphqlRequests.map((request) => request.operationName),
-    ["ImportIssues", "ImportLabels"],
-    "one page each — overflow hydration is story #57632, not this dataset",
+    graphqlRequests.map((request) => request.operationName).toSorted(),
+    ["ImportIssues", "ImportLabels"].toSorted(),
+    "one page each — nested overflow is story #57632, the multi-page listing is #330976",
   );
   assert.deepEqual(restPaths.toSorted(), [
     `${PREFIX}/issues`,
@@ -743,6 +807,10 @@ test("the fixture repo covers every case the equivalence claim rests on", async 
     some((row) => row.assignees.some((/** @type {any} */ p) => p.type === "Bot")),
     "a bot assignee",
   );
+  assert.ok(
+    some((row) => row.assignees.filter((/** @type {any} */ p) => p.type === "User").length > 1),
+    "two human assignees, without which the bot lift leaves nothing to order",
+  );
   for (const [state, due] of [
     ["open", true],
     ["open", false],
@@ -763,6 +831,14 @@ test("the fixture repo covers every case the equivalence claim rests on", async 
     rest.comments.filter((/** @type {any} */ row) => row.body.trim() === "").length,
     2,
     "an empty and a whitespace-only comment body, which only the REST fetch keeps",
+  );
+  assert.ok(
+    COMMENTS.some((row) => !ISSUES.some((issue) => issue.number === row.issue)),
+    "a comment on an issue outside the listing, which only the REST transport is served",
+  );
+  assert.ok(
+    !rest.comments.some((/** @type {any} */ row) => row.issue_url.endsWith("/issues/42")),
+    "and REST's issue_url join drops it, which is what makes it agree with GraphQL's nesting",
   );
   assert.deepEqual(hierarchy(rest.subIssues), [["47", ["45", "44"]]], "a sub-issue rollup");
 });
@@ -825,19 +901,19 @@ const everyIssue = (graphql, rename) => ({ ...graphql, issues: graphql.issues.ma
 const MUTATIONS = [
   {
     name: "the [bot] login suffix is not restored",
-    evidence: /dependabot/,
+    evidence: /'dependabot'/,
     break: (/** @type {any} */ g) =>
       everyPerson(g, (person) => ({ ...person, login: person.login.replace(/\[bot\]$/, "") })),
   },
   {
     name: "the ghost account gets the wrong id",
-    evidence: /10137/,
+    evidence: /id: 10137/,
     break: (/** @type {any} */ g) =>
       everyPerson(g, (person) => (person.login === "ghost" ? { ...person, id: 1 } : person)),
   },
   {
     name: "an enum is left in SCREAMING_CASE",
-    evidence: /OPEN/,
+    evidence: /'OPEN'/,
     break: (/** @type {any} */ g) =>
       everyIssue(g, (row) => ({
         ...row,
@@ -847,12 +923,12 @@ const MUTATIONS = [
   },
   {
     name: "a renamed field is dropped",
-    evidence: /state_reason/,
+    evidence: /'state_reason'/,
     break: (/** @type {any} */ g) => everyIssue(g, (row) => withoutKey(row, "state_reason")),
   },
   {
     name: "a nested renamed field is dropped",
-    evidence: /due_on/,
+    evidence: /'due_on'/,
     break: (/** @type {any} */ g) =>
       everyIssue(g, (row) => ({
         ...row,
@@ -861,7 +937,7 @@ const MUTATIONS = [
   },
   {
     name: "a comment loses the issue_url the GraphQL path rebuilds",
-    evidence: /issue_url/,
+    evidence: /'issue_url'/,
     break: (/** @type {any} */ g) => ({
       ...g,
       comments: g.comments.map((/** @type {any} */ row) => withoutKey(row, "issue_url")),
@@ -869,13 +945,13 @@ const MUTATIONS = [
   },
   {
     name: "the sub-issue rollup drops a child",
-    evidence: /45/,
+    evidence: /'45'/,
     break: (/** @type {any} */ g) => ({ ...g, subIssues: new Map([["47", ["44"]]]) }),
   },
   {
     // The pin, driven from the other side: this is what selecting `assignedActors` would do.
     name: "a bot assignee reaches the GraphQL rows",
-    evidence: /copilot-swe-agent/,
+    evidence: /copilot-swe-agent\[bot\] reached the GraphQL assignees/,
     break: (/** @type {any} */ g) =>
       everyIssue(g, (row) =>
         row.number === 47
@@ -898,6 +974,9 @@ const MUTATIONS = [
 for (const mutation of MUTATIONS) {
   test(`mutation check: the harness fails when ${mutation.name}`, async () => {
     const { rest, graphql } = await fetchBoth();
+    // A broken baseline would otherwise satisfy the throw below off somebody else's failure,
+    // and this check would report green while certifying nothing.
+    assertEquivalent(rest, graphql);
     assert.throws(
       () => assertEquivalent(rest, mutation.break(graphql)),
       (/** @type {any} */ err) =>
@@ -918,20 +997,25 @@ test("the ImportIssues query selects Issue.assignees, never Issue.assignedActors
 
 test("CONTRACT.md names the bot-assignee divergence and its companion story", () => {
   const lines = readFileSync(new URL("../CONTRACT.md", import.meta.url), "utf8").split("\n");
-  const start = lines.findIndex((line) => line.startsWith("#### The `ImportIssues` listing"));
-  assert.notEqual(start, -1, "CONTRACT.md still has the ImportIssues row-shape section");
-  const rest = lines.slice(start + 1);
-  const end = rest.findIndex((line) => /^#{1,6} /.test(line));
-  const section = (end === -1 ? rest : rest.slice(0, end)).join(" ");
+  const start = lines.findIndex((line) => line.startsWith("**One row-shape divergence"));
+  assert.notEqual(start, -1, "CONTRACT.md still names the bot-assignee divergence");
+  // Bounded to the one paragraph: `assignedActors` and this filename appear elsewhere in the
+  // section, so a section-wide search would pass on somebody else's occurrence.
+  const after = lines.slice(start);
+  const end = after.findIndex((line, at) => at > 0 && line.trim() === "");
+  const paragraph = (end === -1 ? after : after.slice(0, end)).join(" ");
 
-  assert.ok(section.includes("assignedActors"), "the section names the field it does not select");
   assert.ok(
-    section.includes("UserConnection"),
+    paragraph.includes("assignedActors"),
+    "the paragraph names the field it does not select",
+  );
+  assert.ok(
+    paragraph.includes("UserConnection"),
     "and why that field is the one that could carry a bot",
   );
-  assert.match(section, /#330833/, "no companion server ask beside the divergence");
+  assert.match(paragraph, /#330833/, "no companion server ask beside the divergence");
   assert.ok(
-    section.includes("tests/dual-fetcher-parity.test.js"),
-    "the section points at the harness that pins the divergence",
+    paragraph.includes("tests/dual-fetcher-parity.test.js"),
+    "the paragraph points at the harness that pins the divergence",
   );
 });
