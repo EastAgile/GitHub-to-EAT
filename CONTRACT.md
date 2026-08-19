@@ -744,7 +744,18 @@ appear, the per-field degradation is the thing to port.
 `src/github-graphql-issues.js` holds the listing query and the layer that turns
 its nodes back into REST's row shape. `src/mapping.js` therefore maps either
 transport unchanged, and `tests/parity.test.js` keeps pinning it to the server's
-own expectations. The query is github.rs `issues_query` field for field:
+own expectations. `tests/dual-fetcher-parity.test.js` proves the "either
+transport" claim rather than restating it: one canonical repo, served in both
+renderings by one throwaway server, fetched by both fetchers and compared field
+by field with **REST as the oracle**. Two differences are normalized away before
+that comparison, because neither transport is wrong about them — the empty and
+whitespace-only comment bodies this listing drops at fetch and the REST path
+drops one layer down in `src/mapping.js`, and the comment order, which is
+repo-wide by date on one side and nested under its issue on the other.
+Everything else is compared exactly, and the harness carries its own mutation
+checks: a broken rename — a missing `[bot]` suffix, the wrong ghost id, an enum
+left in SCREAMING_CASE, a dropped field — must turn it red, so green means
+measured. The query is github.rs `issues_query` field for field:
 `rateLimit { remaining resetAt }` beside `repository`, then `issues(first:
 $first, after: $after, orderBy: {field: CREATED_AT, direction: DESC})`, and per
 node the author, the assignees, the labels, the milestone, the issue type, the
@@ -768,6 +779,20 @@ not a positive integer keeps its row, as the REST fetch keeps a row whose number
 it cannot read. That row takes no comments and no sub-issue cross-links: nothing
 joins those to an id that is not digits. The fetch reports how many issues
 arrived that way, so the loss is not silent.
+
+**One row-shape divergence from REST, named: bot assignees.** `Issue.assignees`
+is a `UserConnection`, so it carries `User` nodes only; `Issue.assignedActors`
+is the `Bot | Mannequin | Organization | User` union that would carry the rest
+(schema introspection, 2026-08-19). REST's own `assignees` array *does* report a
+bot — GitHub's Copilot coding agent is the one seen in the wild — so a repo that
+assigns Copilot imports one owner fewer through GraphQL than through REST. This
+listing selects `assignees` **because the server importer selects `assignees`**:
+the gap is engine parity, not an oversight, and closing it here alone would make
+the two engines write different owners for the same repo. Server ask #330833
+tracks widening the server's selection; this engine follows it rather than leads
+it. `tests/dual-fetcher-parity.test.js` pins the gap in both directions — it
+fails if a bot reaches the GraphQL rows, and it fails if the query ever selects
+`assignedActors`.
 
 Three things this listing does that the server's does not, each because this
 engine's mapper needs it:
