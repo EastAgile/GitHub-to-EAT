@@ -601,9 +601,8 @@ const byComment = (a, b) =>
   a.issue_url.localeCompare(b.issue_url) || a.created_at.localeCompare(b.created_at);
 
 /**
- * Both transports' `{ issues, comments, labels }` in one shape. Empty and whitespace-only
- * comment bodies go here: the GraphQL listing drops them at fetch, REST leaves that to
- * `src/mapping.js`, and the mapped output is identical either way.
+ * Both transports' `{ issues, comments, labels }` in one shape. A blank comment body is
+ * dropped here because GraphQL drops it at fetch and REST in `src/mapping.js`: same output.
  *
  * @param {any} fetchedRepo
  * @returns {{ issues: any[], comments: any[], labels: any[] }}
@@ -626,9 +625,8 @@ function normalized(fetchedRepo) {
 const hierarchy = (subIssues) => [...subIssues].sort(([a], [b]) => a.localeCompare(b));
 
 // --- the pinned divergence ---------------------------------------------------
-// `Issue.assignees` is a UserConnection (User only); `Issue.assignedActors` is the
-// Bot | Mannequin | Organization | User union. The CLI selects the narrow field because
-// the server importer selects the narrow field, so REST sees a bot assignee GraphQL cannot.
+// `Issue.assignees` is a UserConnection; only `Issue.assignedActors` could carry a bot. The
+// CLI selects the narrow field because the server does, so REST sees an assignee GraphQL cannot.
 
 /** The bot assignees REST reports and GraphQL structurally cannot. Server ask #330833. */
 const REST_ONLY_ASSIGNEES = [{ number: 47, login: "copilot-swe-agent[bot]", id: 198982749 }];
