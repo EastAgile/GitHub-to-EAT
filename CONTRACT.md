@@ -750,12 +750,31 @@ renderings by one throwaway server, fetched by both fetchers and compared field
 by field with **REST as the oracle**. Two differences are normalized away before
 that comparison, because neither transport is wrong about them — the empty and
 whitespace-only comment bodies this listing drops at fetch and the REST path
-drops one layer down in `src/mapping.js`, and the comment order, which is
-repo-wide by date on one side and nested under its issue on the other.
-Everything else is compared exactly, and the harness carries its own mutation
+drops one layer down in `src/mapping.js`, and the *grouping* of the comments,
+which is repo-wide by date on one side and nested under its issue on the other.
+The order **within** one issue is compared, because `src/mapping.js` pushes the
+comments onto the story in fetch order and `src/writer.js` derives each
+comment's idempotency key from that index. Everything else is compared exactly,
+nested rows included: an actor, a milestone, a label and an issue type each get
+the key-shape guard the top-level rows get, so a field the rename layer grows
+fails there rather than being projected away. The fixture reads the query it is
+answering and refuses to serve a sub-selection the query no longer asks for, so
+dropping `milestone` or the per-issue `labels` from the selection turns the
+harness red rather than passing unseen. The harness carries its own mutation
 checks: a broken rename — a missing `[bot]` suffix, the wrong ghost id, an enum
-left in SCREAMING_CASE, a dropped field — must turn it red, so green means
-measured. The query is github.rs `issues_query` field for field:
+left in SCREAMING_CASE, a dropped field — must turn it red, and each check
+asserts the un-mutated pair passes before it mutates anything, so no check can
+report green off an unrelated failure. Green means measured.
+
+**What this gate does not cover: listing completeness.** Both transports read
+its dataset in one page, so REST's `Link` walk and the GraphQL cursor walk are
+never compared against each other, and a repo past one page could regress
+either walker without failing here. Story #330976 (iceboxed) owns the
+multi-page dataset. It also owns the open question of whether the label and
+assignee **ordering** this gate compares is a guarantee both transports make,
+or an artifact of one fixture array feeding both renderings.
+
+The query is github.rs `issues_query` field for field:
 `rateLimit { remaining resetAt }` beside `repository`, then `issues(first:
 $first, after: $after, orderBy: {field: CREATED_AT, direction: DESC})`, and per
 node the author, the assignees, the labels, the milestone, the issue type, the
