@@ -652,10 +652,17 @@ test("a trailing slash on the API base does not double up the /graphql path", as
 
 // --- the wiring CONTRACT.md promises has not happened yet --------------------
 
-test("no fetch stage imports the transport yet, as CONTRACT.md claims", async () => {
-  // Static `from`, `export * from`, dynamic `await import()` and `require()` all
-  // count as wiring, and bin/ ships too — a narrower scan would claim more than it checks.
-  const REFERENCE = /(?:from|import|require)\s*\(?\s*["'][^"']*github-graphql\.js["']/;
+/**
+ * Which `src/` and `bin/` modules import `module`. Static `from`, `export * from`, dynamic
+ * `await import()` and `require()` all count, and bin/ ships too — a narrower scan lies.
+ *
+ * @param {string} module the imported module's file name
+ * @returns {Promise<string[]>}
+ */
+async function importersOf(module) {
+  const REFERENCE = new RegExp(
+    `(?:from|import|require)\\s*\\(?\\s*["'][^"']*${module.replace(/\./g, "\\.")}["']`,
+  );
   /** @type {string[]} */
   const importers = [];
   /**
@@ -668,7 +675,7 @@ test("no fetch stage imports the transport yet, as CONTRACT.md claims", async ()
         await scan(new URL(`${entry.name}/`, dir), `${prefix}${entry.name}/`);
         continue;
       }
-      if (!entry.name.endsWith(".js") || entry.name === "github-graphql.js") continue;
+      if (!entry.name.endsWith(".js") || entry.name === module) continue;
       const source = await readFile(new URL(entry.name, dir), "utf8");
       if (REFERENCE.test(source)) importers.push(`${prefix}${entry.name}`);
     }
@@ -676,6 +683,14 @@ test("no fetch stage imports the transport yet, as CONTRACT.md claims", async ()
   for (const dir of ["src/", "bin/"]) {
     await scan(new URL(`../${dir}`, import.meta.url), dir);
   }
-  // Wiring it (story #57630) must land with CONTRACT.md's "not yet wired" truthed up.
-  assert.deepEqual(importers, []);
+  return importers;
+}
+
+test("only the issue listing imports the transport, as CONTRACT.md claims", async () => {
+  assert.deepEqual(await importersOf("github-graphql.js"), ["src/github-graphql-issues.js"]);
+});
+
+test("no engine or fetch stage calls the issue listing yet, as CONTRACT.md claims", async () => {
+  // Wiring it (story #57634) must land with CONTRACT.md's "not yet wired" truthed up.
+  assert.deepEqual(await importersOf("github-graphql-issues.js"), []);
 });

@@ -643,14 +643,19 @@ with `x-ratelimit-remaining: 0`, or a secondary-limit 403 carrying
 `retry-after` — → rate-limit (the message prefers `retry-after` when present,
 falling back to the `x-ratelimit-reset` time); 401 → token rejected.
 
-#### GraphQL transport — present, not yet wired
+#### GraphQL transport and issue listing — present, not yet wired
 
 The server engine moved its issue fetch to GraphQL (server story #47449) and the
-direct engine is following it (tracker story #57629). The transport primitive
-lands first: **no fetch stage calls it yet.** Every listing above is still the
-REST path, and a run's observable behaviour — request count, rows, errors — is
-unchanged by its presence. The listing queries, the REST-shape rename layer and
-the removal of the REST issue path are separate stories.
+direct engine is following it one story at a time. Two pieces have landed: the
+transport primitive (tracker story #57629) and the `ImportIssues` listing with
+its REST-shape rename layer (#57630). **No engine and no fetch stage calls
+either yet.** Every listing above is still the REST path, and a run's observable
+behaviour — request count, rows, errors — is unchanged by their presence.
+Switching `src/direct.js` onto GraphQL, which also makes `--token` mandatory, is
+story #57634; deleting the REST issue path afterwards is story #57636.
+`tests/github-graphql.test.js` proves that claim rather than restating it: it
+scans `src/` and `bin/`, and fails if anything but the listing imports the
+transport, or if anything at all imports the listing.
 
 The transport (`src/github-graphql.js`) is one `POST {apiBase}/graphql` carrying
 `{ operationName, query, variables }` under
@@ -733,6 +738,60 @@ fetch-error bucket instead of triggering a retry, and so does a refusal GitHub
 scopes to a single field through the error's `path`.
 **This is an intended omission, not engine drift**; should a reachable GHES
 appear, the per-field degradation is the thing to port.
+
+#### The `ImportIssues` listing and the REST row shape
+
+`src/github-graphql-issues.js` holds the listing query and the layer that turns
+its nodes back into REST's row shape. `src/mapping.js` therefore maps either
+transport unchanged, and `tests/parity.test.js` keeps pinning it to the server's
+own expectations. The query is github.rs `issues_query` field for field:
+`rateLimit { remaining resetAt }` beside `repository`, then `issues(first:
+$first, after: $after, orderBy: {field: CREATED_AT, direction: DESC})`, and per
+node the author, the assignees, the labels, the milestone, the issue type, the
+comments and the sub-issues. The selection is built from shared parts, one actor
+selection and one comment selection, because a pull-request node (story #57633)
+and the `blockedBy` connection (story #259658) reuse them. `issueType` and
+`subIssues` are selected unconditionally: no degradation ladder, as above.
+
+The rename layer restates what GraphQL renamed: `url` → `html_url`, `createdAt`
+→ `created_at`, `closedAt` → `closed_at`, `dueOn` → `due_on`, `databaseId` →
+`id`, `issueType` → `type`, `stateReason` → `state_reason`. It lowercases the
+`state`, `state_reason` and `milestone.state` enums, because the mapping matches
+REST's lowercase spellings exactly. A deleted author, which GraphQL reports as a
+null actor and REST as the `ghost` account, becomes that account again (id
+10137). A `Bot` actor regains REST's `[bot]` login suffix, which is the
+member-mapping key. An actor whose implementer carries no `databaseId` becomes
+id 0, the id `src/mapping.js` refuses, rather than being dropped here: that
+filter is `externalPerson` one layer down, exactly as the server filters in
+`issue_to_record` and not in its shape conversion. An issue whose `number` is
+not a positive integer keeps its row, as the REST fetch keeps a row whose number
+it cannot read. That row takes no comments and no sub-issue cross-links: nothing
+joins those to an id that is not digits. The fetch reports how many issues
+arrived that way, so the loss is not silent.
+
+Three things this listing does that the server's does not, each because this
+engine's mapper needs it:
+
+- **A repo-wide label listing** (`ImportLabels`). The server reads labels off
+  each issue. `src/mapping.js` also takes the repo's own list as its colour
+  authority, and a label that no issue carries has no other source.
+- **`issue_url` on every comment row.** GraphQL nests comments under their
+  issue, where REST listed them repo-wide. The mapper joins on `issue_url`, so
+  the listing rebuilds it from the API base, the repo and the issue number.
+- **A warning when one page was not enough.** An issue with more than 100
+  comments, or more than 100 sub-issues, keeps its first 100 and says so on
+  stderr. Hydrating the rest is story #57632; until it lands, the shortfall is
+  loud rather than silent.
+
+Pagination follows Relay cursors and refuses to drift. A cursor that stops
+advancing, or a walk past 50 000 pages, fails the fetch instead of looping or
+truncating quietly. A page that promises a successor without a cursor warns. An
+empty cursor counts as no cursor: sending it back only re-reads the same page.
+`totalCount` gives the fetch an exact `fetching X/Y` page count, where REST's
+`rel="last"` was only a hint. An empty or whitespace-only comment body is
+dropped in the listing, as github.rs `comment_nodes_to_records` drops it; on the
+REST path that drop happens one layer down, in `src/mapping.js`, which still
+performs it for both.
 
 ### Default mapping profile (issues → stories)
 
