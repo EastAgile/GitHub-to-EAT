@@ -1,7 +1,6 @@
 /**
- * The `ImportIssues` listing, the per-issue follow-ups that drain a connection one page could
- * not hold, and the REST-shape rename layer (github.rs), whose rows keep REST's field names so
- * `src/mapping.js` maps either transport. Not wired yet: CONTRACT.md.
+ * The `ImportIssues` listing, the follow-ups draining an overflowing connection, and the rename
+ * layer keeping REST's names so `src/mapping.js` maps either transport. Not wired: CONTRACT.md.
  */
 
 import { GITHUB_API_BASE, GitHubError, RepoNotFoundError } from "./github.js";
@@ -296,9 +295,8 @@ function commentRows(connection, issueUrl) {
 }
 
 /**
- * Append one page of sub-issue nodes to `kept`, in GitHub's own order (github.rs `push_kid`).
- * The self-reference drop is this CLI's own, mirroring `GitHubClient#fetchSubIssues` because
- * mapping.js and tests/parity.test.js are pinned to that REST shape.
+ * github.rs `push_kid`, plus this CLI's own self-reference drop: `src/mapping.js` and
+ * tests/parity.test.js are pinned to the REST shape `GitHubClient#fetchSubIssues` builds.
  *
  * @param {any[]} rows
  * @param {string | null} parent
