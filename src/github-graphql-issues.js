@@ -793,6 +793,7 @@ export class GitHubGraphQLFetcher {
     /** @type {string[]} */
     const cappedSubIssues = [];
     let unnumbered = 0;
+    let unnumberedPrs = 0;
     // Sequential, and only once the listing is complete: a wide hierarchy or a long thread
     // must not burst a page per issue into GitHub's secondary rate limit.
     for (const node of nodes) {
@@ -838,7 +839,7 @@ export class GitHubGraphQLFetcher {
       const fetched = fetchedPullRequest(node, issueUrl);
       issues.push(fetched.issue);
       if (number === null) {
-        unnumbered += 1;
+        unnumberedPrs += 1;
         continue;
       }
       if (fetched.truncated.comments !== null) {
@@ -855,8 +856,16 @@ export class GitHubGraphQLFetcher {
     }
     if (unnumbered > 0) {
       this.#warn(
-        `warning: ${unnumbered} issue(s) arrived without a usable issue number — their ` +
-          "comments and sub-issue cross-links are not imported.\n",
+        `warning: ${unnumbered} ${COMMENT_PARENT.issue.noun}(s) arrived without a usable issue ` +
+          "number — their comments and sub-issue cross-links are not imported.\n",
+      );
+    }
+    // Its own line and its own noun: a PR has no sub-issue connection, so the issue
+    // wording would name a loss it never had.
+    if (unnumberedPrs > 0) {
+      this.#warn(
+        `warning: ${unnumberedPrs} ${COMMENT_PARENT.pullRequest.noun}(s) arrived without a ` +
+          "usable number — their comments are not imported.\n",
       );
     }
     this.#warnOverflow(

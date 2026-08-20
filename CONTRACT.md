@@ -688,7 +688,15 @@ case-insensitively, exactly as `classify_gql_errors` does on the server:
 | anything else                        | fetch error, quoting the message   |
 
 A `data.repository` that is present and `null` is GraphQL's other way of saying
-404, and maps to repo-not-found too. A 200 that is not a GraphQL envelope (a
+404, and maps to repo-not-found too. On a hydration follow-up that same null is
+re-diagnosed as a **vanished node** (below), because the listing already
+resolved the repository. Both routes to repo-not-found — the `NOT_FOUND` error
+and the bare null — raise one `RepoNotFoundError` here, so a caller cannot tell
+them apart. github.rs can: it renames the error branch alone and leaves
+`repository: null` a plain `NotFound`. The signal that separates them is
+*whether an `errors` entry classified the response*, not the error's `path`.
+Conflating them is deliberate and matches the rows either engine writes; a
+narrowing would start from that signal. A 200 that is not a GraphQL envelope (a
 JSON array, a bare `null`, a proxy's HTML), an `errors` field that is not an
 array, and an envelope whose `data` is missing or itself an array are all fetch
 errors naming an "unexpected response shape". HTTP statuses keep
@@ -785,8 +793,10 @@ engine's mapper needs it:
   What stays loud is a genuine shortfall, and four things cause one: GitHub
   promised more rows and sent no cursor to read them with, a parent ran past the
   sub-issue page cap, a parent's node stopped resolving mid-walk, or its
-  sub-issue cursor stopped advancing. All four render as one aggregated stderr
-  line, however many issues are short. The cap case carries its own wording,
+  sub-issue cursor stopped advancing. All four aggregate, but **per node kind**:
+  one stderr line for the short issues and one for the short pull requests,
+  however many rows each names. A run with one short issue thread and one short
+  PR thread prints two lines. The cap case carries its own wording,
   because its cut is at 2000 children where the other three may lose one row.
   The server truncates all four in silence.
 
@@ -868,10 +878,16 @@ The PR node is **a different selection, not a toggled subset** of the issue one:
 `number title body state mergedAt createdAt closedAt url`, the author, the
 assignees, the labels, the milestone and the comments. It carries **no
 `stateReason`, no `issueType`, no `subIssues` and no `blockedBy`** —
-`PullRequest` declares none of them. Per server story #163088 a pull request is
-never asked for dependencies **in any configuration**, so `--include prs
---include deps` fetches no PR blocker and every PR-derived story imports with
-none.
+`PullRequest` declares none of them. Per server story #163088 **the GraphQL
+fetch asks no pull request for dependencies**, in any configuration. This
+transport also refuses `--include deps` outright, before it sends a request, so
+`--include prs --include deps` reaches no PR blocker by either route.
+
+**The REST engine still asks.** It maps every fetched row through
+`GET /issues/<n>/dependencies/blocked_by` with no pull-request gate, so each PR
+spends one request there and counts against that stage's pre-flight budget. That
+contradicts server story #163088, and story #384728 (/s/nqgz7dy7) owns the fix.
+The paragraph above describes the GraphQL fetch only.
 
 The rename layer emits the row shape REST's PR stubs had, so `src/mapping.js`
 folds, rejects and labels a PR unchanged. `state: MERGED` reads as **closed**,
@@ -893,10 +909,13 @@ reports `no pull request #12 node while paging its comments` (github.rs
 
 The listings run as two connections, so the fetched rows come out **issues
 first, then pull requests**, where REST interleaved them by date. That changes
-**no written row**: `src/writer.js` sorts creates by `created_at`. Only the
-plan's and the report's listing order follows the fetch order, and it now
-matches the server engine, whose `fetch_issue_graph` extends its issue list with
-the PRs the same way.
+**no written row's content**: `src/writer.js` sorts creates by `created_at`.
+It does change the create order of a **tie**. That sort is stable and reads no
+tiebreak, so rows sharing a `created_at` keep fetch order, and an issue tying
+with a PR is now created first where REST interleaved the two. The plan's and
+the report's listing order follows the fetch order too. Both now match the
+server engine, whose `fetch_issue_graph` extends its issue list with the PRs the
+same way.
 
 ### Default mapping profile (issues → stories)
 
