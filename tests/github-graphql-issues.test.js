@@ -12,6 +12,7 @@ import {
   ACTOR_SELECTION,
   commentsSelection,
   fetchedIssue,
+  fetchedPullRequest,
   GHOST_USER,
   GitHubGraphQLFetcher,
   issueCommentsQuery,
@@ -24,6 +25,9 @@ import {
   nodeSelection,
   Pager,
   personFromActor,
+  pullRequestCommentsQuery,
+  pullRequestNodeSelection,
+  pullRequestsQuery,
 } from "../src/github-graphql-issues.js";
 import { mapRepo } from "../src/mapping.js";
 import { formatImportStatus } from "../src/progress.js";
@@ -822,7 +826,7 @@ test("a repository without the listing is an unexpected shape, not an empty repo
 
 test("fetchAll refuses the listings it does not implement yet, as a GitHubError", async () => {
   await withGraphQL(oneRepo([]), async (base) => {
-    for (const option of ["pullRequests", "releases", "dependencies"]) {
+    for (const option of ["releases", "dependencies"]) {
       // src/cli.js formats only EATError and GitHubError; anything else reaches the
       // user as an unhandled rejection with a Node stack trace.
       await assert.rejects(fetcherAt(base).fetchAll({ [option]: true }), (err) => {
@@ -1449,5 +1453,442 @@ test("an issue with no usable number is never hydrated, because nothing joins to
     const { issues } = await fetcherAt(base, { warn: () => {} }).fetchAll();
     assert.equal(issues.length, 1);
     assert.equal(seen.length, 2);
+  });
+});
+
+// --- pull requests (story #57633) ---------------------------------------------
+
+/** @param {object} [over] */
+const prNode = (over = {}) => ({
+  number: 12,
+  title: "Add the widget",
+  body: "Closes #7",
+  state: "MERGED",
+  mergedAt: "2026-02-01T00:00:00Z",
+  createdAt: "2026-01-05T00:00:00Z",
+  closedAt: "2026-02-01T00:00:00Z",
+  url: "https://github.com/octocat/hello/pull/12",
+  author: {
+    __typename: "User",
+    login: "octocat",
+    databaseId: 1,
+    url: "https://github.com/octocat",
+  },
+  assignees: { nodes: [] },
+  labels: { nodes: [] },
+  milestone: null,
+  comments: conn([]),
+  ...over,
+});
+
+/**
+ * @param {any[]} nodes
+ * @param {{ hasNextPage?: boolean, endCursor?: string | null, totalCount?: number }} [page]
+ */
+const prsEnvelope = (
+  nodes,
+  { hasNextPage = false, endCursor = null, totalCount = nodes.length } = {},
+) => ({
+  data: {
+    rateLimit: { remaining: 4999, resetAt: "2030-01-01T00:00:00Z" },
+    repository: { pullRequests: { totalCount, pageInfo: { hasNextPage, endCursor }, nodes } },
+  },
+});
+
+/** The PR follow-up answer a test that forbids a follow-up must never receive. */
+const PR_NEVER_ASKED = () => ({ pullRequest: { comments: conn([commentNode(999)]) } });
+
+/**
+ * One issues page, one PR page, one (empty) labels page, and `hydrate` for every follow-up.
+ *
+ * @param {any[]} issues
+ * @param {any[]} prs
+ * @param {(request: any) => any} [hydrate]
+ */
+const repoWithPrs =
+  (issues, prs, hydrate = PR_NEVER_ASKED) =>
+  (/** @type {any} */ request) => {
+    if (request.operationName === "ImportLabels") return labelsEnvelope([]);
+    if (request.operationName === "ImportIssues") return issuesEnvelope(issues);
+    if (request.operationName === "ImportPullRequests") return prsEnvelope(prs);
+    return { data: { repository: hydrate(request) } };
+  };
+
+test("the ImportPullRequests query is github.rs pull_requests_query field for field", () => {
+  const query = pullRequestsQuery();
+  assert.equal(
+    query,
+    "query ImportPullRequests($owner: String!, $name: String!, $first: Int!, $after: String) { " +
+      "rateLimit { remaining resetAt } " +
+      "repository(owner: $owner, name: $name) { " +
+      "pullRequests(first: $first, after: $after, " +
+      "orderBy: {field: CREATED_AT, direction: DESC}) { " +
+      `totalCount pageInfo { hasNextPage endCursor } nodes { ${pullRequestNodeSelection()} } } } }`,
+  );
+  // Beside `repository`, not inside it: the transport reads `data.rateLimit`.
+  assert.ok(query.indexOf("rateLimit") < query.indexOf("repository("));
+});
+
+test("the pull-request listing pages by CREATED_AT DESC, exactly as the issues one does", () => {
+  assert.match(
+    pullRequestsQuery(),
+    /pullRequests\(first: \$first, after: \$after, orderBy: \{field: CREATED_AT, direction: DESC\}\)/,
+  );
+  assert.match(pullRequestsQuery(), /totalCount pageInfo \{ hasNextPage endCursor \}/);
+});
+
+test("the pull-request node is the shared selection with mergedAt, and nothing issue-only", () => {
+  const selection = pullRequestNodeSelection();
+  // The seam story 2/9 built: `pull_request_node_selection()` is that call, byte for byte.
+  assert.equal(selection, nodeSelection("mergedAt", [commentsSelection()]));
+  assert.match(selection, /^number title body state mergedAt createdAt closedAt url /);
+  assert.ok(selection.includes(ACTOR_SELECTION));
+  assert.ok(selection.includes(commentsSelection()));
+  assert.match(selection, /assignees\(first: 100\) \{ nodes \{ login databaseId url \} \}/);
+  assert.match(selection, /labels\(first: 100\) \{ nodes \{ name color \} \}/);
+  assert.match(selection, /milestone \{ title dueOn state \}/);
+  // A genuinely different selection, not a toggled subset of the issue one.
+  for (const issueOnly of ["stateReason", "issueType", "subIssues", "blockedBy"]) {
+    assert.doesNotMatch(selection, new RegExp(issueOnly));
+  }
+});
+
+test("the ImportPullRequestComments query is github.rs pull_request_comments_query field for field", () => {
+  const query = pullRequestCommentsQuery();
+  assert.equal(
+    query,
+    "query ImportPullRequestComments($owner: String!, $name: String!, $number: Int!, " +
+      "$first: Int!, $after: String) { repository(owner: $owner, name: $name) { " +
+      "pullRequest(number: $number) { comments(first: $first, after: $after) { " +
+      "pageInfo { hasNextPage endCursor } " +
+      `nodes { body createdAt author { ${ACTOR_SELECTION} } } } } } }`,
+  );
+  // Server story #55748: `Repository.issue(number:)` resolves issues only, and its
+  // NOT_FOUND reads as "no such repository", which would abort the whole run.
+  assert.doesNotMatch(query, /issue\(number: \$number\)/);
+  assert.ok(!query.includes("rateLimit"));
+});
+
+// --- the rename layer, ported from github.rs `impl From<GqlPullRequestNode> for GhIssue` ---
+
+test("a MERGED pull request reads as closed and still carries merged_at", () => {
+  const { issue } = fetchedPullRequest(prNode(), ISSUE_URL);
+  assert.equal(issue.state, "closed");
+  assert.deepEqual(issue.pull_request, { merged_at: "2026-02-01T00:00:00Z" });
+});
+
+test("an open pull request stays open, with no merge date", () => {
+  const { issue } = fetchedPullRequest(
+    prNode({ state: "OPEN", mergedAt: null, closedAt: null }),
+    ISSUE_URL,
+  );
+  assert.equal(issue.state, "open");
+  assert.deepEqual(issue.pull_request, { merged_at: null });
+});
+
+test("a closed unmerged pull request is closed with no merge date, so it maps rejected", () => {
+  const { issue } = fetchedPullRequest(prNode({ state: "CLOSED", mergedAt: null }), ISSUE_URL);
+  assert.equal(issue.state, "closed");
+  assert.deepEqual(issue.pull_request, { merged_at: null });
+});
+
+test("the pull_request key is present, which is how mapping.js tells a PR from an issue", () => {
+  const { issue } = fetchedPullRequest(prNode(), ISSUE_URL);
+  assert.ok(Object.hasOwn(issue, "pull_request"));
+  assert.notEqual(issue.pull_request, null);
+});
+
+test("a pull-request row carries no state_reason and no issue type, as the server's does not", () => {
+  const { issue } = fetchedPullRequest(
+    // Even were the selection to regain them, github.rs hard-nulls both on a PR.
+    prNode({ stateReason: "NOT_PLANNED", issueType: { name: "Bug" } }),
+    ISSUE_URL,
+  );
+  assert.equal(issue.state_reason, null);
+  assert.equal(issue.type, null);
+});
+
+test("a pull-request row keeps REST's other names too, so mapping.js reads it unchanged", () => {
+  const { issue } = fetchedPullRequest(
+    prNode({
+      milestone: { title: "v1", dueOn: "2026-03-01T00:00:00Z", state: "CLOSED" },
+      labels: { nodes: [{ name: "bug", color: "d73a4a" }] },
+      assignees: {
+        nodes: [{ login: "hubot", databaseId: 8112, url: "https://github.com/hubot" }],
+      },
+    }),
+    ISSUE_URL,
+  );
+  assert.equal(issue.html_url, "https://github.com/octocat/hello/pull/12");
+  assert.equal(issue.created_at, "2026-01-05T00:00:00Z");
+  assert.equal(issue.closed_at, "2026-02-01T00:00:00Z");
+  assert.deepEqual(issue.milestone, {
+    title: "v1",
+    due_on: "2026-03-01T00:00:00Z",
+    state: "closed",
+  });
+  assert.deepEqual(issue.labels, [{ name: "bug", color: "d73a4a" }]);
+  assert.deepEqual(issue.assignees, [
+    { id: 8112, login: "hubot", html_url: "https://github.com/hubot" },
+  ]);
+  assert.deepEqual(issue.user, { id: 1, login: "octocat", html_url: "https://github.com/octocat" });
+});
+
+test("a deleted PR author becomes REST's ghost user, as an issue's does", () => {
+  const { issue } = fetchedPullRequest(prNode({ author: null }), ISSUE_URL);
+  assert.deepEqual(issue.user, GHOST_USER);
+});
+
+test("the three PR states map through mapping.js untouched: started, accepted, rejected", async () => {
+  const respond = repoWithPrs(
+    [],
+    [
+      prNode({ number: 12, state: "OPEN", mergedAt: null, closedAt: null, body: "" }),
+      prNode({ number: 13, state: "MERGED", body: "" }),
+      prNode({ number: 14, state: "CLOSED", mergedAt: null, body: "" }),
+    ],
+  );
+  await withGraphQL(respond, async (base) => {
+    const fetched = await fetcherAt(base).fetchAll({ pullRequests: true });
+    const plan = mapRepo(fetched, undefined, { pullRequests: true });
+    assert.deepEqual(
+      plan.stories.map((story) => [story.external_id, story.current_state]),
+      [
+        ["12", "started"],
+        ["13", "accepted"],
+        ["14", "rejected"],
+      ],
+    );
+    for (const story of plan.stories) assert.ok(story.labels.includes("pull-request"));
+  });
+});
+
+// --- the connection is opt-in ------------------------------------------------
+
+test("a default run sends no query naming pullRequests at all", async () => {
+  await withGraphQL(repoWithPrs([issueNode()], [prNode()]), async (base, seen) => {
+    const { issues } = await fetcherAt(base).fetchAll();
+    assert.deepEqual(
+      issues.map((issue) => issue.number),
+      [7],
+    );
+    assert.ok(seen.length > 0, "the default run still queried something");
+    for (const request of seen) {
+      assert.doesNotMatch(request.query, /pullRequests?\s*\(|pullRequests\b/i);
+      assert.doesNotMatch(request.operationName, /PullRequest/);
+    }
+  });
+});
+
+test("--include prs appends the PR rows after the issues, as github.rs extends the list", async () => {
+  const respond = repoWithPrs(
+    [issueNode({ number: 7 }), issueNode({ number: 8 })],
+    [prNode({ number: 12 }), prNode({ number: 13 })],
+  );
+  await withGraphQL(respond, async (base, seen) => {
+    const { issues } = await fetcherAt(base).fetchAll({ pullRequests: true });
+    // github.rs `fetch_issue_graph` does `issues.extend(prs)`; the writer sorts creates by
+    // created_at, so only the plan's listing order follows this.
+    assert.deepEqual(
+      issues.map((issue) => issue.number),
+      [7, 8, 12, 13],
+    );
+    assert.equal(requestsFor(seen, "ImportPullRequests").length, 1);
+  });
+});
+
+test("a PR's conversation comments ride its own node and key back to its issues URL", async () => {
+  const respond = repoWithPrs([], [prNode({ comments: conn([commentNode(0), commentNode(1)]) })]);
+  await withGraphQL(respond, async (base) => {
+    const { comments } = await fetcherAt(base).fetchAll({ pullRequests: true });
+    assert.equal(comments.length, 2);
+    // REST listed a PR's conversation comments under /issues/<n>, and mapping.js joins on it.
+    for (const comment of comments) {
+      assert.equal(comment.issue_url, `${base}/repos/octocat/hello/issues/12`);
+    }
+  });
+});
+
+test("the PR listing follows its own cursor to the last page", async () => {
+  const respond = (/** @type {any} */ request) => {
+    if (request.operationName === "ImportLabels") return labelsEnvelope([]);
+    if (request.operationName === "ImportIssues") return issuesEnvelope([]);
+    return request.variables.after === null
+      ? prsEnvelope([prNode({ number: 12 })], { hasNextPage: true, endCursor: "p2", totalCount: 2 })
+      : prsEnvelope([prNode({ number: 13 })], { totalCount: 2 });
+  };
+  await withGraphQL(respond, async (base, seen) => {
+    const { issues } = await fetcherAt(base).fetchAll({ pullRequests: true });
+    assert.deepEqual(
+      issues.map((issue) => issue.number),
+      [12, 13],
+    );
+    assert.deepEqual(
+      requestsFor(seen, "ImportPullRequests").map((request) => request.variables.after),
+      [null, "p2"],
+    );
+  });
+});
+
+// --- PR comment hydration ----------------------------------------------------
+
+test("a PR past 100 comments resumes through ImportPullRequestComments, never the issue query", async () => {
+  const respond = repoWithPrs(
+    [],
+    [
+      prNode({
+        comments: conn(
+          Array.from({ length: 100 }, (_, at) => commentNode(at)),
+          { hasNextPage: true, endCursor: "c1" },
+        ),
+      }),
+    ],
+    () => ({ pullRequest: { comments: conn([commentNode(100), commentNode(101)]) } }),
+  );
+  await withGraphQL(respond, async (base, seen) => {
+    const { comments } = await fetcherAt(base).fetchAll({ pullRequests: true });
+    assert.equal(comments.length, 102);
+    const followUps = requestsFor(seen, "ImportPullRequestComments");
+    assert.equal(followUps.length, 1);
+    assert.equal(requestsFor(seen, "ImportIssueComments").length, 0);
+    assert.deepEqual(followUps[0].variables, {
+      owner: "octocat",
+      name: "hello",
+      number: 12,
+      first: 100,
+      after: "c1",
+    });
+  });
+});
+
+test("the PR comment walk drains every page, as the issue one does", async () => {
+  /** @type {Record<string, any>} */
+  const pages = {
+    c1: conn([commentNode(1)], { hasNextPage: true, endCursor: "c2" }),
+    c2: conn([commentNode(2)]),
+  };
+  const respond = repoWithPrs(
+    [],
+    [prNode({ comments: conn([commentNode(0)], { hasNextPage: true, endCursor: "c1" }) })],
+    (/** @type {any} */ request) => ({
+      pullRequest: { comments: pages[request.variables.after] },
+    }),
+  );
+  await withGraphQL(respond, async (base, seen) => {
+    const { comments } = await fetcherAt(base).fetchAll({ pullRequests: true });
+    assert.deepEqual(
+      comments.map((row) => row.body),
+      ["comment 0", "comment 1", "comment 2"],
+    );
+    assert.deepEqual(
+      requestsFor(seen, "ImportPullRequestComments").map((r) => r.variables.after),
+      ["c1", "c2"],
+    );
+  });
+});
+
+test("a PR that vanishes mid-thread says pull request, not issue", async () => {
+  const respond = repoWithPrs(
+    [],
+    [prNode({ comments: conn([], { hasNextPage: true, endCursor: "c1" }) })],
+    () => ({ pullRequest: null }),
+  );
+  await withGraphQL(respond, async (base) => {
+    await assert.rejects(fetcherAt(base).fetchAll({ pullRequests: true }), (err) => {
+      assert.ok(err instanceof GitHubError);
+      assert.ok(!(err instanceof RepoNotFoundError));
+      assert.match(err.message, /no pull request #12 node while paging its comments/);
+      assert.match(err.message, /re-running the import is safe/);
+      return true;
+    });
+  });
+});
+
+test("a NOT_FOUND on a PR comment follow-up names the pull request, not the repository", async () => {
+  const respond = (/** @type {any} */ request) => {
+    if (request.operationName === "ImportLabels") return labelsEnvelope([]);
+    if (request.operationName === "ImportIssues") return issuesEnvelope([]);
+    if (request.operationName === "ImportPullRequests") {
+      return prsEnvelope([prNode({ comments: conn([], { hasNextPage: true, endCursor: "c1" }) })]);
+    }
+    return {
+      data: { repository: { pullRequest: null } },
+      errors: [{ type: "NOT_FOUND", message: "x" }],
+    };
+  };
+  await withGraphQL(respond, async (base) => {
+    await assert.rejects(fetcherAt(base).fetchAll({ pullRequests: true }), (err) => {
+      assert.ok(err instanceof GitHubError);
+      assert.ok(!(err instanceof RepoNotFoundError), "a vanished PR is not a missing repo");
+      assert.match(err.message, /no pull request #12 node while paging its comments/);
+      return true;
+    });
+  });
+});
+
+test("a PR follow-up whose comments connection is absent or unreadable fails loudly", async () => {
+  for (const pullRequest of [{}, { comments: "boom" }]) {
+    const respond = repoWithPrs(
+      [],
+      [prNode({ comments: conn([commentNode(0)], { hasNextPage: true, endCursor: "c1" }) })],
+      () => ({ pullRequest }),
+    );
+    await withGraphQL(respond, async (base) => {
+      await assert.rejects(fetcherAt(base).fetchAll({ pullRequests: true }), (err) => {
+        assert.ok(err instanceof GitHubError);
+        assert.match(err.message, /unexpected response shape/);
+        assert.match(err.message, /pull request #12's comments/);
+        return true;
+      });
+    });
+  }
+});
+
+test("a PR thread that promises more and sends no cursor warns, and re-reads nothing", async () => {
+  const warned = capture();
+  const respond = repoWithPrs(
+    [],
+    [prNode({ comments: conn([commentNode(0)], { hasNextPage: true, endCursor: "" }) })],
+  );
+  await withGraphQL(respond, async (base, seen) => {
+    const { comments } = await fetcherAt(base, {
+      warn: (message) => void warned.write(message),
+    }).fetchAll({ pullRequests: true });
+    assert.equal(comments.length, 1);
+    // "" is no cursor at all; github.rs sends it back and re-reads page 1 (CONTRACT.md).
+    assert.equal(requestsFor(seen, "ImportPullRequestComments").length, 0);
+  });
+  assert.match(warned.buf, /pull request\(s\)/);
+  assert.match(warned.buf, /#12/);
+});
+
+// --- a PR is never asked for dependencies or sub-issues (server story #163088) ---
+
+test("--include prs asks for no blockedBy and no subIssues anywhere in the run", async () => {
+  const respond = repoWithPrs([issueNode()], [prNode()]);
+  await withGraphQL(respond, async (base, seen) => {
+    const { subIssues } = await fetcherAt(base).fetchAll({ pullRequests: true });
+    // A PR contributes no cross-links, exactly as `sub_issues: Vec::new()` gives it none.
+    assert.deepEqual([...subIssues.keys()], []);
+    for (const request of seen) {
+      if (request.operationName.startsWith("ImportPullRequest")) {
+        assert.doesNotMatch(request.query, /blockedBy|subIssues/);
+      }
+    }
+    assert.equal(requestsFor(seen, "ImportIssueBlockedBy").length, 0);
+  });
+});
+
+test("--include prs --include deps still fetches no PR blocker, because deps are refused", async () => {
+  await withGraphQL(repoWithPrs([], [prNode()]), async (base, seen) => {
+    await assert.rejects(
+      fetcherAt(base).fetchAll({ pullRequests: true, dependencies: true }),
+      (err) => {
+        assert.ok(err instanceof GitHubError);
+        assert.match(err.message, /dependencies/);
+        return true;
+      },
+    );
+    assert.equal(seen.length, 0, "the refusal lands before any request is sent");
   });
 });

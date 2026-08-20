@@ -646,10 +646,11 @@ falling back to the `x-ratelimit-reset` time); 401 → token rejected.
 #### GraphQL transport and issue listing — present, not yet wired
 
 The server engine moved its issue fetch to GraphQL (server story #47449) and the
-direct engine is following it one story at a time. Three pieces have landed: the
+direct engine is following it one story at a time. Four pieces have landed: the
 transport primitive (tracker story #57629), the `ImportIssues` listing with its
-REST-shape rename layer (#57630), and the per-issue overflow hydration that
-drains a connection one page could not hold (#57632). **No engine and no fetch
+REST-shape rename layer (#57630), the per-issue overflow hydration that drains a
+connection one page could not hold (#57632), and the `ImportPullRequests`
+listing with its own comment hydration (#57633). **No engine and no fetch
 stage calls any of them yet.** Every listing above is still the REST path, and a run's observable
 behaviour — request count, rows, errors — is unchanged by their presence.
 Switching `src/direct.js` onto GraphQL, which also makes `--token` mandatory, is
@@ -750,8 +751,8 @@ own expectations. The query is github.rs `issues_query` field for field:
 $first, after: $after, orderBy: {field: CREATED_AT, direction: DESC})`, and per
 node the author, the assignees, the labels, the milestone, the issue type, the
 comments and the sub-issues. The selection is built from shared parts, one actor
-selection and one comment selection, because a pull-request node (story #57633)
-and the `blockedBy` connection (story #259658) reuse them. `issueType` and
+selection and one comment selection, because the pull-request node below reuses
+them and the `blockedBy` connection (story #259658) will. `issueType` and
 `subIssues` are selected unconditionally: no degradation ladder, as above.
 
 The rename layer restates what GraphQL renamed: `url` → `html_url`, `createdAt`
@@ -849,8 +850,53 @@ page, which truncates the thread in silence — the loss this story exists to
 remove. A connection that is present and well formed but empty is an ordinary
 end of walk, and warns about nothing.
 
-Hydrating `blockedBy` is story #259658, and `ImportPullRequestComments` is
-#57633; neither connection exists on this transport yet.
+Hydrating `blockedBy` is story #259658; that connection does not exist on this
+transport yet.
+
+#### The `ImportPullRequests` listing
+
+GraphQL gives pull requests their own `repository.pullRequests` connection where
+REST's `/issues` interleaved them. **The connection is queried only under
+`--include prs`**: a default run sends no query that so much as names
+`pullRequests`, because github.rs skips `collect_pull_requests` entirely when the
+flag is off, and a test pins it. The query is github.rs `pull_requests_query`
+field for field — `rateLimit { remaining resetAt }` beside `repository`, then
+`pullRequests(first: $first, after: $after, orderBy: {field: CREATED_AT,
+direction: DESC})`, the same ordering the issues listing uses.
+
+The PR node is **a different selection, not a toggled subset** of the issue one:
+`number title body state mergedAt createdAt closedAt url`, the author, the
+assignees, the labels, the milestone and the comments. It carries **no
+`stateReason`, no `issueType`, no `subIssues` and no `blockedBy`** —
+`PullRequest` declares none of them. Per server story #163088 a pull request is
+never asked for dependencies **in any configuration**, so `--include prs
+--include deps` fetches no PR blocker and every PR-derived story imports with
+none.
+
+The rename layer emits the row shape REST's PR stubs had, so `src/mapping.js`
+folds, rejects and labels a PR unchanged. `state: MERGED` reads as **closed**,
+and `mergedAt` still becomes `merged_at` beside it: GraphQL renames one half of
+REST's pair, it does not replace it, and `merged_at` is what separates an
+`accepted` PR from a `rejected` one. `state_reason` and `type` are hard-nulled,
+as github.rs hard-nulls them. A PR contributes no sub-issue cross-links.
+
+PR conversation comments ride the PR node's own `comments` connection, and a
+thread past one page is hydrated through **`ImportPullRequestComments`**, never
+the issue operation. That query exists for a reason (server story #55748):
+`Repository.issue(number:)` resolves issues only, and its `NOT_FOUND` reads as
+"no such repository", which would abort the whole run. The walk is the issue
+walk in every other respect — the same fatal `NOT_FOUND`, the same fatal null
+node, the same `UNEXPECTED_SHAPE` on a malformed connection, the same
+warn-and-stop on an empty cursor — with one word different: a vanished PR
+reports `no pull request #12 node while paging its comments` (github.rs
+`CommentParent::noun`).
+
+The listings run as two connections, so the fetched rows come out **issues
+first, then pull requests**, where REST interleaved them by date. That changes
+**no written row**: `src/writer.js` sorts creates by `created_at`. Only the
+plan's and the report's listing order follows the fetch order, and it now
+matches the server engine, whose `fetch_issue_graph` extends its issue list with
+the PRs the same way.
 
 ### Default mapping profile (issues → stories)
 
