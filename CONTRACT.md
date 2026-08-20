@@ -781,13 +781,16 @@ engine's mapper needs it:
   the listing rebuilds it from the API base, the repo and the issue number.
 - **A warning when a connection could not be drained.** Hydration (below) reads
   the rest of an overflowing connection, so the ordinary overflow is silent.
-  What stays loud is a genuine shortfall: GitHub promised more rows and sent no
-  cursor to read them with, or a parent ran past the sub-issue page cap. Both
-  render as one aggregated stderr line, however many issues are short. The
-  server truncates both in silence.
+  What stays loud is a genuine shortfall, and four things cause one: GitHub
+  promised more rows and sent no cursor to read them with, a parent ran past the
+  sub-issue page cap, a parent's node stopped resolving mid-walk, or its
+  sub-issue cursor stopped advancing. All four render as one aggregated stderr
+  line, however many issues are short. The cap case carries its own wording,
+  because its cut is at 2000 children where the other three may lose one row.
+  The server truncates all four in silence.
 
 Pagination follows Relay cursors and refuses to drift. A cursor that stops
-advancing, or a walk past 50 000 pages, fails the fetch instead of looping or
+advancing, or a walk past 50 000 pages, fails a listing instead of looping or
 truncating quietly. A page that promises a successor without a cursor warns. An
 empty cursor counts as no cursor: sending it back only re-reads the same page.
 `totalCount` gives the fetch an exact `fetching X/Y` page count, where REST's
@@ -810,7 +813,12 @@ never hydrated, because nothing joins to it.
 An empty or absent `endCursor` beside `hasNextPage: true` is **no cursor at
 all**. That connection is not resumed — sending the empty cursor back only
 re-reads page 1 — so the fetch keeps what it has and warns. A cursor that stops
-advancing fails the fetch, as everywhere else on this transport.
+advancing fails the fetch everywhere else on this transport, but **not on the
+sub-issue walk**: github.rs runs no `Pager` there, so it re-reads the page, its
+`push_kid` drops the repeats, and the 20-page cap ends the walk with the import
+intact. That walk keeps what it read and warns instead, so it never fails an
+import the server completes. The rows match either way; this fetch only stops
+sooner and says so.
 
 The comment walk takes no low cap: it uses the same 50 000-page ceiling a
 listing does, as github.rs does. The sub-issue walk stops at **20 pages**, i.e.
@@ -820,14 +828,26 @@ path refuses the chain as a broken server, and this walk keeps what it read and
 warns. The rows stay identical to the server's — the same 2000-child truncation
 — and this engine is only louder about it.
 
-An issue whose node stops resolving mid-walk is treated as github.rs treats it.
-The comment walk **fails**, naming the issue and not the repository (`no issue
-#7 node while paging its comments — … re-running the import is safe`), because
-a page of comments it was promised has gone missing. The sub-issue walk
-**stops**, keeps the children it read, and warns, because a lost cross-link
-costs no row. A `NOT_FOUND` on a comment follow-up is renamed the same way: the
-listing already resolved the repository, so it cannot mean the repository is
-unreadable (github.rs `name_vanished_parent`).
+An issue whose node stops resolving mid-walk is treated as github.rs treats it,
+and GitHub answers with either of two shapes. On a **bare null node** the
+comment walk **fails**, naming the issue and not the repository (`no issue #7
+node while paging its comments — … re-running the import is safe`), because a
+page of comments it was promised has gone missing; the sub-issue walk **stops**,
+keeps the children it read, and warns, because a lost cross-link costs no row.
+On a **`NOT_FOUND` error** both walks **fail**, as both of github.rs's do. The
+listing already resolved the repository, so that error cannot mean the
+repository is unreadable: it is renamed to name the vanished issue and the
+connection being paged (github.rs `name_vanished_parent`, which the server
+applies to its comment walk alone). Only the wording is this engine's — the rows
+and the control flow are the server's.
+
+A follow-up whose connection is **absent, null, or not an object** fails the
+fetch as a malformed response (`GitHub returned an unexpected response shape
+(expected issue #7's comments)`). This engine is stricter than github.rs here:
+its `#[serde(default)]` on those connections reads an absent one as an empty
+page, which truncates the thread in silence — the loss this story exists to
+remove. A connection that is present and well formed but empty is an ordinary
+end of walk, and warns about nothing.
 
 Hydrating `blockedBy` is story #259658, and `ImportPullRequestComments` is
 #57633; neither connection exists on this transport yet.

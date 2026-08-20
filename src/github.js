@@ -20,7 +20,7 @@ const UNEXPECTED_PAYLOAD = "GitHub returned an unexpected payload (expected a JS
 
 // `Link` following is otherwise unbounded, and this stage runs once per parent:
 // 2000 sub-issues is far past any real hierarchy, so more means a broken server.
-const MAX_SUB_ISSUE_PAGES = 20;
+export const MAX_SUB_ISSUE_PAGES = 20;
 // The server importer's own release cap (github.rs MAX_PAGES), so no repo it
 // accepts is refused here. Exported so the bound is testable without guessing.
 export const MAX_RELEASE_PAGES = 200;

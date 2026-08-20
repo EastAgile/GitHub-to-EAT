@@ -327,11 +327,12 @@ function subIssueNumbers(node) {
  * node here means that issue moved or was deleted while the import was running.
  *
  * @param {string} number
+ * @param {string} kind the connection being paged, as a reader would say it
  * @returns {GitHubError}
  */
-function vanishedIssue(number) {
+function vanishedIssue(number, kind) {
   return new GitHubError(
-    `no issue #${number} node while paging its comments — it may have been deleted or moved ` +
+    `no issue #${number} node while paging its ${kind} — it may have been deleted or moved ` +
       "while the import was running; re-running the import is safe",
   );
 }
@@ -538,12 +539,12 @@ export class GitHubGraphQLFetcher {
       } catch (err) {
         // github.rs `name_vanished_parent`: the listing already resolved this repository,
         // so a NOT_FOUND here names a vanished issue, not an unreadable repo.
-        if (err instanceof RepoNotFoundError) throw vanishedIssue(number);
+        if (err instanceof RepoNotFoundError) throw vanishedIssue(number, "comments");
         throw err;
       }
       // The connection promised another page, so a missing node drops comments — say so
       // rather than truncating the thread in silence.
-      if (issue == null) throw vanishedIssue(number);
+      if (issue == null) throw vanishedIssue(number, "comments");
       const connection = issue.comments;
       if (connection === null || typeof connection !== "object") {
         throw new GitHubError(`${UNEXPECTED_SHAPE} (expected issue #${number}'s comments)`);
@@ -562,31 +563,42 @@ export class GitHubGraphQLFetcher {
    * @param {string} number
    * @param {string[]} kept the numbers the listing node already yielded
    * @param {string} cursor the listing node's resume cursor, "" when GitHub sent none
-   * @returns {Promise<boolean>} false when the hierarchy stayed short
+   * @returns {Promise<"drained" | "short" | "capped">} how the walk ended
    */
   async #hydrateSubIssues(number, kept, cursor) {
-    if (cursor === "") return false;
+    if (cursor === "") return "short";
     const pager = new Pager();
     pager.advance(cursor);
     for (;;) {
-      const issue = await this.#hydratePage(
-        "ImportIssueSubIssues",
-        issueSubIssuesQuery(),
-        number,
-        pager.after,
-      );
+      let issue;
+      try {
+        issue = await this.#hydratePage(
+          "ImportIssueSubIssues",
+          issueSubIssuesQuery(),
+          number,
+          pager.after,
+        );
+      } catch (err) {
+        // github.rs propagates this one, so it stays fatal; only the diagnosis is this
+        // engine's, because the listing already resolved the repository.
+        if (err instanceof RepoNotFoundError) throw vanishedIssue(number, "sub-issues");
+        throw err;
+      }
       // github.rs breaks on a vanished node here where its comment walk fails: a lost
-      // cross-link costs no row, and this stage never throws an imported repo away.
-      if (issue == null) return false;
+      // cross-link costs no row.
+      if (issue == null) return "short";
       const connection = issue.subIssues;
       if (connection === null || typeof connection !== "object") {
         throw new GitHubError(`${UNEXPECTED_SHAPE} (expected issue #${number}'s sub-issues)`);
       }
       pushKids(connectionNodes(connection), number, kept);
       const next = nextCursor(connection);
-      if (next === "") return false;
-      if (next !== null && pager.page >= MAX_SUB_ISSUE_PAGES) return false;
-      if (!pager.advance(next)) return true;
+      if (next === "") return "short";
+      if (next !== null && pager.page >= MAX_SUB_ISSUE_PAGES) return "capped";
+      // github.rs runs no Pager here: it re-reads, `push_kid` dedups and the cap ends the
+      // walk, so throwing would fail an import the server completes.
+      if (next === pager.after) return "short";
+      if (!pager.advance(next)) return "drained";
     }
   }
 
@@ -594,9 +606,10 @@ export class GitHubGraphQLFetcher {
    * Report a connection hydration could not drain, in one line however many issues did.
    *
    * @param {string} kind the connection's name, as a reader would say it
+   * @param {string} cause what stopped the walk, as the sentence's verb phrase
    * @param {string[]} numbers the issues whose connection stayed short
    */
-  #warnOverflow(kind, numbers) {
+  #warnOverflow(kind, cause, numbers) {
     if (!numbers.length) return;
     const named = numbers
       .slice(0, MAX_NAMED_OVERFLOWS)
@@ -604,9 +617,9 @@ export class GitHubGraphQLFetcher {
       .join(", ");
     const rest = numbers.length - MAX_NAMED_OVERFLOWS;
     this.#warn(
-      `warning: ${numbers.length} issue(s) carry more than ${PER_PAGE} ${kind} that this fetch ` +
-        `could not read: ${named}${rest > 0 ? `, and ${rest} more` : ""} — the rest of those ` +
-        `${kind} are not imported.\n`,
+      `warning: ${numbers.length} issue(s) ${cause}: ${named}` +
+        `${rest > 0 ? `, and ${rest} more` : ""} — the rest of those ${kind} are not ` +
+        "imported.\n",
     );
   }
 
@@ -650,6 +663,8 @@ export class GitHubGraphQLFetcher {
     const overflowedComments = [];
     /** @type {string[]} */
     const overflowedSubIssues = [];
+    /** @type {string[]} */
+    const cappedSubIssues = [];
     let unnumbered = 0;
     // Sequential, and only once the listing is complete: a wide hierarchy or a long thread
     // must not burst a page per issue into GitHub's secondary rate limit.
@@ -670,18 +685,21 @@ export class GitHubGraphQLFetcher {
           issueUrl,
           fetched.truncated.comments,
         );
-        fetched.comments.push(...rows);
+        // Spread would pass one argument per row, and a drained thread has no 100-row
+        // ceiling; past ~10^5 V8 throws a RangeError src/cli.js cannot format.
+        for (const row of rows) fetched.comments.push(row);
         if (!drained) overflowedComments.push(number);
       }
       if (fetched.truncated.subIssues !== null) {
-        const drained = await this.#hydrateSubIssues(
+        const outcome = await this.#hydrateSubIssues(
           number,
           fetched.subIssues,
           fetched.truncated.subIssues,
         );
-        if (!drained) overflowedSubIssues.push(number);
+        if (outcome === "capped") cappedSubIssues.push(number);
+        else if (outcome === "short") overflowedSubIssues.push(number);
       }
-      comments.push(...fetched.comments);
+      for (const row of fetched.comments) comments.push(row);
       if (fetched.subIssues.length) subIssues.set(number, fetched.subIssues);
     }
     if (unnumbered > 0) {
@@ -690,8 +708,22 @@ export class GitHubGraphQLFetcher {
           "comments and sub-issue cross-links are not imported.\n",
       );
     }
-    this.#warnOverflow("comments", overflowedComments);
-    this.#warnOverflow("sub-issues", overflowedSubIssues);
+    this.#warnOverflow(
+      "comments",
+      "have comments this fetch could not finish reading",
+      overflowedComments,
+    );
+    this.#warnOverflow(
+      "sub-issues",
+      "have sub-issues this fetch could not finish reading",
+      overflowedSubIssues,
+    );
+    this.#warnOverflow(
+      "sub-issues",
+      `carry more than ${MAX_SUB_ISSUE_PAGES * PER_PAGE} sub-issues, the most one parent's ` +
+        "hierarchy may read",
+      cappedSubIssues,
+    );
     return { issues, comments, labels, subIssues };
   }
 }
