@@ -1,9 +1,10 @@
 /**
- * The `ImportIssues` listing and the REST-shape rename layer (github.rs), whose rows keep
- * REST's field names so `src/mapping.js` maps either transport. Not wired yet: CONTRACT.md.
+ * The `ImportIssues` listing, the per-issue follow-ups that drain a connection one page could
+ * not hold, and the REST-shape rename layer (github.rs), whose rows keep REST's field names so
+ * `src/mapping.js` maps either transport. Not wired yet: CONTRACT.md.
  */
 
-import { GITHUB_API_BASE, GitHubError } from "./github.js";
+import { GITHUB_API_BASE, GitHubError, RepoNotFoundError } from "./github.js";
 import { GitHubGraphQLClient, UNEXPECTED_SHAPE } from "./github-graphql.js";
 
 const PER_PAGE = 100;
@@ -13,6 +14,12 @@ const PER_PAGE = 100;
  * fails the fetch: the server's old 200-page cap truncated an import in silence.
  */
 export const MAX_LISTING_PAGES = 50_000;
+
+/**
+ * Pages one parent's sub-issue walk may read, github.rs `MAX_SUB_ISSUE_PAGES` and the REST
+ * path's own bound: 2000 children is far past any real hierarchy. Exported so tests need no guess.
+ */
+export const MAX_SUB_ISSUE_PAGES = 20;
 
 // A repo-wide overflow would otherwise render one line per issue.
 const MAX_NAMED_OVERFLOWS = 10;
@@ -100,6 +107,37 @@ export function issuesQuery() {
     "repository(owner: $owner, name: $name) { " +
     "issues(first: $first, after: $after, orderBy: {field: CREATED_AT, direction: DESC}) { " +
     `totalCount pageInfo { hasNextPage endCursor } nodes { ${issueNodeSelection()} } } } }`
+  );
+}
+
+/**
+ * One issue's comments past the page its listing node carried (github.rs
+ * `issue_comments_query`). A follow-up buys no `rateLimit` field, as the server's does not.
+ *
+ * @returns {string}
+ */
+export function issueCommentsQuery() {
+  return (
+    "query ImportIssueComments($owner: String!, $name: String!, $number: Int!, " +
+    "$first: Int!, $after: String) { repository(owner: $owner, name: $name) { " +
+    "issue(number: $number) { comments(first: $first, after: $after) { " +
+    "pageInfo { hasNextPage endCursor } " +
+    `nodes { body createdAt author { ${ACTOR_SELECTION} } } } } } }`
+  );
+}
+
+/**
+ * One issue's sub-issues past the page its listing node carried (github.rs
+ * `issue_sub_issues_query`).
+ *
+ * @returns {string}
+ */
+export function issueSubIssuesQuery() {
+  return (
+    "query ImportIssueSubIssues($owner: String!, $name: String!, $number: Int!, " +
+    "$first: Int!, $after: String) { repository(owner: $owner, name: $name) { " +
+    "issue(number: $number) { subIssues(first: $first, after: $after) { " +
+    "pageInfo { hasNextPage endCursor } nodes { number } } } } }"
   );
 }
 
@@ -239,15 +277,15 @@ function issueRow(node) {
 }
 
 /**
- * One issue node's comments as REST's comment rows. `issue_url` has no GraphQL
- * counterpart — GraphQL nests comments under their issue — and mapping.js joins on it.
+ * One comment connection as REST's comment rows. `issue_url` has no GraphQL counterpart —
+ * GraphQL nests comments under their issue — and mapping.js joins on it.
  *
- * @param {any} node
+ * @param {any} connection one page of `comments`, from the listing node or a follow-up
  * @param {string} issueUrl
  * @returns {any[]}
  */
-function commentRows(node, issueUrl) {
-  return connectionNodes(node.comments)
+function commentRows(connection, issueUrl) {
+  return connectionNodes(connection)
     .map((comment) => ({
       body: String(comment.body ?? ""),
       created_at: comment.createdAt ?? null,
@@ -258,21 +296,46 @@ function commentRows(node, issueUrl) {
 }
 
 /**
- * One issue node's sub-issue numbers, in GitHub's own order, deduplicated and without
- * a self-reference — the shape `GitHubClient#fetchSubIssues` builds from REST.
+ * Append one page of sub-issue nodes to `kept`, in GitHub's own order (github.rs `push_kid`).
+ * The self-reference drop is this CLI's own, mirroring `GitHubClient#fetchSubIssues` because
+ * mapping.js and tests/parity.test.js are pinned to that REST shape.
+ *
+ * @param {any[]} rows
+ * @param {string | null} parent
+ * @param {string[]} kept
+ */
+function pushKids(rows, parent, kept) {
+  for (const row of rows) {
+    const kid = issueNumber(row.number);
+    if (kid !== null && kid !== parent && !kept.includes(kid)) kept.push(kid);
+  }
+}
+
+/**
+ * One issue node's sub-issue numbers — the shape `GitHubClient#fetchSubIssues` builds from REST.
  *
  * @param {any} node
  * @returns {string[]}
  */
 function subIssueNumbers(node) {
-  const parent = issueNumber(node.number);
   /** @type {string[]} */
   const kept = [];
-  for (const row of connectionNodes(node.subIssues)) {
-    const kid = issueNumber(row.number);
-    if (kid !== null && kid !== parent && !kept.includes(kid)) kept.push(kid);
-  }
+  pushKids(connectionNodes(node.subIssues), issueNumber(node.number), kept);
   return kept;
+}
+
+/**
+ * github.rs `unresolved_parent`: the listing already resolved the repository, so a missing
+ * node here means that issue moved or was deleted while the import was running.
+ *
+ * @param {string} number
+ * @returns {GitHubError}
+ */
+function vanishedIssue(number) {
+  return new GitHubError(
+    `no issue #${number} node while paging its comments — it may have been deleted or moved ` +
+      "while the import was running; re-running the import is safe",
+  );
 }
 
 /**
@@ -287,7 +350,7 @@ function subIssueNumbers(node) {
 export function fetchedIssue(node, issueUrl) {
   return {
     issue: issueRow(node),
-    comments: commentRows(node, issueUrl),
+    comments: commentRows(node.comments, issueUrl),
     subIssues: subIssueNumbers(node),
     truncated: { comments: nextCursor(node.comments), subIssues: nextCursor(node.subIssues) },
   };
@@ -430,10 +493,110 @@ export class GitHubGraphQLFetcher {
   }
 
   /**
-   * Report a connection that outgrew its single page, in one line however many issues did.
+   * One follow-up page for one issue, or null when GitHub no longer resolves that node.
+   *
+   * @param {string} operationName
+   * @param {string} query
+   * @param {string} number
+   * @param {string | null} after
+   * @returns {Promise<any>}
+   */
+  async #hydratePage(operationName, query, number, after) {
+    const data = await this.#client.query(operationName, query, {
+      owner: this.owner,
+      name: this.repo,
+      number: Number(number),
+      first: PER_PAGE,
+      after,
+    });
+    return data.repository?.issue ?? null;
+  }
+
+  /**
+   * One issue's comments past the page its listing node carried (github.rs `hydrate_comments`).
+   *
+   * @param {string} number
+   * @param {string} issueUrl
+   * @param {string} cursor the listing node's resume cursor, "" when GitHub sent none
+   * @returns {Promise<{ rows: any[], drained: boolean }>} `drained` false when rows are lost
+   */
+  async #hydrateComments(number, issueUrl, cursor) {
+    /** @type {any[]} */
+    const rows = [];
+    // Page 1 rode the listing node, so the walk starts from its cursor; "" is no cursor
+    // at all, and sending it back would only re-read that page.
+    if (cursor === "") return { rows, drained: false };
+    const pager = new Pager();
+    pager.advance(cursor);
+    for (;;) {
+      let issue;
+      try {
+        issue = await this.#hydratePage(
+          "ImportIssueComments",
+          issueCommentsQuery(),
+          number,
+          pager.after,
+        );
+      } catch (err) {
+        // github.rs `name_vanished_parent`: the listing already resolved this repository,
+        // so a NOT_FOUND here names a vanished issue, not an unreadable repo.
+        if (err instanceof RepoNotFoundError) throw vanishedIssue(number);
+        throw err;
+      }
+      // The connection promised another page, so a missing node drops comments — say so
+      // rather than truncating the thread in silence.
+      if (issue == null) throw vanishedIssue(number);
+      const connection = issue.comments;
+      if (connection === null || typeof connection !== "object") {
+        throw new GitHubError(`${UNEXPECTED_SHAPE} (expected issue #${number}'s comments)`);
+      }
+      rows.push(...commentRows(connection, issueUrl));
+      const next = nextCursor(connection);
+      if (next === "") return { rows, drained: false };
+      if (!pager.advance(next)) return { rows, drained: true };
+    }
+  }
+
+  /**
+   * One parent's sub-issues past the page its listing node carried, appended to `kept`
+   * (github.rs `hydrate_issue`).
+   *
+   * @param {string} number
+   * @param {string[]} kept the numbers the listing node already yielded
+   * @param {string} cursor the listing node's resume cursor, "" when GitHub sent none
+   * @returns {Promise<boolean>} false when the hierarchy stayed short
+   */
+  async #hydrateSubIssues(number, kept, cursor) {
+    if (cursor === "") return false;
+    const pager = new Pager();
+    pager.advance(cursor);
+    for (;;) {
+      const issue = await this.#hydratePage(
+        "ImportIssueSubIssues",
+        issueSubIssuesQuery(),
+        number,
+        pager.after,
+      );
+      // github.rs breaks on a vanished node here where its comment walk fails: a lost
+      // cross-link costs no row, and this stage never throws an imported repo away.
+      if (issue == null) return false;
+      const connection = issue.subIssues;
+      if (connection === null || typeof connection !== "object") {
+        throw new GitHubError(`${UNEXPECTED_SHAPE} (expected issue #${number}'s sub-issues)`);
+      }
+      pushKids(connectionNodes(connection), number, kept);
+      const next = nextCursor(connection);
+      if (next === "") return false;
+      if (next !== null && pager.page >= MAX_SUB_ISSUE_PAGES) return false;
+      if (!pager.advance(next)) return true;
+    }
+  }
+
+  /**
+   * Report a connection hydration could not drain, in one line however many issues did.
    *
    * @param {string} kind the connection's name, as a reader would say it
-   * @param {string[]} numbers the issues whose connection overflowed
+   * @param {string[]} numbers the issues whose connection stayed short
    */
   #warnOverflow(kind, numbers) {
     if (!numbers.length) return;
@@ -443,9 +606,9 @@ export class GitHubGraphQLFetcher {
       .join(", ");
     const rest = numbers.length - MAX_NAMED_OVERFLOWS;
     this.#warn(
-      `warning: ${numbers.length} issue(s) carry more than ${PER_PAGE} ${kind}: ${named}` +
-        `${rest > 0 ? `, and ${rest} more` : ""} — only the first ${PER_PAGE} ${kind} of each ` +
-        "are imported.\n",
+      `warning: ${numbers.length} issue(s) carry more than ${PER_PAGE} ${kind} that this fetch ` +
+        `could not read: ${named}${rest > 0 ? `, and ${rest} more` : ""} — the rest of those ` +
+        `${kind} are not imported.\n`,
     );
   }
 
@@ -490,9 +653,12 @@ export class GitHubGraphQLFetcher {
     /** @type {string[]} */
     const overflowedSubIssues = [];
     let unnumbered = 0;
+    // Sequential, and only once the listing is complete: a wide hierarchy or a long thread
+    // must not burst a page per issue into GitHub's secondary rate limit.
     for (const node of nodes) {
       const number = issueNumber(node.number);
-      const fetched = fetchedIssue(node, number === null ? "" : this.#issueUrl(number));
+      const issueUrl = number === null ? "" : this.#issueUrl(number);
+      const fetched = fetchedIssue(node, issueUrl);
       issues.push(fetched.issue);
       // The row still ships, as the REST path ships one whose number it could not read;
       // only the number-keyed stages skip it, because nothing can join to an unreadable id.
@@ -500,10 +666,25 @@ export class GitHubGraphQLFetcher {
         unnumbered += 1;
         continue;
       }
+      if (fetched.truncated.comments !== null) {
+        const { rows, drained } = await this.#hydrateComments(
+          number,
+          issueUrl,
+          fetched.truncated.comments,
+        );
+        fetched.comments.push(...rows);
+        if (!drained) overflowedComments.push(number);
+      }
+      if (fetched.truncated.subIssues !== null) {
+        const drained = await this.#hydrateSubIssues(
+          number,
+          fetched.subIssues,
+          fetched.truncated.subIssues,
+        );
+        if (!drained) overflowedSubIssues.push(number);
+      }
       comments.push(...fetched.comments);
       if (fetched.subIssues.length) subIssues.set(number, fetched.subIssues);
-      if (fetched.truncated.comments !== null) overflowedComments.push(number);
-      if (fetched.truncated.subIssues !== null) overflowedSubIssues.push(number);
     }
     if (unnumbered > 0) {
       this.#warn(

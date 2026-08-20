@@ -646,10 +646,11 @@ falling back to the `x-ratelimit-reset` time); 401 → token rejected.
 #### GraphQL transport and issue listing — present, not yet wired
 
 The server engine moved its issue fetch to GraphQL (server story #47449) and the
-direct engine is following it one story at a time. Two pieces have landed: the
-transport primitive (tracker story #57629) and the `ImportIssues` listing with
-its REST-shape rename layer (#57630). **No engine and no fetch stage calls
-either yet.** Every listing above is still the REST path, and a run's observable
+direct engine is following it one story at a time. Three pieces have landed: the
+transport primitive (tracker story #57629), the `ImportIssues` listing with its
+REST-shape rename layer (#57630), and the per-issue overflow hydration that
+drains a connection one page could not hold (#57632). **No engine and no fetch
+stage calls any of them yet.** Every listing above is still the REST path, and a run's observable
 behaviour — request count, rows, errors — is unchanged by their presence.
 Switching `src/direct.js` onto GraphQL, which also makes `--token` mandatory, is
 story #57634; deleting the REST issue path afterwards is story #57636.
@@ -778,10 +779,12 @@ engine's mapper needs it:
 - **`issue_url` on every comment row.** GraphQL nests comments under their
   issue, where REST listed them repo-wide. The mapper joins on `issue_url`, so
   the listing rebuilds it from the API base, the repo and the issue number.
-- **A warning when one page was not enough.** An issue with more than 100
-  comments, or more than 100 sub-issues, keeps its first 100 and says so on
-  stderr. Hydrating the rest is story #57632; until it lands, the shortfall is
-  loud rather than silent.
+- **A warning when a connection could not be drained.** Hydration (below) reads
+  the rest of an overflowing connection, so the ordinary overflow is silent.
+  What stays loud is a genuine shortfall: GitHub promised more rows and sent no
+  cursor to read them with, or a parent ran past the sub-issue page cap. Both
+  render as one aggregated stderr line, however many issues are short. The
+  server truncates both in silence.
 
 Pagination follows Relay cursors and refuses to drift. A cursor that stops
 advancing, or a walk past 50 000 pages, fails the fetch instead of looping or
@@ -792,6 +795,42 @@ empty cursor counts as no cursor: sending it back only re-reads the same page.
 dropped in the listing, as github.rs `comment_nodes_to_records` drops it; on the
 REST path that drop happens one layer down, in `src/mapping.js`, which still
 performs it for both.
+
+**Overflow hydration.** A `comments` or `subIssues` connection that reports
+`hasNextPage` is followed per issue, through github.rs's own two operations:
+`ImportIssueComments` and `ImportIssueSubIssues`, ported field for field.
+**Page 1 rode the listing node**, so each walk resumes from that page's cursor
+and never re-reads it — re-reading would double every row it already holds.
+Neither follow-up asks for `rateLimit`, matching github.rs. The follow-ups run
+**sequentially, and only once the listing is complete**, one issue at a time,
+for the reason the REST sub-issue stage runs that way: a wide hierarchy must not
+burst into GitHub's secondary rate limit. An issue whose `number` is unusable is
+never hydrated, because nothing joins to it.
+
+An empty or absent `endCursor` beside `hasNextPage: true` is **no cursor at
+all**. That connection is not resumed — sending the empty cursor back only
+re-reads page 1 — so the fetch keeps what it has and warns. A cursor that stops
+advancing fails the fetch, as everywhere else on this transport.
+
+The comment walk takes no low cap: it uses the same 50 000-page ceiling a
+listing does, as github.rs does. The sub-issue walk stops at **20 pages**, i.e.
+2000 children — the bound github.rs and the REST path above both use. The three
+paths part company on what happens there: github.rs breaks in silence, the REST
+path refuses the chain as a broken server, and this walk keeps what it read and
+warns. The rows stay identical to the server's — the same 2000-child truncation
+— and this engine is only louder about it.
+
+An issue whose node stops resolving mid-walk is treated as github.rs treats it.
+The comment walk **fails**, naming the issue and not the repository (`no issue
+#7 node while paging its comments — … re-running the import is safe`), because
+a page of comments it was promised has gone missing. The sub-issue walk
+**stops**, keeps the children it read, and warns, because a lost cross-link
+costs no row. A `NOT_FOUND` on a comment follow-up is renamed the same way: the
+listing already resolved the repository, so it cannot mean the repository is
+unreadable (github.rs `name_vanished_parent`).
+
+Hydrating `blockedBy` is story #259658, and `ImportPullRequestComments` is
+#57633; neither connection exists on this transport yet.
 
 ### Default mapping profile (issues → stories)
 
