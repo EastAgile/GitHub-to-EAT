@@ -1,17 +1,26 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import { test } from "node:test";
-import { GitHubAuthError, GitHubError, RepoNotFoundError } from "../src/github.js";
+import {
+  GitHubAuthError,
+  GitHubError,
+  RateLimitError,
+  MAX_SUB_ISSUE_PAGES as REST_MAX_SUB_ISSUE_PAGES,
+  RepoNotFoundError,
+} from "../src/github.js";
 import {
   ACTOR_SELECTION,
   commentsSelection,
   fetchedIssue,
   GHOST_USER,
   GitHubGraphQLFetcher,
+  issueCommentsQuery,
   issueNodeSelection,
+  issueSubIssuesQuery,
   issuesQuery,
   labelsQuery,
   MAX_LISTING_PAGES,
+  MAX_SUB_ISSUE_PAGES,
   nodeSelection,
   Pager,
   personFromActor,
@@ -47,8 +56,19 @@ async function withGraphQL(respond, fn) {
   const server = http.createServer(async (req, res) => {
     const request = JSON.parse(await readBody(req));
     seen.push(request);
+    /** @type {unknown} */
+    let payload;
+    try {
+      payload = respond(request);
+    } catch (err) {
+      // An unanswered request stalls the fetch to its 30s timeout, and the fixture guard that
+      // actually fired is buried. Hand the message back as the failure instead.
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ message: err instanceof Error ? err.message : String(err) }));
+      return;
+    }
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(respond(request)));
+    res.end(JSON.stringify(payload));
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(undefined)));
   const address = /** @type {import("node:net").AddressInfo} */ (server.address());
@@ -617,11 +637,11 @@ test("a spent point budget warns, because the listing asks for rateLimit", async
   assert.match(warned.buf, /point budget is nearly exhausted/);
 });
 
-test("an issue whose comments overflow one page warns rather than truncating in silence", async () => {
+test("an issue whose comments hydration cannot drain warns rather than truncating quietly", async () => {
   const warned = capture();
   const respond = oneRepo([
     issueNode({
-      comments: { pageInfo: { hasNextPage: true, endCursor: "c1" }, nodes: [] },
+      comments: { pageInfo: { hasNextPage: true, endCursor: null }, nodes: [] },
     }),
   ]);
   await withGraphQL(respond, async (base) => {
@@ -644,11 +664,11 @@ test("a listing that promises a page but sends no cursor warns instead of stoppi
   assert.match(warned.buf, /another page of issues but sent no cursor/);
 });
 
-test("an issue whose sub-issues overflow one page warns too", async () => {
+test("an issue whose sub-issues hydration cannot drain warns too", async () => {
   const warned = capture();
   const respond = oneRepo([
     issueNode({
-      subIssues: { pageInfo: { hasNextPage: true, endCursor: "s1" }, nodes: [{ number: 8 }] },
+      subIssues: { pageInfo: { hasNextPage: true, endCursor: null }, nodes: [{ number: 8 }] },
     }),
   ]);
   await withGraphQL(respond, async (base) => {
@@ -692,14 +712,14 @@ test("many overflowing issues are summarised in one line, not one line each", as
   const nodes = Array.from({ length: 12 }, (_, index) =>
     issueNode({
       number: index + 1,
-      comments: { pageInfo: { hasNextPage: true, endCursor: `c${index}` }, nodes: [] },
+      comments: { pageInfo: { hasNextPage: true, endCursor: null }, nodes: [] },
     }),
   );
   await withGraphQL(oneRepo(nodes), async (base) => {
     await fetcherAt(base, { warn: (message) => warnings.push(message) }).fetchAll();
   });
   assert.equal(warnings.length, 1, `one aggregated warning, got ${warnings.length}`);
-  assert.match(warnings[0], /12 issue\(s\) carry more than 100 comments/);
+  assert.match(warnings[0], /12 issue\(s\) have comments this fetch could not finish reading/);
   // The list of numbers is capped, so a repo-wide overflow cannot render one line per issue.
   assert.match(warnings[0], /and 2 more/);
   assert.equal((warnings[0].match(/#\d+/g) ?? []).length, 10);
@@ -707,7 +727,7 @@ test("many overflowing issues are summarised in one line, not one line each", as
 
 test("a fetcher built without a warn sink still reports an overflow, on stderr", async () => {
   const respond = oneRepo([
-    issueNode({ comments: { pageInfo: { hasNextPage: true, endCursor: "c1" }, nodes: [] } }),
+    issueNode({ comments: { pageInfo: { hasNextPage: true, endCursor: null }, nodes: [] } }),
   ]);
   /** @type {string[]} */
   const written = [];
@@ -811,5 +831,623 @@ test("fetchAll refuses the listings it does not implement yet, as a GitHubError"
         return true;
       });
     }
+  });
+});
+
+// --- overflow hydration (story #57632) ----------------------------------------
+
+/**
+ * @param {any[]} nodes
+ * @param {{ hasNextPage?: boolean, endCursor?: string | null }} [page]
+ */
+const conn = (nodes, { hasNextPage = false, endCursor = null } = {}) => ({
+  pageInfo: { hasNextPage, endCursor },
+  nodes,
+});
+
+/** @param {number} at */
+const commentNode = (at) => ({
+  body: `comment ${at}`,
+  createdAt: "2026-01-03T00:00:00Z",
+  author: null,
+});
+
+/**
+ * One issues page, one (empty) labels page, and `hydrate` for every follow-up query.
+ *
+ * @param {any[]} nodes
+ * @param {(request: any) => any} hydrate the `repository` a follow-up answers with
+ */
+const hydratingRepo = (nodes, hydrate) => (/** @type {any} */ request) => {
+  if (request.operationName === "ImportLabels") return labelsEnvelope([]);
+  if (request.operationName === "ImportIssues") return issuesEnvelope(nodes);
+  return { data: { repository: hydrate(request) } };
+};
+
+/**
+ * The follow-up answer a test that forbids a follow-up must never receive. Answering rather
+ * than throwing keeps a wrong request a failed assertion, not a fetch stalled to its timeout.
+ */
+const NEVER_ASKED = () => ({
+  issue: { comments: conn([commentNode(999)]), subIssues: conn([{ number: 999 }]) },
+});
+
+/**
+ * @param {any[]} seen
+ * @param {string} operationName
+ * @returns {any[]}
+ */
+const requestsFor = (seen, operationName) =>
+  seen.filter((request) => request.operationName === operationName);
+
+test("the ImportIssueComments query is github.rs issue_comments_query field for field", () => {
+  const query = issueCommentsQuery();
+  assert.equal(
+    query,
+    "query ImportIssueComments($owner: String!, $name: String!, $number: Int!, " +
+      "$first: Int!, $after: String) { repository(owner: $owner, name: $name) { " +
+      "issue(number: $number) { comments(first: $first, after: $after) { " +
+      "pageInfo { hasNextPage endCursor } " +
+      `nodes { body createdAt author { ${ACTOR_SELECTION} } } } } } }`,
+  );
+  // A follow-up buys no rateLimit field, exactly as github.rs's follow-ups do not.
+  assert.ok(!query.includes("rateLimit"));
+});
+
+test("the ImportIssueSubIssues query is github.rs issue_sub_issues_query field for field", () => {
+  assert.equal(
+    issueSubIssuesQuery(),
+    "query ImportIssueSubIssues($owner: String!, $name: String!, $number: Int!, " +
+      "$first: Int!, $after: String) { repository(owner: $owner, name: $name) { " +
+      "issue(number: $number) { subIssues(first: $first, after: $after) { " +
+      "pageInfo { hasNextPage endCursor } nodes { number } } } } }",
+  );
+});
+
+test("an issue past 100 comments resumes from its listing cursor, never re-reading page 1", async () => {
+  const warned = capture();
+  const respond = hydratingRepo(
+    [
+      issueNode({
+        comments: conn(
+          Array.from({ length: 100 }, (_, at) => commentNode(at)),
+          { hasNextPage: true, endCursor: "c1" },
+        ),
+      }),
+    ],
+    () => ({ issue: { comments: conn([commentNode(100), commentNode(101)]) } }),
+  );
+  await withGraphQL(respond, async (base, seen) => {
+    const { comments } = await fetcherAt(base, {
+      warn: (message) => void warned.write(message),
+    }).fetchAll();
+    assert.equal(comments.length, 102);
+    assert.deepEqual(
+      comments.map((row) => row.body),
+      Array.from({ length: 102 }, (_, at) => `comment ${at}`),
+    );
+    const followUps = requestsFor(seen, "ImportIssueComments");
+    assert.equal(followUps.length, 1);
+    // The cursor page 1 carried, not `null`: re-reading page 1 would double every row.
+    assert.deepEqual(followUps[0].variables, {
+      owner: "octocat",
+      name: "hello",
+      number: 7,
+      first: 100,
+      after: "c1",
+    });
+  });
+  assert.equal(warned.buf, "", "a drained connection lost nothing, so it warns about nothing");
+});
+
+test("the comment walk follows every page until the connection is drained", async () => {
+  /** @type {Record<string, any>} */
+  const pages = {
+    c1: conn([commentNode(1)], { hasNextPage: true, endCursor: "c2" }),
+    c2: conn([commentNode(2)], { hasNextPage: true, endCursor: "c3" }),
+    c3: conn([commentNode(3)]),
+  };
+  const respond = hydratingRepo(
+    [issueNode({ comments: conn([commentNode(0)], { hasNextPage: true, endCursor: "c1" }) })],
+    (/** @type {any} */ request) => ({ issue: { comments: pages[request.variables.after] } }),
+  );
+  await withGraphQL(respond, async (base, seen) => {
+    const { comments } = await fetcherAt(base).fetchAll();
+    assert.deepEqual(
+      comments.map((row) => row.body),
+      ["comment 0", "comment 1", "comment 2", "comment 3"],
+    );
+    assert.deepEqual(
+      requestsFor(seen, "ImportIssueComments").map((request) => request.variables.after),
+      ["c1", "c2", "c3"],
+    );
+  });
+});
+
+test("a hydrated comment carries its issue_url and drops a blank body, as page 1 does", async () => {
+  const respond = hydratingRepo(
+    [issueNode({ comments: conn([], { hasNextPage: true, endCursor: "c1" }) })],
+    () => ({
+      issue: {
+        comments: conn([
+          { body: "   ", createdAt: "2026-01-03T00:00:00Z", author: null },
+          { body: "kept", createdAt: "2026-01-04T00:00:00Z", author: null },
+        ]),
+      },
+    }),
+  );
+  await withGraphQL(respond, async (base) => {
+    const { comments } = await fetcherAt(base).fetchAll();
+    assert.equal(comments.length, 1);
+    assert.equal(comments[0].body, "kept");
+    assert.equal(comments[0].issue_url, `${base}/repos/octocat/hello/issues/7`);
+    assert.deepEqual(comments[0].user, { ...GHOST_USER });
+  });
+});
+
+test("a comment cursor that stops advancing fails the fetch instead of looping", async () => {
+  const respond = hydratingRepo(
+    [issueNode({ comments: conn([], { hasNextPage: true, endCursor: "c1" }) })],
+    () => ({ issue: { comments: conn([commentNode(1)], { hasNextPage: true, endCursor: "c1" }) } }),
+  );
+  await withGraphQL(respond, async (base) => {
+    await assert.rejects(fetcherAt(base).fetchAll(), (err) => {
+      assert.ok(err instanceof GitHubError);
+      assert.match(err.message, /cursor stopped advancing/);
+      return true;
+    });
+  });
+});
+
+test("a comment connection that promises more and sends no cursor warns without a request", async () => {
+  const warned = capture();
+  const respond = hydratingRepo(
+    [issueNode({ comments: conn([commentNode(0)], { hasNextPage: true, endCursor: "" }) })],
+    NEVER_ASKED,
+  );
+  await withGraphQL(respond, async (base, seen) => {
+    const { comments } = await fetcherAt(base, {
+      warn: (message) => void warned.write(message),
+    }).fetchAll();
+    assert.equal(comments.length, 1);
+    assert.equal(requestsFor(seen, "ImportIssueComments").length, 0);
+  });
+  // Asserted whole: "are not imported" is the claim, and a reworded warning that says the
+  // opposite would otherwise stay green.
+  assert.equal(
+    warned.buf,
+    "warning: 1 issue(s) have comments this fetch could not finish reading: #7 — the rest " +
+      "of those comments are not imported.\n",
+  );
+});
+
+test("a null endCursor is the same no-cursor state, and is never sent back either", async () => {
+  const warned = capture();
+  const respond = hydratingRepo(
+    [issueNode({ comments: conn([commentNode(0)], { hasNextPage: true, endCursor: null }) })],
+    NEVER_ASKED,
+  );
+  await withGraphQL(respond, async (base, seen) => {
+    await fetcherAt(base, { warn: (message) => void warned.write(message) }).fetchAll();
+    assert.equal(requestsFor(seen, "ImportIssueComments").length, 0);
+  });
+  assert.match(warned.buf, /#7/);
+});
+
+test("a mid-walk page that promises more and sends no cursor warns and keeps what it read", async () => {
+  const warned = capture();
+  const respond = hydratingRepo(
+    [issueNode({ comments: conn([commentNode(0)], { hasNextPage: true, endCursor: "c1" }) })],
+    () => ({ issue: { comments: conn([commentNode(1)], { hasNextPage: true, endCursor: "" }) } }),
+  );
+  await withGraphQL(respond, async (base, seen) => {
+    const { comments } = await fetcherAt(base, {
+      warn: (message) => void warned.write(message),
+    }).fetchAll();
+    assert.equal(comments.length, 2);
+    assert.equal(requestsFor(seen, "ImportIssueComments").length, 1);
+  });
+  assert.match(warned.buf, /#7/);
+});
+
+test("an issue that vanishes mid-thread fails by name, not as a missing repository", async () => {
+  const respond = hydratingRepo(
+    [issueNode({ comments: conn([], { hasNextPage: true, endCursor: "c1" }) })],
+    () => ({ issue: null }),
+  );
+  await withGraphQL(respond, async (base) => {
+    await assert.rejects(fetcherAt(base).fetchAll(), (err) => {
+      assert.ok(err instanceof GitHubError);
+      assert.ok(!(err instanceof RepoNotFoundError));
+      assert.match(err.message, /no issue #7 node while paging its comments/);
+      assert.match(err.message, /re-running the import is safe/);
+      return true;
+    });
+  });
+});
+
+test("a NOT_FOUND on a comment follow-up names the issue, not the repository", async () => {
+  const respond = (/** @type {any} */ request) => {
+    if (request.operationName === "ImportLabels") return labelsEnvelope([]);
+    if (request.operationName === "ImportIssues") {
+      return issuesEnvelope([
+        issueNode({ comments: conn([], { hasNextPage: true, endCursor: "c1" }) }),
+      ]);
+    }
+    // github.rs `name_vanished_parent`: the listing already resolved the repository.
+    return { data: { repository: { issue: null } }, errors: [{ type: "NOT_FOUND", message: "x" }] };
+  };
+  await withGraphQL(respond, async (base) => {
+    await assert.rejects(fetcherAt(base).fetchAll(), (err) => {
+      assert.ok(err instanceof GitHubError);
+      assert.ok(!(err instanceof RepoNotFoundError), "a vanished issue is not a missing repo");
+      assert.match(err.message, /no issue #7 node while paging its comments/);
+      return true;
+    });
+  });
+});
+
+test("a rate-limited comment follow-up keeps its own diagnosis, not the vanished-issue one", async () => {
+  const respond = (/** @type {any} */ request) => {
+    if (request.operationName === "ImportLabels") return labelsEnvelope([]);
+    if (request.operationName === "ImportIssues") {
+      return issuesEnvelope([
+        issueNode({ comments: conn([], { hasNextPage: true, endCursor: "c1" }) }),
+      ]);
+    }
+    // Only NOT_FOUND means a vanished issue; "re-running the import is safe" is false here.
+    return { data: { repository: null }, errors: [{ type: "RATE_LIMITED", message: "x" }] };
+  };
+  await withGraphQL(respond, async (base) => {
+    await assert.rejects(fetcherAt(base).fetchAll(), (err) => {
+      assert.ok(err instanceof RateLimitError);
+      assert.match(err.message, /point budget is exhausted/);
+      assert.ok(!/no issue #7 node/.test(err.message));
+      return true;
+    });
+  });
+});
+
+test("a comment follow-up whose comments connection is absent or unreadable fails loudly", async () => {
+  // github.rs's `#[serde(default)]` reads an absent connection as an empty page; this engine
+  // refuses it, because a silent `drained: true` is the tail loss this story removes.
+  for (const issue of [{}, { comments: "boom" }]) {
+    const respond = hydratingRepo(
+      [issueNode({ comments: conn([commentNode(0)], { hasNextPage: true, endCursor: "c1" }) })],
+      () => ({ issue }),
+    );
+    await withGraphQL(respond, async (base) => {
+      await assert.rejects(fetcherAt(base).fetchAll(), (err) => {
+        assert.ok(err instanceof GitHubError);
+        assert.match(err.message, /unexpected response shape/);
+        assert.match(err.message, /#7/);
+        return true;
+      });
+    });
+  }
+});
+
+test("a well-formed empty comment page is an ordinary end of walk, not a malformed one", async () => {
+  const warned = capture();
+  const respond = hydratingRepo(
+    [issueNode({ comments: conn([commentNode(0)], { hasNextPage: true, endCursor: "c1" }) })],
+    () => ({ issue: { comments: conn([]) } }),
+  );
+  await withGraphQL(respond, async (base) => {
+    const { comments } = await fetcherAt(base, {
+      warn: (message) => void warned.write(message),
+    }).fetchAll();
+    assert.equal(comments.length, 1);
+  });
+  assert.equal(warned.buf, "", "an empty last page drained the thread, so nothing is lost");
+});
+
+test("the comment walk takes no low cap: it drains a thread far past the sub-issue bound", async () => {
+  const warned = capture();
+  const pages = MAX_SUB_ISSUE_PAGES + 5;
+  let issued = 0;
+  const respond = hydratingRepo(
+    [issueNode({ comments: conn([commentNode(0)], { hasNextPage: true, endCursor: "c1" }) })],
+    () => {
+      issued += 1;
+      const page = issued >= pages ? {} : { hasNextPage: true, endCursor: `c${issued + 1}` };
+      return { issue: { comments: conn([commentNode(issued)], page) } };
+    },
+  );
+  await withGraphQL(respond, async (base, seen) => {
+    const { comments } = await fetcherAt(base, {
+      warn: (message) => void warned.write(message),
+    }).fetchAll();
+    assert.equal(comments.length, pages + 1);
+    assert.equal(requestsFor(seen, "ImportIssueComments").length, pages);
+  });
+  assert.equal(warned.buf, "", "github.rs caps no comment thread at 2000, and neither does this");
+});
+
+test("a parent past 100 sub-issues resumes from its listing cursor and drains the rest", async () => {
+  const warned = capture();
+  const respond = hydratingRepo(
+    [issueNode({ subIssues: conn([{ number: 8 }], { hasNextPage: true, endCursor: "s1" }) })],
+    () => ({ issue: { subIssues: conn([{ number: 9 }, { number: 10 }]) } }),
+  );
+  await withGraphQL(respond, async (base, seen) => {
+    const { subIssues } = await fetcherAt(base, {
+      warn: (message) => void warned.write(message),
+    }).fetchAll();
+    assert.deepEqual(subIssues.get("7"), ["8", "9", "10"]);
+    const followUps = requestsFor(seen, "ImportIssueSubIssues");
+    assert.equal(followUps.length, 1);
+    assert.deepEqual(followUps[0].variables, {
+      owner: "octocat",
+      name: "hello",
+      number: 7,
+      first: 100,
+      after: "s1",
+    });
+  });
+  assert.equal(warned.buf, "", "a drained hierarchy lost nothing, so it warns about nothing");
+});
+
+test("hydrated sub-issues keep the REST rules: the parent is dropped, repeats collapse", async () => {
+  const respond = hydratingRepo(
+    [issueNode({ subIssues: conn([{ number: 8 }], { hasNextPage: true, endCursor: "s1" }) })],
+    () => ({
+      issue: {
+        subIssues: conn([
+          { number: 8 },
+          { number: 7 },
+          { number: 0 },
+          { number: "9" },
+          { number: 9 },
+        ]),
+      },
+    }),
+  );
+  await withGraphQL(respond, async (base) => {
+    const { subIssues } = await fetcherAt(base).fetchAll();
+    assert.deepEqual(subIssues.get("7"), ["8", "9"]);
+  });
+});
+
+test("the sub-issue walk stops at the page cap and says the hierarchy is short", async () => {
+  const warned = capture();
+  let issued = 0;
+  const respond = hydratingRepo(
+    [issueNode({ subIssues: conn([{ number: 1000 }], { hasNextPage: true, endCursor: "s1" }) })],
+    () => {
+      issued += 1;
+      return {
+        issue: {
+          subIssues: conn([{ number: 1000 + issued }], {
+            hasNextPage: true,
+            endCursor: `s${issued + 1}`,
+          }),
+        },
+      };
+    },
+  );
+  await withGraphQL(respond, async (base, seen) => {
+    const { subIssues } = await fetcherAt(base, {
+      warn: (message) => void warned.write(message),
+    }).fetchAll();
+    // 20 pages total (github.rs MAX_SUB_ISSUE_PAGES): page 1 rode the listing node.
+    assert.equal(requestsFor(seen, "ImportIssueSubIssues").length, MAX_SUB_ISSUE_PAGES - 1);
+    assert.equal(subIssues.get("7")?.length, MAX_SUB_ISSUE_PAGES);
+  });
+  // Asserted whole: the sentence is this story's behaviour change, and the cap case must
+  // name its own 2000-child bound rather than the no-cursor line's 100.
+  assert.equal(
+    warned.buf,
+    "warning: 1 issue(s) carry more than 2000 sub-issues, the most one parent's hierarchy " +
+      "may read: #7 — the rest of those sub-issues are not imported.\n",
+  );
+});
+
+test("a stalled sub-issue cursor keeps what it read and warns, where the server completes", async () => {
+  const warned = capture();
+  const respond = hydratingRepo(
+    [issueNode({ subIssues: conn([], { hasNextPage: true, endCursor: "s1" }) })],
+    () => ({ issue: { subIssues: conn([{ number: 8 }], { hasNextPage: true, endCursor: "s1" }) } }),
+  );
+  await withGraphQL(respond, async (base, seen) => {
+    // github.rs `hydrate_issue` runs no Pager: it re-reads, `push_kid` dedups and the cap
+    // ends the walk, so throwing here would fail an import the server finishes.
+    const { subIssues } = await fetcherAt(base, {
+      warn: (message) => void warned.write(message),
+    }).fetchAll();
+    assert.deepEqual(subIssues.get("7"), ["8"]);
+    assert.equal(requestsFor(seen, "ImportIssueSubIssues").length, 1);
+  });
+  assert.match(warned.buf, /#7/);
+  assert.match(warned.buf, /sub-issues/);
+});
+
+test("a NOT_FOUND on a sub-issue follow-up names the issue, and still fails the fetch", async () => {
+  const respond = (/** @type {any} */ request) => {
+    if (request.operationName === "ImportLabels") return labelsEnvelope([]);
+    if (request.operationName === "ImportIssues") {
+      return issuesEnvelope([
+        issueNode({ subIssues: conn([{ number: 8 }], { hasNextPage: true, endCursor: "s1" }) }),
+      ]);
+    }
+    return { data: { repository: { issue: null } }, errors: [{ type: "NOT_FOUND", message: "x" }] };
+  };
+  await withGraphQL(respond, async (base) => {
+    // github.rs `hydrate_issue` propagates this error where a bare null node only breaks,
+    // so the rename buys a readable message and changes no row.
+    await assert.rejects(fetcherAt(base).fetchAll(), (err) => {
+      assert.ok(err instanceof GitHubError);
+      assert.ok(!(err instanceof RepoNotFoundError), "a vanished issue is not a missing repo");
+      assert.match(err.message, /no issue #7 node while paging its sub-issues/);
+      assert.match(err.message, /re-running the import is safe/);
+      return true;
+    });
+  });
+});
+
+test("a sub-issue connection that sends no cursor warns without a request", async () => {
+  const warned = capture();
+  const respond = hydratingRepo(
+    [issueNode({ subIssues: conn([{ number: 8 }], { hasNextPage: true, endCursor: "" }) })],
+    NEVER_ASKED,
+  );
+  await withGraphQL(respond, async (base, seen) => {
+    const { subIssues } = await fetcherAt(base, {
+      warn: (message) => void warned.write(message),
+    }).fetchAll();
+    assert.deepEqual(subIssues.get("7"), ["8"]);
+    assert.equal(requestsFor(seen, "ImportIssueSubIssues").length, 0);
+  });
+  assert.match(warned.buf, /sub-issues/);
+});
+
+test("a parent that vanishes mid-hierarchy keeps its read links and warns, never fails", async () => {
+  const warned = capture();
+  const respond = hydratingRepo(
+    [issueNode({ subIssues: conn([{ number: 8 }], { hasNextPage: true, endCursor: "s1" }) })],
+    () => ({ issue: null }),
+  );
+  await withGraphQL(respond, async (base) => {
+    // github.rs breaks here where its comment walk fails: a lost cross-link is not a lost row.
+    const { subIssues } = await fetcherAt(base, {
+      warn: (message) => void warned.write(message),
+    }).fetchAll();
+    assert.deepEqual(subIssues.get("7"), ["8"]);
+  });
+  assert.match(warned.buf, /sub-issues/);
+});
+
+test("a sub-issue follow-up whose subIssues connection is absent or unreadable fails loudly", async () => {
+  for (const issue of [{}, { subIssues: "boom" }]) {
+    const respond = hydratingRepo(
+      [issueNode({ subIssues: conn([{ number: 8 }], { hasNextPage: true, endCursor: "s1" }) })],
+      () => ({ issue }),
+    );
+    await withGraphQL(respond, async (base) => {
+      await assert.rejects(fetcherAt(base).fetchAll(), (err) => {
+        assert.ok(err instanceof GitHubError);
+        assert.match(err.message, /unexpected response shape/);
+        assert.match(err.message, /#7/);
+        return true;
+      });
+    });
+  }
+});
+
+test("a well-formed empty sub-issue page is an ordinary end of walk, not a malformed one", async () => {
+  const warned = capture();
+  const respond = hydratingRepo(
+    [issueNode({ subIssues: conn([{ number: 8 }], { hasNextPage: true, endCursor: "s1" }) })],
+    () => ({ issue: { subIssues: conn([]) } }),
+  );
+  await withGraphQL(respond, async (base) => {
+    const { subIssues } = await fetcherAt(base, {
+      warn: (message) => void warned.write(message),
+    }).fetchAll();
+    assert.deepEqual(subIssues.get("7"), ["8"]);
+  });
+  assert.equal(warned.buf, "", "an empty last page drained the hierarchy, so nothing is lost");
+});
+
+test("a hierarchy that drains exactly on the last allowed page warns about nothing", async () => {
+  const warned = capture();
+  let issued = 0;
+  const respond = hydratingRepo(
+    [issueNode({ subIssues: conn([{ number: 1000 }], { hasNextPage: true, endCursor: "s1" }) })],
+    () => {
+      issued += 1;
+      const last = issued >= MAX_SUB_ISSUE_PAGES - 1;
+      const page = last ? {} : { hasNextPage: true, endCursor: `s${issued + 1}` };
+      return { issue: { subIssues: conn([{ number: 1000 + issued }], page) } };
+    },
+  );
+  await withGraphQL(respond, async (base, seen) => {
+    const { subIssues } = await fetcherAt(base, {
+      warn: (message) => void warned.write(message),
+    }).fetchAll();
+    assert.equal(requestsFor(seen, "ImportIssueSubIssues").length, MAX_SUB_ISSUE_PAGES - 1);
+    assert.equal(subIssues.get("7")?.length, MAX_SUB_ISSUE_PAGES);
+  });
+  assert.equal(warned.buf, "", "page 20 closed the connection, so the cap cost nothing");
+});
+
+test("one issue overflowing both connections hydrates each of them, independently", async () => {
+  const warned = capture();
+  const respond = hydratingRepo(
+    [
+      issueNode({
+        comments: conn([commentNode(0)], { hasNextPage: true, endCursor: "c1" }),
+        subIssues: conn([{ number: 8 }], { hasNextPage: true, endCursor: "s1" }),
+      }),
+    ],
+    (/** @type {any} */ request) =>
+      request.operationName === "ImportIssueComments"
+        ? { issue: { comments: conn([commentNode(1)]) } }
+        : { issue: { subIssues: conn([{ number: 9 }]) } },
+  );
+  await withGraphQL(respond, async (base) => {
+    const { comments, subIssues } = await fetcherAt(base, {
+      warn: (message) => void warned.write(message),
+    }).fetchAll();
+    assert.deepEqual(
+      comments.map((row) => row.body),
+      ["comment 0", "comment 1"],
+    );
+    assert.deepEqual(subIssues.get("7"), ["8", "9"]);
+  });
+  assert.equal(warned.buf, "", "both connections drained, so neither is short");
+});
+
+test("the sub-issue page cap is 20, the number github.rs and the REST path both hold", () => {
+  // github.rs `const MAX_SUB_ISSUE_PAGES: u32 = 20` — three definitions must agree, and an
+  // assertion computed from the constant cannot see it drift.
+  assert.equal(MAX_SUB_ISSUE_PAGES, 20);
+  assert.equal(REST_MAX_SUB_ISSUE_PAGES, MAX_SUB_ISSUE_PAGES);
+});
+
+test("hydration runs after the listing, one issue at a time, never interleaved", async () => {
+  /** @type {Record<string, any>} */
+  const pages = {
+    a1: conn([commentNode(1)], { hasNextPage: true, endCursor: "a2" }),
+    a2: conn([commentNode(2)]),
+    b1: conn([commentNode(3)], { hasNextPage: true, endCursor: "b2" }),
+    b2: conn([commentNode(4)]),
+  };
+  const respond = hydratingRepo(
+    [
+      issueNode({ comments: conn([], { hasNextPage: true, endCursor: "a1" }) }),
+      issueNode({ number: 8, comments: conn([], { hasNextPage: true, endCursor: "b1" }) }),
+    ],
+    (/** @type {any} */ request) => ({ issue: { comments: pages[request.variables.after] } }),
+  );
+  await withGraphQL(respond, async (base, seen) => {
+    await fetcherAt(base).fetchAll();
+    const operations = seen.map((request) => request.operationName);
+    const listing = operations.lastIndexOf("ImportIssues");
+    const firstFollowUp = operations.indexOf("ImportIssueComments");
+    assert.ok(listing < firstFollowUp, "hydration may not start before the listing is complete");
+    // Interleaved would read a1, b1, a2, b2 — a concurrent burst into the secondary limit.
+    assert.deepEqual(
+      requestsFor(seen, "ImportIssueComments").map((request) => request.variables.after),
+      ["a1", "a2", "b1", "b2"],
+    );
+  });
+});
+
+test("an issue with no usable number is never hydrated, because nothing joins to it", async () => {
+  const respond = hydratingRepo(
+    [
+      issueNode({
+        number: "nope",
+        comments: conn([], { hasNextPage: true, endCursor: "c1" }),
+        subIssues: conn([], { hasNextPage: true, endCursor: "s1" }),
+      }),
+    ],
+    () => ({ issue: { comments: conn([]), subIssues: conn([]) } }),
+  );
+  await withGraphQL(respond, async (base, seen) => {
+    const { issues } = await fetcherAt(base, { warn: () => {} }).fetchAll();
+    assert.equal(issues.length, 1);
+    assert.equal(seen.length, 2);
   });
 });
