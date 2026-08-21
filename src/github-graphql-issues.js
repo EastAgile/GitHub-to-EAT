@@ -481,7 +481,9 @@ export function fetchedIssue(node, issueUrl, dependencies = false) {
   const connection = dependencies ? node.blockedBy : null;
   // Under the flag an absent or unreadable connection is the host refusing the selection
   // (github.rs `dependencies_lost`): the issue lost its whole listing, not a page of one.
-  const refused = dependencies && (connection === null || typeof connection !== "object");
+  const refused =
+    dependencies &&
+    (connection === null || typeof connection !== "object" || Array.isArray(connection));
   return {
     issue: issueRow(node),
     comments: commentRows(node.comments, issueUrl),
@@ -581,6 +583,9 @@ export class GitHubGraphQLFetcher {
   /** @type {string | null} what the host said when it refused the `blockedBy` selection */
   #dependencyRefusal = null;
 
+  /** @type {string | null} what stopped the first blocker walk that could not finish */
+  #dependencyTruncation = null;
+
   /**
    * @param {string} owner
    * @param {string} repo
@@ -646,11 +651,13 @@ export class GitHubGraphQLFetcher {
         enrichment,
       );
       const connection = connectionAt(data);
-      if (connection === null || typeof connection !== "object") {
+      if (connection === null || typeof connection !== "object" || Array.isArray(connection)) {
         throw new GitHubError(`${UNEXPECTED_SHAPE} (expected the repository's ${label})`);
       }
       onPage?.(connection, pager.page);
-      out.push(...connectionNodes(connection));
+      const nodes = connectionNodes(connection);
+      this.#checkUnreadableNodes(connection, nodes.length, label, pager.page);
+      out.push(...nodes);
       const cursor = nextCursor(connection);
       if (cursor === "") {
         this.#warn(
@@ -660,6 +667,32 @@ export class GitHubGraphQLFetcher {
       }
       if (!pager.advance(cursor === "" ? null : cursor)) return out;
     }
+  }
+
+  /**
+   * Fail, or warn, on the nodes {@link connectionNodes} dropped as unreadable. A page that
+   * lost every one is otherwise indistinguishable from a repository with nothing to list,
+   * and a scoped enrichment refusal can null whole nodes rather than the field.
+   *
+   * @param {any} connection
+   * @param {number} kept how many nodes survived the drop
+   * @param {string} label the listing's name
+   * @param {number} page
+   */
+  #checkUnreadableNodes(connection, kept, label, page) {
+    if (!Array.isArray(connection.nodes)) return;
+    const dropped = connection.nodes.length - kept;
+    if (dropped <= 0) return;
+    if (kept === 0) {
+      throw new GitHubError(
+        `${UNEXPECTED_SHAPE} (all ${dropped} of the repository's ${label} on page ${page} ` +
+          "came back unreadable)",
+      );
+    }
+    this.#warn(
+      `warning: ${dropped} of the ${connection.nodes.length} ${label} on page ${page} came ` +
+        "back unreadable and are not imported.\n",
+    );
   }
 
   /**
@@ -826,6 +859,9 @@ export class GitHubGraphQLFetcher {
       } catch (err) {
         if (!(err instanceof GitHubError)) throw err;
         if (err instanceof RateLimitError) this.#dependenciesRateLimited = true;
+        // One identical cause-less line for a revoked token, a vanished node and a
+        // transport flap sends the reader nowhere; github.rs carries a `cause` too.
+        this.#dependencyTruncation ??= err.message;
         // github.rs truncates on every one of these — an errored page, a NOT_FOUND, a
         // refusal — because a blocker is enrichment and an import never turns on one.
         return "short";
@@ -833,7 +869,9 @@ export class GitHubGraphQLFetcher {
       const connection = issue?.blockedBy;
       // Not the loud shape error the comment and sub-issue walks raise: failing here would
       // cost the whole import a listing the server would only have truncated.
-      if (connection === null || typeof connection !== "object") return "short";
+      if (connection === null || typeof connection !== "object" || Array.isArray(connection)) {
+        return "short";
+      }
       for (const row of connectionNodes(connection)) rows.push(row);
       const next = nextCursor(connection);
       if (next === "") return "short";
@@ -850,12 +888,14 @@ export class GitHubGraphQLFetcher {
    * @param {string} kind the connection's name, as a reader would say it
    * @param {string} cause what stopped the walk, as the sentence's verb phrase
    * @param {string[]} numbers the rows whose connection stayed short
+   * @param {string | null} [said] what the first failure reported, when one raised an error
    */
-  #warnOverflow(noun, kind, cause, numbers) {
+  #warnOverflow(noun, kind, cause, numbers, said = null) {
     if (!numbers.length) return;
+    const quoted = said === null || said === "" ? "" : ` (${said})`;
     this.#warn(
-      `warning: ${numbers.length} ${noun}(s) ${cause}: ${namedNumbers(numbers)} — the rest of ` +
-        `those ${kind} are not imported.\n`,
+      `warning: ${numbers.length} ${noun}(s) ${cause}: ${namedNumbers(numbers)}${quoted} — the ` +
+        `rest of those ${kind} are not imported.\n`,
     );
   }
 
@@ -895,7 +935,7 @@ export class GitHubGraphQLFetcher {
         );
       }
     }
-    const dependencies = options.dependencies === true;
+    const dependencies = Boolean(options.dependencies);
     const [nodes, labelNodes, prNodes] = await Promise.all([
       this.#walk(
         "ImportIssues",
@@ -903,8 +943,8 @@ export class GitHubGraphQLFetcher {
         "issues",
         (data) => data.repository?.issues,
         (connection, page) => this.#reportPage(connection, page),
-        // github.rs `classify_gql_errors`: a refusal GitHub scopes to `blockedBy` costs that
-        // enrichment and never the import, so it must not decide the listing query.
+        // A refusal GitHub scopes to `blockedBy` costs that enrichment and never the import.
+        // Only a permission refusal is absorbed here — CONTRACT.md, story #384801.
         dependencies
           ? {
               enrichmentField: BLOCKED_BY_FIELD,
@@ -1029,9 +1069,14 @@ export class GitHubGraphQLFetcher {
       for (const row of fetched.comments) comments.push(row);
     }
     if (unnumbered > 0) {
+      // Under the flag those rows lose their blockers too, and they are the one loss the
+      // refusal count cannot name: nothing joins a blocker to an unreadable number.
+      const lost = dependencies
+        ? "comments, sub-issue cross-links and dependencies"
+        : "comments and sub-issue cross-links";
       this.#warn(
         `warning: ${unnumbered} ${COMMENT_PARENT.issue.noun}(s) arrived without a usable issue ` +
-          "number — their comments and sub-issue cross-links are not imported.\n",
+          `number — their ${lost} are not imported.\n`,
       );
     }
     // Its own line and its own noun: a PR has no sub-issue connection, so the issue
@@ -1072,6 +1117,7 @@ export class GitHubGraphQLFetcher {
       "dependencies",
       "have dependencies this fetch could not finish reading",
       overflowedBlockedBy,
+      this.#dependencyTruncation,
     );
     this.#warnOverflow(
       COMMENT_PARENT.issue.noun,
