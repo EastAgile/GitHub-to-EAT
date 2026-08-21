@@ -15,6 +15,34 @@ test("returns the function's result", async () => {
   assert.ok(out.buf.includes("working"));
 });
 
+test("a message thunk is re-read on every redraw, so a stage can report its own progress", async () => {
+  const out = ttyCapture();
+  let page = 1;
+  await runWithProgress(
+    async () => {
+      // The spinner redraws on its own interval; the thunk must see the newer page.
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      page = 2;
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    },
+    () => `fetching page ${page}/2`,
+    { stream: out, intervalMs: 5 },
+  );
+  assert.match(out.buf, /fetching page 1\/2/);
+  assert.match(out.buf, /fetching page 2\/2/);
+  assert.match(out.buf, /fetching page 2\/2 — done in/);
+});
+
+test("a non-TTY stream prints the thunk's text once, exactly as a string message", async () => {
+  const out = capture();
+  await runWithProgress(
+    () => 1,
+    () => "fetching o/r from GitHub",
+    { stream: out },
+  );
+  assert.equal(out.buf, "fetching o/r from GitHub...\n");
+});
+
 test("propagates errors", async () => {
   const out = capture();
   class Boom extends Error {}

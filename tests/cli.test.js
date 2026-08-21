@@ -9,6 +9,7 @@ import { runDirect as realRunDirect } from "../src/direct.js";
 import { GitHubClient, GitHubError } from "../src/github.js";
 import { MAPPINGS } from "../src/mappings.js";
 import { makeState, startMockServer } from "../src/mockserver.js";
+import { preflight as realPreflight } from "../src/preflight.js";
 import { VERSION } from "../src/version.js";
 import { capture, inTempDir, withEnv } from "./helpers.js";
 
@@ -323,19 +324,22 @@ test("--engine direct dispatches to the direct engine, not the server importer",
       const out = capture();
       const server = [];
       const direct = [];
-      const code = await main(["--project", "91", "--repo", "o/r", "--engine", "direct", "-y"], {
-        stdout: out,
-        stderr: capture(),
-        preflight: async () => preflightResult(),
-        runImport: async () => {
-          server.push(1);
-          return outcome();
+      const code = await main(
+        ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--engine", "direct", "-y"],
+        {
+          stdout: out,
+          stderr: capture(),
+          preflight: async () => preflightResult(),
+          runImport: async () => {
+            server.push(1);
+            return outcome();
+          },
+          runDirect: async () => {
+            direct.push(1);
+            return outcome({ importedStories: 3 });
+          },
         },
-        runDirect: async () => {
-          direct.push(1);
-          return outcome({ importedStories: 3 });
-        },
-      });
+      );
       assert.equal(code, 0);
       assert.equal(direct.length, 1);
       assert.equal(server.length, 0);
@@ -348,12 +352,15 @@ test("--engine direct names the active engine in the legend header", async () =>
   await inTempDir(() =>
     withEnv({ EAT_AGENT_KEY: "key" }, async () => {
       const out = capture();
-      const code = await main(["--project", "91", "--repo", "o/r", "--engine", "direct", "-y"], {
-        stdout: out,
-        stderr: capture(),
-        preflight: async () => preflightResult(),
-        runDirect: async () => outcome(),
-      });
+      const code = await main(
+        ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--engine", "direct", "-y"],
+        {
+          stdout: out,
+          stderr: capture(),
+          preflight: async () => preflightResult(),
+          runDirect: async () => outcome(),
+        },
+      );
       assert.equal(code, 0);
       assert.ok(out.buf.includes("[engine: direct]"));
     }),
@@ -366,6 +373,8 @@ test("--engine direct accepts every --include type the registry offers", async (
       const err = capture();
       const code = await main(
         [
+          "--token",
+          "ghp_test",
           ...["--project", "91", "--repo", "o/r", "--engine", "direct", "--dry-run"],
           ...["--include", "issues,prs,milestones,releases"],
         ],
@@ -389,7 +398,17 @@ test("--engine direct with --dry-run renders the same plan block as the server p
       const dryRuns = [];
       const asked = [];
       const code = await main(
-        ["--project", "91", "--repo", "o/r", "--engine", "direct", "--dry-run"],
+        [
+          "--token",
+          "ghp_test",
+          "--project",
+          "91",
+          "--repo",
+          "o/r",
+          "--engine",
+          "direct",
+          "--dry-run",
+        ],
         {
           stdout: out,
           stderr: capture(),
@@ -422,16 +441,19 @@ test("the direct engine prompts for confirmation like the server engine", async 
     withEnv({ EAT_AGENT_KEY: "key" }, async () => {
       const err = capture();
       const direct = [];
-      const code = await main(["--project", "91", "--repo", "o/r", "--engine", "direct"], {
-        stdout: capture(),
-        stderr: err,
-        preflight: async () => preflightResult(),
-        runDirect: async () => {
-          direct.push(1);
-          return outcome();
+      const code = await main(
+        ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--engine", "direct"],
+        {
+          stdout: capture(),
+          stderr: err,
+          preflight: async () => preflightResult(),
+          runDirect: async () => {
+            direct.push(1);
+            return outcome();
+          },
+          confirm: async () => false,
         },
-        confirm: async () => false,
-      });
+      );
       assert.equal(code, 1);
       assert.equal(direct.length, 0);
       assert.ok(err.buf.includes("Aborted"));
@@ -444,16 +466,19 @@ test("accepting the prompt runs the direct import", async () => {
     withEnv({ EAT_AGENT_KEY: "key" }, async () => {
       const out = capture();
       const direct = [];
-      const code = await main(["--project", "91", "--repo", "o/r", "--engine", "direct"], {
-        stdout: out,
-        stderr: capture(),
-        preflight: async () => preflightResult(),
-        runDirect: async () => {
-          direct.push(1);
-          return outcome({ importedStories: 4 });
+      const code = await main(
+        ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--engine", "direct"],
+        {
+          stdout: out,
+          stderr: capture(),
+          preflight: async () => preflightResult(),
+          runDirect: async () => {
+            direct.push(1);
+            return outcome({ importedStories: 4 });
+          },
+          confirm: async () => true,
         },
-        confirm: async () => true,
-      });
+      );
       assert.equal(code, 0);
       assert.equal(direct.length, 1);
       assert.ok(out.buf.includes("Imported 4"));
@@ -465,12 +490,15 @@ test("the direct engine's placeholder owners render through the shared report pa
   await inTempDir(() =>
     withEnv({ EAT_AGENT_KEY: "key" }, async () => {
       const out = capture();
-      const code = await main(["--project", "91", "--repo", "o/r", "--engine", "direct", "-y"], {
-        stdout: out,
-        stderr: capture(),
-        preflight: async () => preflightResult(),
-        runDirect: async () => outcome({ externalMembersCreated: ["alice", "bob"] }),
-      });
+      const code = await main(
+        ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--engine", "direct", "-y"],
+        {
+          stdout: out,
+          stderr: capture(),
+          preflight: async () => preflightResult(),
+          runDirect: async () => outcome({ externalMembersCreated: ["alice", "bob"] }),
+        },
+      );
       assert.equal(code, 0);
       assert.ok(out.buf.includes("note: 2 placeholder owner(s) created: @alice, @bob"), out.buf);
     }),
@@ -481,14 +509,17 @@ test("a GitHub failure in the direct engine maps to a clean exit 1", async () =>
   await inTempDir(() =>
     withEnv({ EAT_AGENT_KEY: "key" }, async () => {
       const err = capture();
-      const code = await main(["--project", "91", "--repo", "o/r", "--engine", "direct", "-y"], {
-        stdout: capture(),
-        stderr: err,
-        preflight: async () => preflightResult(),
-        runDirect: async () => {
-          throw new GitHubError("GitHub request failed (404): repo not found");
+      const code = await main(
+        ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--engine", "direct", "-y"],
+        {
+          stdout: capture(),
+          stderr: err,
+          preflight: async () => preflightResult(),
+          runDirect: async () => {
+            throw new GitHubError("GitHub request failed (404): repo not found");
+          },
         },
-      });
+      );
       assert.equal(code, 1);
       assert.ok(err.buf.includes("error: GitHub request failed (404)"));
     }),
@@ -508,16 +539,19 @@ test("a 200 non-JSON GitHub body exits 1 with error: on stderr, not a stack trac
       // only the GitHub failure keeps this test offline today.
       withEnv({ EAT_AGENT_KEY: "key", EAT_API_BASE: "http://127.0.0.1:9/api/v1" }, async () => {
         const err = capture();
-        const code = await main(["--project", "91", "--repo", "o/r", "--engine", "direct", "-y"], {
-          stdout: capture(),
-          stderr: err,
-          preflight: async () => preflightResult(),
-          runDirect: (client, project, owner, repo, opts) =>
-            realRunDirect(client, project, owner, repo, {
-              ...opts,
-              github: new GitHubClient(owner, repo, { apiBase: `http://127.0.0.1:${port}` }),
-            }),
-        });
+        const code = await main(
+          ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--engine", "direct", "-y"],
+          {
+            stdout: capture(),
+            stderr: err,
+            preflight: async () => preflightResult(),
+            runDirect: (client, project, owner, repo, opts) =>
+              realRunDirect(client, project, owner, repo, {
+                ...opts,
+                github: new GitHubClient(owner, repo, { apiBase: `http://127.0.0.1:${port}` }),
+              }),
+          },
+        );
         assert.equal(code, 1);
         assert.match(err.buf, /error: .*expected a JSON array/);
         assert.doesNotMatch(err.buf, /\n\s+at /);
@@ -556,22 +590,28 @@ test("--engine server --customize is a usage error naming the conflict", async (
 
 test("--customize with non-TTY stdin is a usage error", async () => {
   const err = capture();
-  const code = await main(["--project", "91", "--repo", "o/r", "--customize"], {
-    stdout: ttyCapture(),
-    stderr: err,
-    stdin: { isTTY: false },
-  });
+  const code = await main(
+    ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--customize"],
+    {
+      stdout: ttyCapture(),
+      stderr: err,
+      stdin: { isTTY: false },
+    },
+  );
   assert.equal(code, 2);
   assert.ok(err.buf.includes("interactive terminal"));
 });
 
 test("--customize with non-TTY stdout is a usage error", async () => {
   const err = capture();
-  const code = await main(["--project", "91", "--repo", "o/r", "--customize"], {
-    stdout: capture(),
-    stderr: err,
-    stdin: { isTTY: true },
-  });
+  const code = await main(
+    ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--customize"],
+    {
+      stdout: capture(),
+      stderr: err,
+      stdin: { isTTY: true },
+    },
+  );
   assert.equal(code, 2);
   assert.ok(err.buf.includes("interactive terminal"));
 });
@@ -603,26 +643,29 @@ test("--customize implies the direct engine and names it in the legend", async (
       const out = ttyCapture();
       const server = [];
       const direct = [];
-      const code = await main(["--project", "91", "--repo", "o/r", "--customize", "-y"], {
-        stdout: out,
-        stderr: capture(),
-        stdin: { isTTY: true },
-        preflight: async () => preflightResult(),
-        runImport: async () => {
-          server.push(1);
-          return outcome();
+      const code = await main(
+        ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--customize", "-y"],
+        {
+          stdout: out,
+          stderr: capture(),
+          stdin: { isTTY: true },
+          preflight: async () => preflightResult(),
+          runImport: async () => {
+            server.push(1);
+            return outcome();
+          },
+          // #31908 moved the customized legend after the wizard, into runDirect's
+          // announce hook, so the stub must drive it to render the legend.
+          runDirect: async (_client, _project, _owner, _repo, opts) => {
+            direct.push(1);
+            await opts.announce?.(
+              { issues: [], comments: [], labels: [] },
+              { states: "all", milestones: null, storyType: "infer", comments: true, tasks: true },
+            );
+            return outcome({ importedStories: 3 });
+          },
         },
-        // #31908 moved the customized legend after the wizard, into runDirect's
-        // announce hook, so the stub must drive it to render the legend.
-        runDirect: async (_client, _project, _owner, _repo, opts) => {
-          direct.push(1);
-          await opts.announce?.(
-            { issues: [], comments: [], labels: [] },
-            { states: "all", milestones: null, storyType: "infer", comments: true, tasks: true },
-          );
-          return outcome({ importedStories: 3 });
-        },
-      });
+      );
       assert.equal(code, 0);
       assert.equal(direct.length, 1);
       assert.equal(server.length, 0);
@@ -635,7 +678,18 @@ test("--engine direct --customize is accepted, not a conflict", async () => {
   await inTempDir(() =>
     withEnv({ EAT_AGENT_KEY: "key" }, async () => {
       const code = await main(
-        ["--project", "91", "--repo", "o/r", "--engine", "direct", "--customize", "-y"],
+        [
+          "--token",
+          "ghp_test",
+          "--project",
+          "91",
+          "--repo",
+          "o/r",
+          "--engine",
+          "direct",
+          "--customize",
+          "-y",
+        ],
         {
           stdout: ttyCapture(),
           stderr: capture(),
@@ -654,16 +708,19 @@ test("--customize threads a wizard seam (not a fixed customization) into the dir
     withEnv({ EAT_AGENT_KEY: "key" }, async () => {
       /** @type {any} */
       let seen = null;
-      const code = await main(["--project", "91", "--repo", "o/r", "--customize", "-y"], {
-        stdout: ttyCapture(),
-        stderr: capture(),
-        stdin: { isTTY: true },
-        preflight: async () => preflightResult(),
-        runDirect: async (_client, _project, _owner, _repo, opts) => {
-          seen = opts;
-          return outcome();
+      const code = await main(
+        ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--customize", "-y"],
+        {
+          stdout: ttyCapture(),
+          stderr: capture(),
+          stdin: { isTTY: true },
+          preflight: async () => preflightResult(),
+          runDirect: async (_client, _project, _owner, _repo, opts) => {
+            seen = opts;
+            return outcome();
+          },
         },
-      });
+      );
       assert.equal(code, 0);
       assert.equal(typeof seen.customize, "function");
       assert.equal(seen.customization, undefined);
@@ -750,8 +807,8 @@ test("--customize output is byte-identical to --engine direct alone (mockserver)
   };
 
   const base = ["--project", "91", "--repo", "o/r", "-y"];
-  const plain = await run([...base, "--engine", "direct"]);
-  const customized = await run([...base, "--customize"]);
+  const plain = await run(["--token", "ghp_test", ...base, "--engine", "direct"]);
+  const customized = await run(["--token", "ghp_test", ...base, "--customize"]);
   assert.equal(plain.code, 0);
   assert.equal(customized.code, 0);
   assert.equal(plain.rows.length, 2);
@@ -772,16 +829,19 @@ test("EOF mid-wizard aborts --customize with exit 1 and nothing written (mockser
         { EAT_AGENT_KEY: "key", EAT_API_BASE: mock.baseUrl, EAT_APP_BASE: "https://eat.example" },
         async () => {
           const err = capture();
-          const code = await main(["--project", "91", "--repo", "o/r", "--customize", "-y"], {
-            stdout: ttyCapture(),
-            stderr: err,
-            stdin: scriptedStdin([]), // EOF at the first question
-            runDirect: (client, project, owner, repo, opts) =>
-              realRunDirect(client, project, owner, repo, {
-                ...opts,
-                github: { fetchAll: async () => fetched },
-              }),
-          });
+          const code = await main(
+            ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--customize", "-y"],
+            {
+              stdout: ttyCapture(),
+              stderr: err,
+              stdin: scriptedStdin([]), // EOF at the first question
+              runDirect: (client, project, owner, repo, opts) =>
+                realRunDirect(client, project, owner, repo, {
+                  ...opts,
+                  github: { fetchAll: async () => fetched },
+                }),
+            },
+          );
           assert.equal(code, 1);
           assert.equal((mock.state.stories[91] ?? []).length, 0);
           assert.ok(err.buf.includes("Aborted"));
@@ -820,20 +880,23 @@ test("--customize --yes runs the wizard and skips the [y/N] confirm (mockserver)
           const asked = [];
           // No milestones on these issues, so the wizard asks four questions:
           // states → "open only", story type default, comments off, tasks default.
-          const code = await main(["--project", "91", "--repo", "o/r", "--customize", "-y"], {
-            stdout: out,
-            stderr: capture(),
-            stdin: scriptedStdin(["2", "", "n", ""]),
-            confirm: async (q) => {
-              asked.push(q);
-              return false;
+          const code = await main(
+            ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--customize", "-y"],
+            {
+              stdout: out,
+              stderr: capture(),
+              stdin: scriptedStdin(["2", "", "n", ""]),
+              confirm: async (q) => {
+                asked.push(q);
+                return false;
+              },
+              runDirect: (client, project, owner, repo, opts) =>
+                realRunDirect(client, project, owner, repo, {
+                  ...opts,
+                  github: { fetchAll: async () => fetched },
+                }),
             },
-            runDirect: (client, project, owner, repo, opts) =>
-              realRunDirect(client, project, owner, repo, {
-                ...opts,
-                github: { fetchAll: async () => fetched },
-              }),
-          });
+          );
           assert.equal(code, 0);
           assert.equal(asked.length, 0); // --yes: the [y/N] confirm is skipped
           // The legend reflects the wizard's non-default answers (rendered after it).
@@ -866,23 +929,28 @@ test("--customize confirms after the wizard; declining writes nothing (mockserve
         async () => {
           const out = ttyCapture();
           const err = capture();
-          const code = await main(["--project", "91", "--repo", "o/r", "--customize"], {
-            stdout: out,
-            stderr: err,
-            stdin: scriptedStdin(["", "", "", ""]), // all-default answers
-            confirm: async () => {
-              // The confirm runs after the wizard: the customized legend is already on stdout.
-              assert.ok(
-                out.buf.includes("Import mapping (GitHub → East Agile Tracker) [engine: direct]:"),
-              );
-              return false;
+          const code = await main(
+            ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--customize"],
+            {
+              stdout: out,
+              stderr: err,
+              stdin: scriptedStdin(["", "", "", ""]), // all-default answers
+              confirm: async () => {
+                // The confirm runs after the wizard: the customized legend is already on stdout.
+                assert.ok(
+                  out.buf.includes(
+                    "Import mapping (GitHub → East Agile Tracker) [engine: direct]:",
+                  ),
+                );
+                return false;
+              },
+              runDirect: (client, project, owner, repo, opts) =>
+                realRunDirect(client, project, owner, repo, {
+                  ...opts,
+                  github: { fetchAll: async () => fetched },
+                }),
             },
-            runDirect: (client, project, owner, repo, opts) =>
-              realRunDirect(client, project, owner, repo, {
-                ...opts,
-                github: { fetchAll: async () => fetched },
-              }),
-          });
+          );
           assert.equal(code, 1);
           assert.equal((mock.state.stories[91] ?? []).length, 0);
           assert.ok(err.buf.includes("Aborted"));
@@ -923,7 +991,7 @@ test("--customize --dry-run runs the wizard, prints the plan, and writes nothing
           const asked = [];
           // states → "open only", then defaults; no milestones, so four questions.
           const code = await main(
-            ["--project", "91", "--repo", "o/r", "--customize", "--dry-run"],
+            ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--customize", "--dry-run"],
             {
               stdout: out,
               stderr: capture(),
@@ -1046,19 +1114,22 @@ test("a customization flag implies the direct engine", async () => {
       const out = capture();
       const server = [];
       const direct = [];
-      const code = await main(["--project", "91", "--repo", "o/r", "--states", "open", "-y"], {
-        stdout: out,
-        stderr: capture(),
-        preflight: async () => preflightResult(),
-        runImport: async () => {
-          server.push(1);
-          return outcome();
+      const code = await main(
+        ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--states", "open", "-y"],
+        {
+          stdout: out,
+          stderr: capture(),
+          preflight: async () => preflightResult(),
+          runImport: async () => {
+            server.push(1);
+            return outcome();
+          },
+          runDirect: async () => {
+            direct.push(1);
+            return outcome({ importedStories: 1 });
+          },
         },
-        runDirect: async () => {
-          direct.push(1);
-          return outcome({ importedStories: 1 });
-        },
-      });
+      );
       assert.equal(code, 0);
       assert.equal(direct.length, 1);
       assert.equal(server.length, 0);
@@ -1074,6 +1145,8 @@ test("customization flags thread a fixed customization, not a wizard, into the p
       let seen = null;
       const code = await main(
         [
+          "--token",
+          "ghp_test",
           ...["--project", "91", "--repo", "o/r", "-y"],
           ...["--states", "closed", "--milestones", "v1.0,v2.0", "--story-type", "chore"],
           ...["--no-comments", "--no-tasks"],
@@ -1117,6 +1190,8 @@ test("--milestones repeats: each occurrence adds titles to one allowlist", async
       let seen = null;
       const code = await main(
         [
+          "--token",
+          "ghp_test",
           ...["--project", "91", "--repo", "o/r", "-y"],
           ...["--milestones", "v1.0,v2.0", "--milestones", "v3.0"],
         ],
@@ -1138,6 +1213,8 @@ test("--milestones repeats: each occurrence adds titles to one allowlist", async
 
 test("a --milestones typo surfaces the warning through main, not just runDirect", async () => {
   const run = await runAgainstMock([
+    "--token",
+    "ghp_test",
     ...["--project", "91", "--repo", "o/r", "-y"],
     ...["--milestones", "v9.9"],
   ]);
@@ -1148,10 +1225,13 @@ test("a --milestones typo surfaces the warning through main, not just runDirect"
 
 test("--states sideways is a usage error naming the flag and its allowed values", async () => {
   const err = capture();
-  const code = await main(["--project", "91", "--repo", "o/r", "--states", "sideways"], {
-    stdout: capture(),
-    stderr: err,
-  });
+  const code = await main(
+    ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--states", "sideways"],
+    {
+      stdout: capture(),
+      stderr: err,
+    },
+  );
   assert.equal(code, 2);
   assert.ok(err.buf.includes("--states"));
   assert.ok(err.buf.includes("sideways"));
@@ -1160,10 +1240,13 @@ test("--states sideways is a usage error naming the flag and its allowed values"
 
 test("--story-type epic is a usage error naming the flag and its allowed values", async () => {
   const err = capture();
-  const code = await main(["--project", "91", "--repo", "o/r", "--story-type", "epic"], {
-    stdout: capture(),
-    stderr: err,
-  });
+  const code = await main(
+    ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--story-type", "epic"],
+    {
+      stdout: capture(),
+      stderr: err,
+    },
+  );
   assert.equal(code, 2);
   assert.ok(err.buf.includes("--story-type"));
   assert.ok(err.buf.includes("epic"));
@@ -1172,22 +1255,28 @@ test("--story-type epic is a usage error naming the flag and its allowed values"
 
 test("a customization flag with --customize is a usage error naming the conflict", async () => {
   const err = capture();
-  const code = await main(["--project", "91", "--repo", "o/r", "--states", "open", "--customize"], {
-    stdout: ttyCapture(),
-    stderr: err,
-    stdin: { isTTY: true },
-  });
+  const code = await main(
+    ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--states", "open", "--customize"],
+    {
+      stdout: ttyCapture(),
+      stderr: err,
+      stdin: { isTTY: true },
+    },
+  );
   assert.equal(code, 2);
   assert.ok(err.buf.includes("--states conflicts with --customize"));
 });
 
 test("the flag/--customize conflict is named off a terminal too, not the TTY gate", async () => {
   const err = capture();
-  const code = await main(["--project", "91", "--repo", "o/r", "--no-tasks", "--customize"], {
-    stdout: capture(),
-    stderr: err,
-    stdin: { isTTY: false },
-  });
+  const code = await main(
+    ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--no-tasks", "--customize"],
+    {
+      stdout: capture(),
+      stderr: err,
+      stdin: { isTTY: false },
+    },
+  );
   assert.equal(code, 2);
   assert.ok(err.buf.includes("--no-tasks conflicts with --customize"));
 });
@@ -1208,7 +1297,19 @@ test("--engine direct with a customization flag is accepted, not a conflict", as
       /** @type {any[]} */
       const direct = [];
       const code = await main(
-        ["--project", "91", "--repo", "o/r", "--engine", "direct", "--states", "open", "-y"],
+        [
+          "--token",
+          "ghp_test",
+          "--project",
+          "91",
+          "--repo",
+          "o/r",
+          "--engine",
+          "direct",
+          "--states",
+          "open",
+          "-y",
+        ],
         {
           stdout: capture(),
           stderr: capture(),
@@ -1228,6 +1329,8 @@ test("--engine direct with a customization flag is accepted, not a conflict", as
 
 test("a flag-driven run renders the Customized: block, and composes with --dry-run", async () => {
   const run = await runAgainstMock([
+    "--token",
+    "ghp_test",
     ...["--project", "91", "--repo", "o/r", "--dry-run"],
     ...["--states", "open", "--story-type", "bug", "--no-comments"],
   ]);
@@ -1243,11 +1346,16 @@ test("a flag-driven run renders the Customized: block, and composes with --dry-r
 
 test("the flag-driven legend matches the equivalent wizard answers", async () => {
   // states → "open only", story type default, comments off, tasks default.
-  const wizard = await runAgainstMock(["--project", "91", "--repo", "o/r", "--customize", "-y"], {
-    stdout: ttyCapture(),
-    stdin: scriptedStdin(["2", "", "n", ""]),
-  });
+  const wizard = await runAgainstMock(
+    ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--customize", "-y"],
+    {
+      stdout: ttyCapture(),
+      stdin: scriptedStdin(["2", "", "n", ""]),
+    },
+  );
   const flags = await runAgainstMock([
+    "--token",
+    "ghp_test",
     ...["--project", "91", "--repo", "o/r", "-y"],
     ...["--states", "open", "--no-comments"],
   ]);
@@ -1260,6 +1368,8 @@ test("the flag-driven legend matches the equivalent wizard answers", async () =>
 
 test("a piped flag-driven run with --yes imports the customized subset and exits 0", async () => {
   const run = await runAgainstMock([
+    "--token",
+    "ghp_test",
     ...["--project", "91", "--repo", "o/r", "-y"],
     ...["--states", "open", "--story-type", "chore", "--no-comments", "--no-tasks"],
   ]);
@@ -1270,14 +1380,32 @@ test("a piped flag-driven run with --yes imports the customized subset and exits
 });
 
 test("a non-TTY run that would write and lacks --yes exits 2 naming --yes, writing nothing", async () => {
-  const run = await runAgainstMock(["--project", "91", "--repo", "o/r", "--states", "open"]);
+  const run = await runAgainstMock([
+    "--token",
+    "ghp_test",
+    "--project",
+    "91",
+    "--repo",
+    "o/r",
+    "--states",
+    "open",
+  ]);
   assert.equal(run.code, 2);
   assert.ok(run.stderr.includes("--yes"));
   assert.deepEqual(run.rows, []);
 });
 
 test("the fail-closed rule applies to a plain run too, not just customized ones", async () => {
-  const run = await runAgainstMock(["--project", "91", "--repo", "o/r", "--engine", "direct"]);
+  const run = await runAgainstMock([
+    "--token",
+    "ghp_test",
+    "--project",
+    "91",
+    "--repo",
+    "o/r",
+    "--engine",
+    "direct",
+  ]);
   assert.equal(run.code, 2);
   assert.ok(run.stderr.includes("--yes"));
   assert.deepEqual(run.rows, []);
@@ -1296,20 +1424,23 @@ test("a TTY run still shows the [y/N] confirm before writing", async () => {
       /** @type {string[]} */
       const asked = [];
       const direct = [];
-      const code = await main(["--project", "91", "--repo", "o/r", "--states", "open"], {
-        stdout: ttyCapture(),
-        stderr: capture(),
-        stdin: { isTTY: true },
-        preflight: async () => preflightResult(),
-        runDirect: async () => {
-          direct.push(1);
-          return outcome();
+      const code = await main(
+        ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--states", "open"],
+        {
+          stdout: ttyCapture(),
+          stderr: capture(),
+          stdin: { isTTY: true },
+          preflight: async () => preflightResult(),
+          runDirect: async () => {
+            direct.push(1);
+            return outcome();
+          },
+          confirm: async (q) => {
+            asked.push(q);
+            return false;
+          },
         },
-        confirm: async (q) => {
-          asked.push(q);
-          return false;
-        },
-      });
+      );
       assert.equal(code, 1);
       assert.equal(asked.length, 1);
       assert.ok(asked[0].includes("[y/N]"));
@@ -1418,7 +1549,8 @@ for (const [label, argv, header, tail] of /** @type {[string, string[], string, 
   ["server", [], "Import mapping (GitHub → East Agile Tracker):\n", goldenTail()],
   [
     "direct",
-    ["--engine", "direct"],
+    // The token is required now, and prints nothing: the legend is unchanged by it.
+    ["--engine", "direct", "--token", "ghp_test"],
     "Import mapping (GitHub → East Agile Tracker) [engine: direct]:\n",
     goldenTail(DIRECT_ONLY_LINES),
   ],
@@ -1454,6 +1586,8 @@ test("--engine direct --include issues,releases runs and renders the direct rele
       let seen = null;
       const code = await main(
         [
+          "--token",
+          "ghp_test",
           "--project",
           "91",
           "--repo",
@@ -1494,6 +1628,8 @@ test("--engine direct --include issues,milestones runs and renders the direct ep
       let seen = null;
       const code = await main(
         [
+          "--token",
+          "ghp_test",
           "--project",
           "91",
           "--repo",
@@ -1533,6 +1669,8 @@ test("--milestones composes with --include milestones and implies the direct eng
       let seen = null;
       const code = await main(
         [
+          "--token",
+          "ghp_test",
           "--project",
           "91",
           "--repo",
@@ -1654,6 +1792,8 @@ test("--engine direct --include issues,prs imports PR stories end to end (mockse
           const out = ttyCapture();
           const code = await main(
             [
+              "--token",
+              "ghp_test",
               ...["--project", "91", "--repo", "o/r", "-y"],
               ...["--engine", "direct", "--include", "issues,prs"],
             ],
@@ -1788,6 +1928,8 @@ test("a dependency budget refusal reaches the CLI as exit 1 with the --token adv
         const err = capture();
         const code = await main(
           [
+            "--token",
+            "ghp_test",
             "--project",
             "91",
             "--repo",
@@ -1819,4 +1961,143 @@ test("a dependency budget refusal reaches the CLI as exit 1 with the --token adv
     server.closeAllConnections();
     await new Promise((resolve) => server.close(() => resolve(undefined)));
   }
+});
+
+// --- --engine direct requires a token (story #57634) --------------------------
+
+/** The one line a usage error adds under the usage banner, which itself names GITHUB_TOKEN. */
+const errorLine = (/** @type {string} */ stderr) =>
+  (stderr.match(/^github-to-eat: error: .*$/m) ?? [""])[0];
+
+/**
+ * Run `main` against a live mock EAT with the preflight real, so "writes nothing" is
+ * measured against the server rather than against a stub that was never called.
+ *
+ * @param {string[]} argv
+ * @param {{ token?: string, stdin?: any, stdout?: any }} [options]
+ */
+async function runDirectEngine(argv, { token, stdin, stdout } = {}) {
+  const mock = await startMockServer();
+  /** @type {string[]} */
+  const reached = [];
+  try {
+    const result = await inTempDir(() =>
+      withEnv(
+        {
+          EAT_AGENT_KEY: "key",
+          EAT_API_BASE: mock.baseUrl,
+          EAT_APP_BASE: "https://eat.example",
+          GITHUB_TOKEN: token,
+        },
+        async () => {
+          const out = stdout ?? capture();
+          const err = capture();
+          const code = await main(argv, {
+            confirm: null,
+            stdout: out,
+            stderr: err,
+            ...(stdin ? { stdin } : {}),
+            preflight: (/** @type {any} */ client, /** @type {number} */ project) => {
+              reached.push("preflight");
+              return realPreflight(client, project);
+            },
+            runDirect: async () => {
+              reached.push("runDirect");
+              return outcome();
+            },
+            runImport: async () => {
+              reached.push("runImport");
+              return outcome();
+            },
+          });
+          return { code, stdout: out.buf, stderr: err.buf };
+        },
+      ),
+    );
+    return { ...result, reached, requests: mock.state.requests, state: mock.state };
+  } finally {
+    await mock.close();
+  }
+}
+
+/** @param {string[]} extra */
+const directArgv = (...extra) => ["--project", "91", "--repo", "o/r", ...extra];
+
+test("a tokenless --engine direct run is a usage error naming --token and GITHUB_TOKEN", async () => {
+  const { code, stderr } = await runDirectEngine(directArgv("--engine", "direct", "-y"));
+  assert.equal(code, 2);
+  // The usage banner names both already, so only the error line itself proves anything.
+  assert.match(errorLine(stderr), /--token/);
+  assert.match(errorLine(stderr), /GITHUB_TOKEN/);
+});
+
+test("a tokenless --engine direct run writes nothing and never reaches the server", async () => {
+  const { reached, requests, state, stdout } = await runDirectEngine(
+    directArgv("--engine", "direct", "-y"),
+  );
+  assert.deepEqual(reached, [], "refused before the preflight, the fetch and the write");
+  assert.deepEqual(requests, [], "not one request reached EAT");
+  assert.equal(state.stories[91], undefined);
+  // The legend is a promise about what this run will write; a refused run makes none.
+  assert.equal(stdout, "");
+});
+
+test("a --token argument satisfies the direct engine's token requirement", async () => {
+  const { code, reached } = await runDirectEngine(
+    directArgv("--engine", "direct", "--token", "ghp_secret", "-y"),
+  );
+  assert.equal(code, 0);
+  assert.deepEqual(reached, ["preflight", "runDirect"]);
+});
+
+test("GITHUB_TOKEN satisfies it too, so a CI run needs no flag", async () => {
+  const { code, reached } = await runDirectEngine(directArgv("--engine", "direct", "-y"), {
+    token: "ghp_from_env",
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(reached, ["preflight", "runDirect"]);
+});
+
+test("an empty --token is no token at all", async () => {
+  const { code, stderr } = await runDirectEngine(
+    directArgv("--engine", "direct", "--token", "", "-y"),
+  );
+  assert.equal(code, 2);
+  assert.match(errorLine(stderr), /--token/);
+});
+
+test("a customization flag implies --engine direct, so it needs a token too", async () => {
+  const { code, stderr, reached, requests } = await runDirectEngine(
+    directArgv("--states", "open", "-y"),
+  );
+  assert.equal(code, 2);
+  assert.match(errorLine(stderr), /--token/);
+  assert.deepEqual(reached, []);
+  assert.deepEqual(requests, []);
+});
+
+test("--customize implies --engine direct, so it needs a token as well", async () => {
+  const { code, stderr, reached } = await runDirectEngine(directArgv("--customize", "-y"), {
+    // Both TTYs, so the only gate left to fail is the token one.
+    stdin: Object.assign(Readable.from([]), { isTTY: true }),
+    stdout: ttyCapture(),
+  });
+  assert.equal(code, 2);
+  assert.match(errorLine(stderr), /--token/);
+  assert.deepEqual(reached, []);
+});
+
+test("a tokenless --dry-run is refused too — the preview fetches from GitHub as a run does", async () => {
+  const { code, stderr, requests } = await runDirectEngine(
+    directArgv("--engine", "direct", "--dry-run"),
+  );
+  assert.equal(code, 2);
+  assert.match(errorLine(stderr), /--token/);
+  assert.deepEqual(requests, []);
+});
+
+test("the server engine is untouched: a tokenless run still imports", async () => {
+  const { code, reached } = await runDirectEngine(directArgv("--engine", "server", "-y"));
+  assert.equal(code, 0);
+  assert.deepEqual(reached, ["preflight", "runImport"], "no token, no refusal, EAT does the fetch");
 });

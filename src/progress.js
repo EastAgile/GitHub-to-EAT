@@ -18,23 +18,25 @@ const TICK_MS = 120;
  *
  * @template T
  * @param {() => Promise<T> | T} func
- * @param {string} message
+ * @param {string | (() => string)} message a thunk is re-read on every redraw, so a stage
+ *   that learns its own size mid-flight can report it
  * @param {{ stream?: OutStream, intervalMs?: number }} [options]
  * @returns {Promise<T>}
  */
 export async function runWithProgress(func, message, { stream, intervalMs = 500 } = {}) {
   const out = stream ?? process.stderr;
   const start = performance.now();
+  const text = () => (typeof message === "function" ? message() : message);
 
   if (!out.isTTY) {
-    out.write(`${message}...\n`);
+    out.write(`${text()}...\n`);
     return await func();
   }
 
   let i = 0;
   const draw = () => {
     const elapsed = (performance.now() - start) / 1000;
-    out.write(`\r${FRAMES[i % FRAMES.length]} ${message} (${elapsed.toFixed(0)}s) `);
+    out.write(`\r${FRAMES[i % FRAMES.length]} ${text()} (${elapsed.toFixed(0)}s) `);
     i += 1;
   };
   draw();
@@ -48,7 +50,7 @@ export async function runWithProgress(func, message, { stream, intervalMs = 500 
   } finally {
     clearInterval(timer);
     const total = (performance.now() - start) / 1000;
-    out.write(`\r${message} — ${failed ? "failed after" : "done in"} ${total.toFixed(0)}s\n`);
+    out.write(`\r${text()} — ${failed ? "failed after" : "done in"} ${total.toFixed(0)}s\n`);
   }
 }
 

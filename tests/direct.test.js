@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import http from "node:http";
 import { test } from "node:test";
 
 import { AuthError, EATClient } from "../src/client.js";
@@ -7,7 +6,7 @@ import { markerFor } from "../src/dedup.js";
 import { runDirect } from "../src/direct.js";
 import { DEFAULT_CUSTOMIZATION, FALLBACK_LIMITS } from "../src/mapping.js";
 import { makeState, startMockServer } from "../src/mockserver.js";
-import { capture } from "./helpers.js";
+import { capture, issueNode, withGitHubStub } from "./helpers.js";
 
 /**
  * Wrap a client method, recording each call's arguments.
@@ -960,86 +959,50 @@ test("cross-linked descriptions still dedup on the marker alone, without provena
 });
 
 /**
- * Point the real `GitHubClient` at a throwaway server for the length of `fn` by
- * rewriting api.github.com onto it — `runDirect` builds its own client, so this is
- * the only way to exercise the wiring it does.
- *
- * @param {import("node:http").RequestListener} handler
- * @param {() => Promise<void>} fn
+ * One issue node whose `number` GitHub could not render — a loss the fetch stage must
+ * report. `runDirect` builds its own fetcher, so only a real transport exercises that wiring.
  */
-async function withGitHubOrigin(handler, fn) {
-  const server = http.createServer(handler);
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(undefined)));
-  const { port } = /** @type {import("node:net").AddressInfo} */ (server.address());
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = (input, init) =>
-    realFetch(String(input).replace("https://api.github.com", `http://127.0.0.1:${port}`), init);
-  try {
-    await fn();
-  } finally {
-    globalThis.fetch = realFetch;
-    server.closeAllConnections();
-    await new Promise((resolve) => server.close(() => resolve(undefined)));
-  }
-}
+const unnumberedIssue = () => [issueNode({ number: null })];
 
-/** @param {import("node:http").ServerResponse} res @param {number} code @param {unknown} body */
-const reply = (res, code, body) => {
-  res.writeHead(code, { "Content-Type": "application/json" });
-  res.end(JSON.stringify(body));
-};
-
-/**
- * Serves one parent whose sub-issue listing 404s, everything else empty.
- *
- * @param {import("node:http").ServerResponse} res
- * @param {string} path
- */
-const failingSubIssues = (res, path) => {
-  if (path === "/repos/o/r/issues") {
-    return reply(res, 200, [
-      { number: 7, title: "parent", state: "open", labels: [], sub_issues_summary: { total: 1 } },
-    ]);
-  }
-  if (path === "/repos/o/r/issues/7/sub_issues") return reply(res, 404, { message: "gone" });
-  reply(res, 200, []);
-};
-
-test("runDirect hands the real GitHub client a warn sink, so a 404 listing is not silent", async () => {
+test("runDirect hands the fetcher a warn sink, so a lost issue number is not silent", async () => {
   const mock = await startMockServer();
   const stream = capture();
   try {
-    await withGitHubOrigin(
-      (req, res) => failingSubIssues(res, new URL(req.url ?? "", "http://x").pathname),
-      async () => {
-        const client = new EATClient(mock.baseUrl, "ea_token");
-        const outcome = await runDirect(client, 91, "o", "r", { included: ["issues"], stream });
-        assert.equal(outcome.importedStories, 1);
-      },
-    );
+    await withGitHubStub({ issues: unnumberedIssue() }, async ({ base }) => {
+      const client = new EATClient(mock.baseUrl, "ea_token");
+      const outcome = await runDirect(client, 91, "o", "r", {
+        included: ["issues"],
+        token: "ghp_secret",
+        apiBase: base,
+        stream,
+      });
+      assert.equal(outcome.importedStories, 1, "the row still imports; only its joins are lost");
+    });
   } finally {
     await mock.close();
   }
-  assert.match(stream.buf, /warning: .*#7.*sub-issues/);
+  assert.match(stream.buf, /warning: 1 issue\(s\) arrived without a usable issue number/);
 });
 
-test("a sub-issue warning is flushed after the progress line, never glued to the spinner", async () => {
+test("a fetch warning is flushed after the progress line, never glued to the spinner", async () => {
   const mock = await startMockServer();
   const stream = { ...capture(), isTTY: true, columns: 80 };
   try {
-    await withGitHubOrigin(
-      (req, res) => failingSubIssues(res, new URL(req.url ?? "", "http://x").pathname),
-      async () => {
-        const client = new EATClient(mock.baseUrl, "ea_token");
-        await runDirect(client, 91, "o", "r", { included: ["issues"], stream });
-      },
-    );
+    await withGitHubStub({ issues: unnumberedIssue() }, async ({ base }) => {
+      const client = new EATClient(mock.baseUrl, "ea_token");
+      await runDirect(client, 91, "o", "r", {
+        included: ["issues"],
+        token: "ghp_secret",
+        apiBase: base,
+        stream,
+      });
+    });
   } finally {
     await mock.close();
   }
   const warningAt = stream.buf.indexOf("warning:");
-  const fetchDoneAt = stream.buf.indexOf("from GitHub — done in");
-  assert.ok(fetchDoneAt !== -1, "the fetch progress line finished");
+  const fetchDoneAt = stream.buf.indexOf("from GitHub page 1/1 — done in");
+  assert.ok(fetchDoneAt !== -1, "the fetch progress line finished, carrying its exact page count");
   assert.ok(
     warningAt > fetchDoneAt,
     `warning comes after the progress line, got ${JSON.stringify(stream.buf.slice(0, 300))}`,
@@ -2250,7 +2213,6 @@ function blockedRepo() {
         ],
       ],
     ]),
-    dependencyRequests: 2,
   };
 }
 
@@ -2308,7 +2270,7 @@ test("a run without deps writes the same stories and no blockers at all", async 
   const mock = await startMockServer();
   try {
     // Same fetched rows, flag off: the blockedBy map is simply never populated.
-    const plain = { ...fetchedRepo(), dependencyRequests: 0 };
+    const plain = fetchedRepo();
     await runDirect(new EATClient(mock.baseUrl, "ea_token"), 91, "o", "r", {
       included: ["issues"],
       stream: capture(),
@@ -2324,7 +2286,7 @@ test("a run without deps writes the same stories and no blockers at all", async 
   }
 });
 
-test("a deps dry run reports the extra GitHub requests the flag cost, and writes nothing", async () => {
+test("a deps dry run prints no request count — the GraphQL fetch spends none to report", async () => {
   const mock = await startMockServer();
   try {
     const out = capture();
@@ -2335,12 +2297,12 @@ test("a deps dry run reports the extra GitHub requests the flag cost, and writes
       github: { fetchAll: async () => blockedRepo() },
     });
     assert.equal(plan.dryRun, true);
-    assert.match(out.buf, /--include deps/);
-    assert.match(out.buf, /2 extra GitHub request/);
-    // The count is per page, so "one per issue" would contradict the number it annotates.
-    assert.match(out.buf, /at least one per issue/);
-    // The preview is not free: `fetchAll` runs before the dry-run branch.
-    assert.match(out.buf, /a real run spends them again/);
+    // The deps opt-in really ran: the blockers are in the plan the preview describes.
+    assert.equal(plan.importedStories, 2);
+    // A `?? 0` on the count the GraphQL fetch does not return would print "cost 0 extra
+    // GitHub request(s)" — a wrong number rather than an absent one.
+    assert.ok(!out.buf.includes("extra GitHub request"), out.buf);
+    assert.ok(!out.buf.includes("--include deps"), out.buf);
     assert.equal(mock.state.stories[91], undefined);
   } finally {
     await mock.close();
@@ -2355,7 +2317,7 @@ test("a dry run without deps says nothing about dependency requests", async () =
       included: ["issues"],
       stream: out,
       dryRun: true,
-      github: { fetchAll: async () => ({ ...fetchedRepo(), dependencyRequests: 0 }) },
+      github: { fetchAll: async () => fetchedRepo() },
     });
     assert.ok(!out.buf.includes("--include deps"), out.buf);
   } finally {
@@ -2636,7 +2598,6 @@ test("a story left with half its blockers by an interrupted run warns on the re-
             ],
           ],
         ]),
-        dependencyRequests: 2,
       }),
     };
     let writes = 0;

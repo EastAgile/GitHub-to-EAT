@@ -333,6 +333,11 @@ v3 adds a second import engine selectable with `--engine server|direct`
   whichever story adds it — `deps` is the one type gated the other way round,
   refused on the **server** engine when that server's import body has no
   `include_dependencies`.
+- **A GitHub token is required.** `--engine direct` fetches over GitHub's
+  GraphQL API, which rejects anonymous callers, so a run without `--token` /
+  `GITHUB_TOKEN` is a usage error (exit 2) before any fetch or write — see
+  "GitHub fetch stage" below. `--engine server` still needs none: EAT fetches
+  with the platform credential.
 - **Staged build.** This epic ships across several stories; the pipeline is
   now wired end-to-end. `--engine direct` performs real imports,
   prompting for confirmation exactly like the server engine. `--dry-run` runs
@@ -497,9 +502,60 @@ prompt counts as "no" and aborts with exit 1.
 ### GitHub fetch stage
 
 The direct engine reads GitHub itself (the server engine never exposed this —
-EAT did the fetch). The client-side fetcher (`src/github.js`) uses the
-repo-wide list endpoints under `https://api.github.com`, all `per_page=100`
-with `Link`-header pagination:
+EAT did the fetch). Since story #57634 that read is **split across two
+transports**, the same split the server runs: the issue graph — issues, their
+comments, the repo's labels, the sub-issue hierarchy and, under `--include
+deps`, each issue's blockers — comes from **GraphQL**; **releases alone** come
+from REST, because GraphQL serves no release listing. `src/direct.js` composes
+the two into one fetch stage and hands `src/mapping.js` the row shapes it always
+took, so nothing downstream can tell which transport a row arrived on.
+
+**A token is mandatory on `--engine direct`.** GitHub's GraphQL endpoint rejects
+anonymous callers (probed 2026-08-11: an anonymous `POST /graphql` answers
+403/401), so a run without `--token` / `GITHUB_TOKEN` cannot fetch at all. The
+CLI refuses it as a **usage error (exit 2) before it loads configuration,
+contacts EAT, fetches anything, or writes anything** — not as a fetch failure
+halfway in. The refusal names both ways to supply a token, and says the server
+engine needs none. `--engine server` is untouched: its fetch is EAT's own, on
+the platform PAT, and a tokenless server run imports exactly as before. The
+transport constructor refuses a missing token too, so no later path can reach
+GraphQL anonymously.
+
+**The point budget is read from a free probe, and only the GraphQL bucket is
+gated.** Before the first query the stage reads `GET /rate_limit` — a route
+GitHub does not charge for — and refuses the run when
+`resources.graphql.remaining` is below what one `ImportIssues` page costs: 4
+points, or 5 with the `blockedBy` selection `--include deps` adds (measured
+server-side, and flat at every `first:` from 1 to 100). The refusal is a
+`RateBudgetError` raised before any query is sent, so nothing is spent and
+nothing is written; re-running after the reset is a clean retry. **A host that
+publishes no `graphql` bucket is not gated**, exactly as a host publishing no
+`x-ratelimit-remaining` header never was — an absent, unreadable or non-numeric
+value, a `404` on that route, and an unreachable host all read as "no budget
+published". The releases walk's REST `core` spend is **deliberately left
+ungated**, mirroring the server's own split (its story #47448): gating it would
+turn a release import that runs today into a refusal, and the two buckets are
+not interchangeable. No token raises the GraphQL point budget, so the refusal
+advises waiting for the reset rather than passing one.
+
+**`fetching X/Y` is exact.** The listing reports `totalCount` with its first
+page, so the fetch line names the page it is on out of the pages there are —
+where REST's `Link` header offered only a `rel="last"` hint and the direct
+engine's REST path showed no count at all. A repo that gains issues mid-walk
+renders `3/3`, never `3/2`. The count rides the TTY spinner only; a non-TTY run
+prints the same single start line it always did.
+
+**The `--include deps` request note is gone.** The REST stage it priced spent at
+least one request per issue, and the dry run reported that total. GraphQL spends
+one extra *point* on the listing plus one request per overflowing issue, which is
+a different quantity — so the fetch returns no `dependencyRequests` and no path
+prints a count. Reporting `0` would be a wrong number rather than an absent one.
+
+**The REST listings below are `src/github.js`, which a `--engine direct` run now
+reaches for `GET /releases` alone.** Its issue, comment, label, sub-issue and
+dependency listings still ship and are still tested, and are documented here
+unchanged; story #57636 deletes them. All of them are `per_page=100` with
+`Link`-header pagination under `https://api.github.com`:
 
 - `GET /repos/{owner}/{repo}/issues?state=all` — issues. The endpoint mixes in
   pull requests (tagged with a `pull_request` key); the fetcher drops them unless
@@ -599,7 +655,10 @@ with `Link`-header pagination:
   stage: a partition would otherwise cost one doomed request per issue, each
   armed with the full 30 s timeout — hours of stall on a large repo.
 
-  **A run is refused up front when it cannot afford the stage.** Before spending
+  **A run is refused up front when it cannot afford the stage.** This gate is
+  `src/github.js`'s own and, since #57634, no longer on the direct engine's path
+  — the engine's `--include deps` spends no REST request at all, and the
+  GraphQL point-budget probe above is what gates a run now. Before spending
   a single dependency request the fetcher compares the issue count against the
   `x-ratelimit-remaining` its earlier responses reported; a run short of that
   budget fails with a `RateBudgetError`, rather than dying halfway with an
@@ -616,9 +675,8 @@ with `Link`-header pagination:
 
   **A `--dry-run` spends the same requests as the real run.** `fetchAll` runs
   before the dry-run branch, so the preview cannot preview its own cost without
-  paying it: for an anonymous run past roughly 28 issues, preview-then-import is
-  self-defeating — the dry run consumes the budget the real run is then refused
-  for. The dry-run note says so.
+  paying it. On the direct engine that cost is now points rather than requests,
+  and a preview still spends them: previewing first saves no budget.
 
 There is deliberately **no** milestones endpoint: every issue row already embeds
 the milestone fields the mapping reads, so `--include …,milestones` adds no
@@ -631,34 +689,36 @@ unparseable or whose origin differs from the API base — the `Authorization`
 header never leaves the API origin — and a 200 body that is not a JSON array
 is a fetch error, not an empty page.
 
-Anonymous requests share GitHub's 60 req/h budget; a mid-sized *flat* repo
-(~1,000 issues) stays ~15–25 requests. Two stages scale past that: sub-issues
-scale with the repo's *shape* — a repo with ~55 parents exhausts the anonymous
-budget on that stage alone, which is why it degrades instead of failing and why
-`--token` is what the warning names — and `--include deps`, which has no rollup
-to gate on and so bills every issue, making it the larger term whenever it is on. `--token` / `GITHUB_TOKEN` is sent as
-`Authorization: Bearer` and raises the ceiling to 5000/h (and reaches private
-repos). Error mapping: 404 → repo-not-found; rate limits — HTTP 429, a 403
+Those request budgets describe `src/github.js` on its own. **A `--engine direct`
+run is never anonymous** (above) and reaches REST for the releases listing alone,
+so the 60 req/h anonymous ceiling the paragraphs above weigh is unreachable
+through the engine; a tokened run has 5000/h, of which a release-heavy repo can
+spend up to 200. `--token` / `GITHUB_TOKEN` is sent as
+`Authorization: Bearer` on both transports (and reaches private repos).
+
+Error mapping: 404 → repo-not-found; rate limits — HTTP 429, a 403
 with `x-ratelimit-remaining: 0`, or a secondary-limit 403 carrying
 `retry-after` — → rate-limit (the message prefers `retry-after` when present,
 falling back to the `x-ratelimit-reset` time); 401 → token rejected.
 
-#### GraphQL transport and issue listing — present, not yet wired
+#### GraphQL transport and issue listing — wired, and the only issue path
 
 The server engine moved its issue fetch to GraphQL (server story #47449) and the
-direct engine is following it one story at a time. Five pieces have landed: the
+direct engine followed it one story at a time. Six pieces landed first: the
 transport primitive (tracker story #57629), the `ImportIssues` listing with its
 REST-shape rename layer (#57630), the per-issue overflow hydration that drains a
 connection one page could not hold (#57632), the `ImportPullRequests`
 listing with its own comment hydration (#57633), and the issue-dependency
-selection with its own walk and shortfall reports (#259658). **No engine and no fetch
-stage calls any of them yet.** Every listing above is still the REST path, and a run's observable
-behaviour — request count, rows, errors — is unchanged by their presence.
-Switching `src/direct.js` onto GraphQL, which also makes `--token` mandatory, is
-story #57634; deleting the REST issue path afterwards is story #57636.
-`tests/github-graphql.test.js` proves that claim rather than restating it: it
+selection with its own walk and shortfall reports (#259658). Story **#57634**
+wired them: `src/direct.js` now fetches the whole issue graph through them, and
+the REST listings above are reached for `GET /releases` alone. Deleting the REST
+issue path is story #57636; until it lands that code still ships and is still
+tested, it is simply no longer on an engine's path.
+`tests/github-graphql.test.js` proves the wiring rather than restating it: it
 scans `src/` and `bin/`, and fails if anything but the listing imports the
-transport, or if anything at all imports the listing.
+transport, if anything but `src/direct.js` imports the listing, or if
+`src/importer.js` — the server engine whole — reaches any GitHub transport at
+all.
 
 The transport (`src/github-graphql.js`) is one `POST {apiBase}/graphql` carrying
 `{ operationName, query, variables }` under
@@ -771,8 +831,9 @@ query asks for one and warns on stderr at 100 points or fewer — **once per
 client**, not once per query, since that stream is the one the progress line
 redraws with `\r`; the server-supplied reset time is scrubbed of control
 characters and capped before it is printed, like every other server string.
-Nothing feeds that number into the `--include deps` preflight above, which still
-gates on the REST `x-ratelimit-remaining` its own responses reported.
+That in-flight warning is not the preflight gate: the gate reads the same bucket
+from the free `GET /rate_limit` probe before the first query, because a number
+learned from page one arrives too late to refuse the fetch.
 
 **No schema degradation, deliberately.** The server drops an optional selection
 when a host refuses it. Since its story #146020 that is three independent flags
@@ -927,8 +988,9 @@ run before the flag existed; a test pins it, as the `pullRequests` one is
 pinned. The server measured the cost on `directus/directus` (2026-08-14) by
 reading `rateLimit { cost }`: the page selection costs 4 points without the
 connection and 5 with it, identically at every `first:` from 1 to 100, so
-`first: 100` is chosen because the size is free. Once #57634 switches the engine
-over, it retires one REST request per imported issue.
+`first: 100` is chosen because the size is free. Since #57634 switched the engine
+over, it has retired one REST request per imported issue: the opt-in now spends
+no REST request at all, which is why the REST request gate no longer describes it.
 
 **Pull requests are never asked.** `PullRequest` declares no dependency field,
 so the PR selection never carries `blockedBy` and no PR number ever reaches the
@@ -950,9 +1012,9 @@ comment and sub-issue ones: a `NOT_FOUND` fails both of those, and so does a
 connection they cannot read. The rejected token is also where it parts company
 with **the REST dependency stage**, which re-raises a `GitHubAuthError` as fatal
 on the ground that every later write would fail too. github.rs truncates it, and
-this walk follows github.rs; story #57634, which flips the engine over, turns
-that hard stop into a per-issue truncation. The choice is recorded here so the
-flip does not read as an accident. Once GitHub rate-limits one follow-up
+this walk follows github.rs; story #57634 flipped the engine over, so that hard
+stop is now a per-issue truncation on every `--engine direct` run. The choice is
+recorded here so the change does not read as an accident. Once GitHub rate-limits one follow-up
 the fetch sets a run-wide flag and the issues behind it keep only what rode their
 own listing page, rather than each re-walking into the same limit — github.rs
 passes a shared `refused` flag for the same reason. **Only a limit sets that
@@ -1012,11 +1074,11 @@ blocker node the token cannot read arrives as `null` and is dropped from its
 connection, costing that entry alone.
 
 **One thing the GraphQL fetch does not report.** The REST fetch counts the
-requests `--include deps` spent and `src/direct.js` prints that count in a dry
-run. GraphQL spends one extra *point* on the listing plus one request per
-overflowing issue, which is not the same quantity, so this fetch returns no
-`dependencyRequests`. Story #57634, which switches the engine over, owns
-rewording that note.
+requests `--include deps` spent. GraphQL spends one extra *point* on the listing
+plus one request per overflowing issue, which is not the same quantity, so this
+fetch returns no `dependencyRequests`. Story #57634 removed the dry-run note that
+printed the REST count rather than defaulting it to `0`: an absent quantity must
+not be reported as a measured zero.
 
 #### The `ImportPullRequests` listing
 

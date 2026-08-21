@@ -42,7 +42,8 @@ options:
   --customize           customize the import per run, interactively (implies --engine direct; needs a terminal)
   --dry-run             run preflight and show the plan without importing anything
   -y, --yes             skip the interactive confirmation prompt (required off a terminal, unless --dry-run)
-  --token GITHUB_TOKEN  GitHub token for a private repo (or set GITHUB_TOKEN); public repos need none
+  --token GITHUB_TOKEN  GitHub token (or set GITHUB_TOKEN); required by --engine direct,
+                        and by --engine server only for a private repo
 
 customization (each implies --engine direct; no terminal needed; not with --customize):
   --states STATES       issue states to import: all|open|closed (default: all)
@@ -377,6 +378,16 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
         "--customize needs an interactive terminal (stdin and stdout must be TTYs)",
       );
     }
+  }
+
+  // GitHub's GraphQL API has no anonymous mode and the direct engine fetches over it, so a
+  // tokenless run cannot work — refused here, before the config, the fetch and any write.
+  if (engine === "direct" && !(values.token || process.env.GITHUB_TOKEN)) {
+    return usageError(
+      "--engine direct fetches from GitHub's GraphQL API, which rejects anonymous callers: " +
+        "pass --token <TOKEN>, or set GITHUB_TOKEN. (--engine server needs no token — the " +
+        "EAT server fetches with its own credential.)",
+    );
   }
 
   // Fail closed: off-terminal there is no way to show the [y/N] confirm, so a
