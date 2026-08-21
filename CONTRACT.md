@@ -1004,7 +1004,21 @@ Under `--include deps` the issue node gains one more connection,
 `blockedBy(first: 100) { pageInfo { hasNextPage endCursor } nodes { number
 title } }` — github.rs `issue_node_selection` field for field. `number` and
 `title` are the whole selection because they are the whole of what a blocker's
-text renders. **Without the flag the connection is not in the query at all**, so
+text renders. **GitHub returns an issue's blockers in the opposite order
+over the two transports**, measured on live GitHub 2026-08-21 and stable across
+repeated reads: `PostHog/posthog#86653` lists `[86655, 86654]` over GraphQL and
+`[86654, 86655]` over `GET /issues/{n}/dependencies/blocked_by`, and the same
+inversion held on every multi-blocker issue sampled in two repositories. The
+*sets* always match. `blockersFrom` keeps GitHub's order on purpose (mirroring
+github.rs `list_blocked_by`) and `src/writer.js` keys each blocker by its index,
+so an issue with two or more blockers gets the same blocker rows in reverse
+sequence after the flip. No row is lost, gained or duplicated — a re-run skips a
+story it already created — but the order a reader sees differs from a pre-flip
+import of the same repository. The local parity tool cannot catch this: its
+fixture serves one array to both renderings, so it asserts an order equality
+real GitHub violates. Only a fixture backed by live GitHub can, which is the
+fixture-artifact risk story #330976 records for labels and assignees and this
+proves for blockers. **Without the flag the connection is not in the query at all**, so
 a default run pays no extra point and every output row is byte-identical to a
 run before the flag existed; a test pins it, as the `pullRequests` one is
 pinned. The server measured the cost on `directus/directus` (2026-08-14) by
