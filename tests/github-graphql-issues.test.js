@@ -1822,6 +1822,27 @@ test("a PR listing that answers without its connection fails, naming the pull re
   });
 });
 
+test("a listing that arrives as an array fails, rather than reading as an empty repo", async () => {
+  // `typeof [] === "object"`, so without the array test the walk would drain a listing it
+  // never read; `query()`'s own data guard excludes arrays for the same reason.
+  const respond = (/** @type {any} */ request) => {
+    if (request.operationName === "ImportLabels") return labelsEnvelope([]);
+    return {
+      data: {
+        rateLimit: { remaining: 4999, resetAt: "2030-01-01T00:00:00Z" },
+        repository: { issues: [] },
+      },
+    };
+  };
+  await withGraphQL(respond, async (base) => {
+    await assert.rejects(fetcherAt(base).fetchAll(), (err) => {
+      assert.ok(err instanceof GitHubError);
+      assert.match(/** @type {Error} */ (err).message, /expected the repository's issues/);
+      return true;
+    });
+  });
+});
+
 test("a PR listing that promises a page and sends no cursor warns, and re-reads nothing", async () => {
   const warned = capture();
   const respond = (/** @type {any} */ request) => {
@@ -2457,6 +2478,9 @@ test("every way a follow-up can fail truncates the listing and imports the issue
       );
     });
     assert.match(warned.buf, /dependencies this fetch could not finish reading/, name);
+    // Only a limit sets the run-wide flag: any other failure abandoning every walk behind
+    // it would report a spent point budget that never happened.
+    assert.doesNotMatch(warned.buf, /point budget/, name);
   }
 });
 
@@ -2552,6 +2576,51 @@ test("an issue that lost the listing whole is not also counted as a short one", 
   assert.equal(warned.buf.split("\n").filter(Boolean).length, 1);
 });
 
+test("a listing page whose nodes all came back null fails loudly, never as an empty repo", async () => {
+  // A spec-compliant host answers a refusal on a non-null field by nulling the nearest
+  // nullable ancestor, and for `nodes: [Issue]` that ancestor is the issue node itself.
+  const respond = refusingRepo([null, null], [blockedByRefusal(0), blockedByRefusal(1)]);
+  await withGraphQL(respond, async (base) => {
+    await assert.rejects(
+      fetcherAt(base, { warn: () => {} }).fetchAll({ dependencies: true }),
+      (err) => {
+        assert.ok(err instanceof GitHubError);
+        assert.match(/** @type {Error} */ (err).message, /unexpected response shape/);
+        assert.match(/** @type {Error} */ (err).message, /issues/);
+        return true;
+      },
+    );
+  });
+});
+
+test("a listing page that loses some of its nodes keeps the rest and names the loss", async () => {
+  const warned = capture();
+  const respond = refusingRepo(
+    [null, issueNode({ number: 8, blockedBy: null })],
+    [blockedByRefusal(0), blockedByRefusal(1)],
+  );
+  await withGraphQL(respond, async (base) => {
+    const { issues } = await fetcherAt(base, {
+      warn: (message) => void warned.write(message),
+    }).fetchAll({ dependencies: true });
+    // github.rs `nodes_skipping_unreadable` drops the unreadable ones rather than failing
+    // the page; only a page losing every node is indistinguishable from an empty repo.
+    assert.deepEqual(
+      issues.map((issue) => issue.number),
+      [8],
+    );
+  });
+  assert.match(warned.buf, /1 of the 2 issues on page 1 came back unreadable/);
+});
+
+test("a listing page that drops no node warns about nothing", async () => {
+  const warned = capture();
+  await withGraphQL(oneRepo([issueNode({ number: 7 })]), async (base) => {
+    await fetcherAt(base, { warn: (message) => void warned.write(message) }).fetchAll();
+  });
+  assert.equal(warned.buf, "");
+});
+
 test("an empty listing is neither shortfall: an opted-in run on a repo with no deps is quiet", async () => {
   const warned = capture();
   const respond = hydratingRepo(
@@ -2590,6 +2659,198 @@ test("an issue with no usable number is never asked for blockers, because nothin
     assert.deepEqual([...blockedBy.keys()], []);
     assert.equal(requestsFor(seen, "ImportIssueBlockedBy").length, 0);
   });
+});
+
+test("a blockedBy that is not a connection at all is the whole-listing loss", async () => {
+  // An array reads as `typeof "object"` too, so a `[]` would otherwise land in the
+  // genuinely-empty bucket — the one boundary the three-way report must keep distinct.
+  for (const blockedBy of [9, [], "nope"]) {
+    const warned = capture();
+    const respond = hydratingRepo([issueNode({ number: 7, blockedBy })], NEVER_ASKED_BLOCKERS);
+    await withGraphQL(respond, async (base, seen) => {
+      const fetched = await fetcherAt(base, {
+        warn: (message) => void warned.write(message),
+      }).fetchAll({ dependencies: true });
+      assert.deepEqual([...fetched.blockedBy.keys()], [], JSON.stringify(blockedBy));
+      assert.equal(requestsFor(seen, "ImportIssueBlockedBy").length, 0);
+    });
+    assert.match(
+      warned.buf,
+      /1 issue\(s\) were refused their dependency listing/,
+      JSON.stringify(blockedBy),
+    );
+  }
+});
+
+test("a follow-up page whose connection is an array truncates, never claiming a drain", async () => {
+  const warned = capture();
+  const respond = hydratingRepo(
+    [issueNode({ blockedBy: conn([blockerNode(90)], { hasNextPage: true, endCursor: "b1" }) })],
+    () => ({ issue: { blockedBy: [] } }),
+  );
+  await withGraphQL(respond, async (base) => {
+    const { blockedBy } = await fetcherAt(base, {
+      warn: (message) => void warned.write(message),
+    }).fetchAll({ dependencies: true });
+    assert.deepEqual(
+      blockedBy.get("7")?.map((row) => row.number),
+      [90],
+    );
+  });
+  assert.match(warned.buf, /dependencies this fetch could not finish reading/);
+});
+
+test("the truncated warning quotes what stopped the walk, as the REST stage does", async () => {
+  const warned = capture();
+  const respond = (/** @type {any} */ request) => {
+    if (request.operationName === "ImportLabels") return labelsEnvelope([]);
+    if (request.operationName === "ImportIssues") {
+      const overflowing = conn([blockerNode(90)], { hasNextPage: true, endCursor: "b1" });
+      return issuesEnvelope([
+        issueNode({ number: 7, blockedBy: overflowing }),
+        issueNode({ number: 8, blockedBy: overflowing }),
+      ]);
+    }
+    return { data: null, errors: [{ type: "UNAUTHORIZED", message: "Bad credentials" }] };
+  };
+  await withGraphQL(respond, async (base) => {
+    await fetcherAt(base, { warn: (message) => void warned.write(message) }).fetchAll({
+      dependencies: true,
+    });
+  });
+  assert.match(warned.buf, /2 issue\(s\) have dependencies this fetch could not finish reading/);
+  assert.match(warned.buf, /\(GitHub token rejected/);
+});
+
+test("a failure that is not a GitHubError leaves the walk rather than truncating it", async () => {
+  const respond = hydratingRepo(
+    [issueNode({ blockedBy: conn([blockerNode(90)], { hasNextPage: true, endCursor: "b1" }) })],
+    NEVER_ASKED_BLOCKERS,
+  );
+  const realFetch = globalThis.fetch;
+  // A throw the transport raises outside its own try: the walk must not read a crash in
+  // this engine as a listing GitHub truncated.
+  globalThis.fetch = /** @type {any} */ (
+    async (/** @type {any} */ input, /** @type {any} */ init) => {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      if (body.operationName !== "ImportIssueBlockedBy") return realFetch(input, init);
+      return {
+        status: 200,
+        headers: new Headers(),
+        json: async () => ({
+          get data() {
+            throw new RangeError("boom");
+          },
+        }),
+      };
+    }
+  );
+  try {
+    await withGraphQL(respond, async (base) => {
+      await assert.rejects(
+        fetcherAt(base, { warn: () => {} }).fetchAll({ dependencies: true }),
+        RangeError,
+      );
+    });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a scoped refusal on every listing page aggregates into one line", async () => {
+  const warned = capture();
+  const respond = (/** @type {any} */ request) => {
+    if (request.operationName === "ImportLabels") return labelsEnvelope([]);
+    if (request.operationName === "ImportIssues") {
+      const first = request.variables.after === null;
+      const page = first
+        ? { hasNextPage: true, endCursor: "p2", totalCount: 2 }
+        : { totalCount: 2 };
+      const node = issueNode({ number: first ? 7 : 8, blockedBy: null });
+      return { ...issuesEnvelope([node], page), errors: [blockedByRefusal(0)] };
+    }
+    return { data: { repository: NEVER_ASKED_BLOCKERS() } };
+  };
+  await withGraphQL(respond, async (base, seen) => {
+    const { issues, blockedBy } = await fetcherAt(base, {
+      warn: (message) => void warned.write(message),
+    }).fetchAll({ dependencies: true });
+    assert.deepEqual(
+      issues.map((issue) => issue.number),
+      [7, 8],
+    );
+    assert.deepEqual([...blockedBy.keys()], []);
+    const listing = requestsFor(seen, "ImportIssues");
+    assert.equal(listing.length, 2);
+    // No ladder to drop the field, so the refusal repeats once per page (CONTRACT.md).
+    for (const request of listing) assert.match(request.query, /blockedBy/);
+  });
+  assert.match(warned.buf, /2 issue\(s\) were refused their dependency listing/);
+  assert.match(warned.buf, /#7, #8/);
+  assert.equal(warned.buf.split("\n").filter(Boolean).length, 1);
+});
+
+test("a refusal GitHub scopes to one node leaves its readable siblings alone", async () => {
+  const warned = capture();
+  const respond = (/** @type {any} */ request) => {
+    if (request.operationName === "ImportLabels") return labelsEnvelope([]);
+    if (request.operationName === "ImportIssues") {
+      return {
+        ...issuesEnvelope([
+          issueNode({ number: 7, blockedBy: null }),
+          issueNode({
+            number: 8,
+            blockedBy: conn([blockerNode(90)], { hasNextPage: true, endCursor: "b1" }),
+          }),
+        ]),
+        errors: [blockedByRefusal(0)],
+      };
+    }
+    return { data: { repository: { issue: { blockedBy: conn([blockerNode(91)]) } } } };
+  };
+  await withGraphQL(respond, async (base, seen) => {
+    const { blockedBy } = await fetcherAt(base, {
+      warn: (message) => void warned.write(message),
+    }).fetchAll({ dependencies: true });
+    assert.deepEqual([...blockedBy.keys()], ["8"]);
+    assert.deepEqual(
+      blockedBy.get("8")?.map((row) => row.number),
+      [90, 91],
+    );
+    assert.equal(requestsFor(seen, "ImportIssueBlockedBy").length, 1);
+  });
+  assert.match(warned.buf, /1 issue\(s\) were refused their dependency listing/);
+  assert.match(warned.buf, /#7/);
+  assert.doesNotMatch(warned.buf, /could not finish reading/);
+});
+
+test("a truthy dependencies flag asks for blockedBy, as the other include flags do", async () => {
+  const respond = hydratingRepo(
+    [issueNode({ number: 7, blockedBy: conn([blockerNode(90)]) })],
+    NEVER_ASKED_BLOCKERS,
+  );
+  await withGraphQL(respond, async (base, seen) => {
+    const { blockedBy } = await fetcherAt(base, { warn: () => {} }).fetchAll(
+      /** @type {any} */ ({ dependencies: 1 }),
+    );
+    assert.deepEqual([...blockedBy.keys()], ["7"]);
+    assert.match(requestsFor(seen, "ImportIssues")[0].query, /blockedBy/);
+  });
+});
+
+test("the unnumbered warning names dependencies only when they were asked for", async () => {
+  for (const dependencies of [true, false]) {
+    const warned = capture();
+    const respond = hydratingRepo([issueNode({ number: null })], NEVER_ASKED);
+    await withGraphQL(respond, async (base) => {
+      await fetcherAt(base, { warn: (message) => void warned.write(message) }).fetchAll({
+        dependencies,
+      });
+    });
+    assert.match(warned.buf, /1 issue\(s\) arrived without a usable issue number/);
+    if (dependencies) assert.match(warned.buf, /dependencies/);
+    else assert.doesNotMatch(warned.buf, /dependencies/);
+  }
 });
 
 // --- pull requests are never asked (server story #163088) --------------------

@@ -677,8 +677,8 @@ off-origin `rel=next`.
 
 GraphQL answers most refusals with HTTP 200 plus an `errors` array, so the
 envelope carries its own classification onto the **same** error hierarchy the
-REST path uses. The first error the caller did not exempt decides, matched
-case-insensitively, exactly as `classify_gql_errors` does on the server:
+REST path uses. The first error decides, matched case-insensitively, exactly as
+`classify_gql_errors` does on the server:
 
 | GraphQL `errors[0].type`             | Error                              |
 | ------------------------------------ | ---------------------------------- |
@@ -689,17 +689,42 @@ case-insensitively, exactly as `classify_gql_errors` does on the server:
 | anything else                        | fetch error, quoting the message   |
 
 **One selection may be exempted, by name.** `query()` takes an optional
-`enrichmentField`, and an error whose GraphQL `path` names that field is lifted
-out of the array before the classification above runs: the query then resolves
-to its partial `data`, and the caller is told through `onEnrichmentRefused`.
-Only `ImportIssues` uses it, naming `blockedBy`, and only under `--include deps`
-— github.rs scopes exactly that refusal, because a token without the
-issue-dependencies permission produces it and dependencies are enrichment on
-either transport (its story #146020). The exemption is narrow on purpose: an
-error whose `path` is missing, is not a list, or names any other field still
-decides, and so does any error riding beside a scoped one — a `RATE_LIMITED`
-next to a refused `blockedBy` still fails the query. A response left with no
-`data` is still an unexpected shape, exempted errors or not.
+`enrichmentField`. An error is exempted when **both** of these hold:
+
+- its GraphQL `path` names that field, and
+- its `type` is absent, unreadable, or one of `FORBIDDEN` /
+  `INSUFFICIENT_SCOPES` — the types a permission refusal arrives as.
+
+An exempted error is lifted out of the array before the classification above
+runs: the query resolves to its partial `data`, and the caller is told through
+`onEnrichmentRefused`. Only `ImportIssues` uses it, naming `blockedBy`, and only
+under `--include deps` — github.rs scopes exactly that refusal, because a token
+without the issue-dependencies permission produces it and dependencies are
+enrichment on either transport (its story #146020).
+
+**One exempted error absorbs the whole envelope**, as `classify_gql_errors`
+does: the server loops over every error and returns its `Schema` outcome on the
+first scoped match, before it ever reads `errors.first()`. So a `RATE_LIMITED`
+riding beside a refused `blockedBy` does **not** fail the query on either
+engine. An error whose `path` is missing, is not a list, or names any other
+field still decides, and so does a `blockedBy` error of any other type.
+
+**The type filter is a deliberate divergence from `classify_gql_errors`, and
+the only rule this exemption does not share with it.** The server exempts a
+scoped error whatever its `type`, and its own comment gives the reason: *"the
+ladder already knows how to ask for less (§2.12, story #146020)."* A `Schema`
+outcome there re-asks the query without the
+field, so a scoped `RATE_LIMITED` is absorbed, retried, and fails loudly on the
+retry. **This engine has no ladder** (above), so absorbing would mean finishing
+the listing under a "the token cannot read dependencies" warning while spending
+points into a limit that is already gone — a rate limit and a rejected token
+both reported as a scope problem. Companion project-5 story **#384801**
+(/s/z924txee), filed and iceboxed, carries the question back to the server.
+
+A response left with no `data` is still an unexpected shape, exempted errors or
+not — but it **quotes what the host said** when an exemption matched, because a
+token that cannot read the enrichment is the likeliest cause and "the envelope
+carried no data" alone sends the reader after a malformed payload.
 
 A `data.repository` that is present and `null` is GraphQL's other way of saying
 404, and maps to repo-not-found too. On a hydration follow-up that same null is
@@ -817,13 +842,28 @@ engine's mapper needs it:
 
 Pagination follows Relay cursors and refuses to drift. A cursor that stops
 advancing, or a walk past 50 000 pages, fails a listing instead of looping or
-truncating quietly. A page that promises a successor without a cursor warns. An
-empty cursor counts as no cursor: sending it back only re-reads the same page.
+truncating quietly. A page that promises a successor without a cursor warns. A
+listing connection that arrives as an **array** rather than an object fails the
+same way, because `typeof [] === "object"` would otherwise let the walk drain a
+listing it never read. An empty cursor counts as no cursor: sending it back only
+re-reads the same page.
+
 `totalCount` gives the fetch an exact `fetching X/Y` page count, where REST's
 `rel="last"` was only a hint. An empty or whitespace-only comment body is
 dropped in the listing, as github.rs `comment_nodes_to_records` drops it; on the
 REST path that drop happens one layer down, in `src/mapping.js`, which still
 performs it for both.
+
+**A node GitHub cannot show arrives as `null`, and a page that loses every one
+of them fails.** The fetch drops the unreadable nodes, as github.rs
+`nodes_skipping_unreadable` does, and names the count on stderr rather than
+losing rows in silence. A page whose nodes are **all** null is a fetch error
+naming the unexpected shape instead. The distinction matters because a
+spec-compliant GraphQL host answers an error on a non-null field by nulling the
+nearest nullable ancestor, and for `nodes: [Issue]` that ancestor is the issue
+node: without this rule, a `blockedBy` refusal answered that way would exempt
+every error, drop every node, and finish `rc = 0` on an import that read
+nothing — indistinguishable from a repository with no issues.
 
 **Overflow hydration.** A `comments` or `subIssues` connection that reports
 `hasNextPage` is followed per issue, through github.rs's own two operations:
@@ -903,14 +943,25 @@ path's own bound.
 
 **Nothing here fails an import.** A blocker is enrichment on either transport, so
 every failure this walk can meet truncates it instead: an errored follow-up page,
-a `NOT_FOUND`, a node that stopped resolving, a connection that comes back
-absent or unreadable. That is github.rs `hydrate_blocked_by` exactly, and it is
-where this walk parts company with the comment and sub-issue ones: a `NOT_FOUND`
-fails both of those, and so does a connection they cannot read. Once GitHub
-rate-limits one follow-up
+a `NOT_FOUND`, **a rejected token**, a node that stopped resolving, a connection
+that comes back absent, unreadable, or shaped as an array. That is github.rs
+`hydrate_blocked_by` exactly, and it is where this walk parts company with the
+comment and sub-issue ones: a `NOT_FOUND` fails both of those, and so does a
+connection they cannot read. The rejected token is also where it parts company
+with **the REST dependency stage**, which re-raises a `GitHubAuthError` as fatal
+on the ground that every later write would fail too. github.rs truncates it, and
+this walk follows github.rs; story #57634, which flips the engine over, turns
+that hard stop into a per-issue truncation. The choice is recorded here so the
+flip does not read as an accident. Once GitHub rate-limits one follow-up
 the fetch sets a run-wide flag and the issues behind it keep only what rode their
 own listing page, rather than each re-walking into the same limit — github.rs
-passes a shared `refused` flag for the same reason.
+passes a shared `refused` flag for the same reason. **Only a limit sets that
+flag**: any other failure abandoning the walks behind it would report a spent
+point budget that never happened.
+
+A failure that is **not** a `GitHubError` — a bug in this engine rather than a
+refusal from GitHub — is re-raised. Reading a `TypeError` as a listing GitHub
+truncated would hide the defect behind a warning.
 
 **Two shortfalls, reported, and one boundary that is neither.**
 
@@ -919,26 +970,38 @@ passes a shared `refused` flag for the same reason.
   is reported on stderr as an issue whose dependencies this fetch could not
   finish reading (`dependencies_truncated`). It has *some* blockers, not all. The
   ceiling case carries its own wording, because its cut is at 2000 where the
-  others may lose one row.
+  others may lose one row. The line **quotes the first walk failure** that raised
+  an error, the way the REST stage quotes its own: a revoked token, a vanished
+  node and a transport flap otherwise render one identical cause-less sentence.
 - An issue that **lost the listing whole** — the host refused the `blockedBy`
-  selection, so its connection came back absent or null — is reported as
-  importing with no blockers at all (`dependencies_fetch_failed`), quoting what
-  the host said. It has *none*.
+  selection, so its connection came back absent, null, or shaped as an array — is
+  reported as importing with no blockers at all (`dependencies_fetch_failed`),
+  quoting what the host said. It has *none*. **An issue whose `number` is
+  unreadable is not counted here**, where github.rs `dependencies_lost` counts
+  every non-PR row on the page. That is a deliberate divergence: this line names
+  the issues it counts, and an unnumbered row has no number to name. Those rows
+  are reported by the unnumbered-issue line instead, which names their lost
+  dependencies whenever `--include deps` asked for any.
 - An issue whose listing came back **genuinely empty** is neither. An opted-in
   import of a repo that uses no dependencies reports no warning at all.
 
 Both reports aggregate, like every other shortfall here: the truncated one
 renders at most two stderr lines, because the ceiling case carries its own
 wording, and the whole-listing loss renders one. An issue counted by one report
-is never counted by the other. The server truncates the first in silence and
-counts the second per page; this engine is only louder.
+is never counted by the other. The stage can print **one more line beyond those
+three**, once per run and not per issue: the run-wide point-budget warning that
+says a limit stopped the dependency walks and the import continued. The server
+truncates the first in silence and counts the second per page; this engine is
+only louder.
 
 **No ladder, so no retry.** The server answers a scoped refusal by dropping the
 field and asking again. This engine has no `SchemaLevel` apparatus (above), so it
 absorbs the refusal, keeps sending the selection on every later listing page, and
 counts the affected issues as the whole-listing loss. The rows match the server's
 — both import those issues blocker-less — and the cost is the refusal repeating
-once per listing page.
+once per listing page. The missing ladder is also why the exemption filters on
+the error's `type` where `classify_gql_errors` does not: see the transport
+section above and project-5 story #384801 (/s/z924txee).
 
 **The rows are unchanged by the transport move.** `fetchAll` returns
 `blockedBy` as issue number → the rows GitHub listed, in GitHub's own order, the
