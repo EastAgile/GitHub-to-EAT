@@ -1,7 +1,6 @@
 /**
- * The flip (story #57634): the direct engine's fetch stage on GraphQL, with releases the
- * one REST surface left. Everything here drives the real transports against a local GitHub
- * stub, so a route that moved shows up as a request on the wrong path.
+ * The flip (story #57634). Everything here drives the real transports against a local GitHub
+ * stub, so a listing that moved to the wrong one shows up as a request on the wrong path.
  */
 
 import assert from "node:assert/strict";

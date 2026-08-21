@@ -322,13 +322,8 @@ export class GitHubClient {
   }
 
   /**
-   * The token's remaining GraphQL points, from `GET /rate_limit` — a route GitHub does not
-   * charge for, so a preflight can read the budget without spending any of it.
-   *
-   * Only the `graphql` bucket is read: the `core` bucket the releases walk draws on is
-   * deliberately left ungated (CONTRACT.md), and a number nothing gates on invites one.
-   * Any failure — an unreachable host, a `404` on GHES, an unreadable body — reports no
-   * budget, which leaves the run ungated exactly as a headerless host always has.
+   * `GET /rate_limit` is uncounted, so a preflight reads the budget without spending it. Only
+   * the `graphql` bucket, deliberately (CONTRACT.md); any failure leaves the run ungated.
    *
    * @returns {Promise<number | null>} null when the host publishes no point budget
    */
