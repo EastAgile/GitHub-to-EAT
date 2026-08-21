@@ -1506,3 +1506,90 @@ test("a tokenised run with headroom proceeds", async () => {
   });
   assert.equal(blockedPaths(seen).length, 3);
 });
+
+// --- the GraphQL point budget, read from GET /rate_limit (story #57634) -------
+
+test("graphqlBudget reads resources.graphql.remaining from GET /rate_limit", async () => {
+  /** @type {string[]} */
+  const paths = [];
+  /** @type {number | null | undefined} */
+  let budget;
+  await withGitHub(
+    (req, res) => {
+      paths.push(new URL(req.url ?? "", "http://x").pathname);
+      json(res, 200, {
+        resources: {
+          core: { remaining: 4990, limit: 5000 },
+          graphql: { remaining: 123, limit: 5000 },
+        },
+      });
+    },
+    async (base) => {
+      budget = await new GitHubClient("o", "r", { apiBase: base, token: "t" }).graphqlBudget();
+    },
+  );
+  // Repo-independent: the route reports the token's buckets, not a repository's.
+  assert.deepEqual(paths, ["/rate_limit"]);
+  assert.equal(budget, 123);
+});
+
+test("graphqlBudget reads the graphql bucket, never the core one", async () => {
+  /** @type {number | null | undefined} */
+  let budget;
+  await withGitHub(
+    (_req, res) =>
+      json(res, 200, {
+        resources: { core: { remaining: 0 }, graphql: { remaining: 4321 } },
+      }),
+    async (base) => {
+      budget = await new GitHubClient("o", "r", { apiBase: base, token: "t" }).graphqlBudget();
+    },
+  );
+  assert.equal(budget, 4321, "a spent core bucket says nothing about the point budget");
+});
+
+for (const [name, payload] of /** @type {[string, unknown][]} */ ([
+  ["no resources at all", { rate: { remaining: 12 } }],
+  ["no graphql bucket", { resources: { core: { remaining: 12 } } }],
+  ["a non-numeric remaining", { resources: { graphql: { remaining: "lots" } } }],
+  ["a JSON array", [1, 2, 3]],
+])) {
+  test(`a host publishing ${name} reports no point budget`, async () => {
+    /** @type {number | null | undefined} */
+    let budget = 0;
+    await withGitHub(
+      (_req, res) => json(res, 200, payload),
+      async (base) => {
+        budget = await new GitHubClient("o", "r", { apiBase: base, token: "t" }).graphqlBudget();
+      },
+    );
+    assert.equal(budget, null);
+  });
+}
+
+test("a /rate_limit route that 404s reports no budget rather than failing the run", async () => {
+  /** @type {number | null | undefined} */
+  let budget = 0;
+  await withGitHub(
+    (_req, res) => json(res, 404, { message: "Not Found" }),
+    async (base) => {
+      budget = await new GitHubClient("o", "r", { apiBase: base, token: "t" }).graphqlBudget();
+    },
+  );
+  assert.equal(budget, null);
+});
+
+test("the probe sends the token, so it reads that token's own budget", async () => {
+  /** @type {string | undefined} */
+  let auth;
+  await withGitHub(
+    (req, res) => {
+      auth = req.headers.authorization;
+      json(res, 200, { resources: { graphql: { remaining: 7 } } });
+    },
+    async (base) => {
+      await new GitHubClient("o", "r", { apiBase: base, token: "ghp_secret" }).graphqlBudget();
+    },
+  );
+  assert.equal(auth, "Bearer ghp_secret");
+});

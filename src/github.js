@@ -322,6 +322,28 @@ export class GitHubClient {
   }
 
   /**
+   * The token's remaining GraphQL points, from `GET /rate_limit` — a route GitHub does not
+   * charge for, so a preflight can read the budget without spending any of it.
+   *
+   * Only the `graphql` bucket is read: the `core` bucket the releases walk draws on is
+   * deliberately left ungated (CONTRACT.md), and a number nothing gates on invites one.
+   * Any failure — an unreachable host, a `404` on GHES, an unreadable body — reports no
+   * budget, which leaves the run ungated exactly as a headerless host always has.
+   *
+   * @returns {Promise<number | null>} null when the host publishes no point budget
+   */
+  async graphqlBudget() {
+    try {
+      const response = await this.#get(`${this.apiBase}/rate_limit`);
+      const payload = await response.json();
+      const remaining = payload?.resources?.graphql?.remaining;
+      return Number.isFinite(remaining) ? Number(remaining) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * List the repo's issues (`state=all`). The `/issues` endpoint mixes PRs in, tagged with a
    * `pull_request` key whose `merged_at` means no per-PR fetch is ever needed to read merge state.
    *
