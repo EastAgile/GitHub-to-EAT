@@ -23,6 +23,48 @@ export const UNEXPECTED_SHAPE = "GitHub returned an unexpected response shape";
 // bucket from the REST request budget — a run this low is about to die mid-fetch.
 const LOW_POINT_BUDGET = 100;
 
+// github.rs exempts any type on a scoped path because its ladder retries without the
+// field; with no ladder, absorbing a spent budget diagnoses it as a scope problem.
+const REFUSAL_TYPES = new Set(["FORBIDDEN", "INSUFFICIENT_SCOPES"]);
+
+/**
+ * Whether one error's GraphQL `path` names `field` (github.rs matches the same `path`).
+ * A path that is not a list names nothing: a string one would match on any substring.
+ *
+ * @param {any} error
+ * @param {string} field
+ * @returns {boolean}
+ */
+function errorNames(error, field) {
+  return Array.isArray(error?.path) && error.path.includes(field);
+}
+
+/**
+ * Whether one error is a refusal of `field` alone — the enrichment loss the caller
+ * absorbs, rather than a fatal that merely landed on the field's path.
+ *
+ * @param {any} error
+ * @param {string} field
+ * @returns {boolean}
+ */
+function refusesField(error, field) {
+  if (!errorNames(error, field)) return false;
+  // An absent or unreadable `type` is how GitHub answers most scope refusals, and it
+  // is what `#classify` itself reads as "no type"; both must agree on the same test.
+  const kind = typeof error?.type === "string" ? error.type : "";
+  return kind === "" || REFUSAL_TYPES.has(kind.toUpperCase());
+}
+
+/**
+ * What the host said when it refused the field, scrubbed for a terminal.
+ *
+ * @param {any[]} scoped
+ * @returns {string}
+ */
+function refusalMessage(scoped) {
+  return scrubControl(typeof scoped[0]?.message === "string" ? scoped[0].message : "");
+}
+
 /** One GraphQL POST against a repo, with the envelope classified onto GitHubError. */
 export class GitHubGraphQLClient {
   /** @type {Record<string, string>} */
@@ -72,9 +114,12 @@ export class GitHubGraphQLClient {
    * @param {string} operationName
    * @param {string} query
    * @param {Record<string, unknown>} variables
+   * @param {{ enrichmentField?: string, onEnrichmentRefused?: (message: string) => void }}
+   *   [enrichment] names one selection whose refusal costs that field alone, never the
+   *   query — github.rs scopes `blockedBy` that way (its story #146020)
    * @returns {Promise<Record<string, any>>}
    */
-  async query(operationName, query, variables) {
+  async query(operationName, query, variables, { enrichmentField, onEnrichmentRefused } = {}) {
     let response;
     try {
       response = await fetch(`${this.apiBase}${GRAPHQL_PATH}`, {
@@ -110,12 +155,28 @@ export class GitHubGraphQLClient {
     if ("errors" in envelope && !Array.isArray(envelope.errors)) {
       throw new GitHubError(`${UNEXPECTED_SHAPE} (the GraphQL envelope's errors were not a list)`);
     }
-    const classified = this.#classify(Array.isArray(envelope.errors) ? envelope.errors : []);
+    /** @type {any[]} */
+    const errors = Array.isArray(envelope.errors) ? envelope.errors : [];
+    // A refusal GitHub scopes to one enrichment field leaves the rest of the response
+    // intact, so it must not decide the query the way a whole-response error does.
+    const scoped =
+      enrichmentField === undefined
+        ? []
+        : errors.filter((error) => refusesField(error, enrichmentField));
+    // github.rs `classify_gql_errors` returns on the first scoped match, before it reads
+    // `errors.first()`: a sibling never fails a query the server would have degraded.
+    const classified = scoped.length > 0 ? null : this.#classify(errors);
     if (classified) throw classified;
     const data = envelope.data;
     if (data === null || typeof data !== "object" || Array.isArray(data)) {
-      throw new GitHubError(`${UNEXPECTED_SHAPE} (the GraphQL envelope carried no data)`);
+      // Without the host's own words the likeliest misconfiguration — a token that cannot
+      // read the enrichment — reads to the user as a malformed payload.
+      const said = refusalMessage(scoped);
+      throw new GitHubError(
+        `${UNEXPECTED_SHAPE} (the GraphQL envelope carried no data)${said ? ` — ${said}` : ""}`,
+      );
     }
+    if (scoped.length > 0) onEnrichmentRefused?.(refusalMessage(scoped));
     this.#observeRateLimit(data.rateLimit);
     // GraphQL's 404: the query itself resolved, the repository did not.
     if ("repository" in data && data.repository === null) {
