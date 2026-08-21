@@ -117,9 +117,8 @@ export const releaseRow = () => ({
 });
 
 /**
- * A local stand-in for api.github.com serving both transports the direct engine now uses:
- * `POST /graphql`, the free `GET /rate_limit` probe, and the REST release listing. Every
- * other path 404s, so a listing that drifted onto the wrong transport fails loudly.
+ * A local stand-in for api.github.com serving `POST /graphql`, the `GET /rate_limit` probe
+ * and the REST release listing. Every other path 404s, so a drifted listing fails loudly.
  *
  * @param {{ issues?: any[], pullRequests?: any[], labels?: any[], releases?: any[],
  *   budget?: unknown, graphql?: (request: any) => unknown }} fixture

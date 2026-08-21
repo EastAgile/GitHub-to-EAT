@@ -59,12 +59,8 @@ export const ISSUE_PAGE_POINTS_WITH_DEPS = 5;
  */
 
 /**
- * Refuse the fetch before it spends a point, rather than dying mid-listing with the run's
- * budget gone and nothing to show for it. The budget comes from the free `GET /rate_limit`
- * probe, not from pages already fetched, so the refusal is genuinely preflight.
- *
- * Only the GraphQL bucket is gated. The releases walk's REST `core` spend deliberately is
- * not: gating it would refuse a release import that runs today (CONTRACT.md, server #47448).
+ * Refuse before a point is spent, reading the free probe rather than pages already fetched.
+ * Gating the releases walk's `core` spend too would refuse a run that works (server #47448).
  *
  * @param {RestSource} probe
  * @param {boolean} dependencies whether `--include deps` adds the `blockedBy` selection
