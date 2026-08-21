@@ -7,7 +7,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { EATClient } from "../src/client.js";
-import { HybridFetcher, ISSUE_PAGE_POINTS, ISSUE_PAGE_POINTS_WITH_DEPS } from "../src/direct.js";
+import {
+  fetchFloor,
+  HybridFetcher,
+  ISSUE_PAGE_POINTS,
+  ISSUE_PAGE_POINTS_WITH_DEPS,
+} from "../src/direct.js";
 import { RateBudgetError } from "../src/github.js";
 import { startMockServer } from "../src/mockserver.js";
 import { capture, issueNode, releaseRow, withGitHubStub } from "./helpers.js";
@@ -79,6 +84,31 @@ test("releases stay on the REST listing, beside the GraphQL issue graph", async 
   );
 });
 
+test("the token reaches the REST half too — the probe and the release listing both carry it", async () => {
+  // CONTRACT.md promises the bearer on both transports. Dropping it from the REST half
+  // makes the probe read the anonymous bucket and 404s /releases on a private repo.
+  await withGitHubStub(
+    { issues: [issueNode()], releases: [releaseRow()] },
+    async ({ base, seen }) => {
+      await fetcherAt(base).fetchAll({ releases: true });
+      const rest = seen.filter((r) => r.method === "GET");
+      assert.deepEqual(
+        rest.map((r) => [r.path, r.authorization]),
+        [
+          ["/rate_limit", "Bearer ghp_secret"],
+          ["/repos/o/r/releases", "Bearer ghp_secret"],
+        ],
+      );
+      assert.ok(
+        seen
+          .filter((r) => r.method === "POST")
+          .every((r) => r.authorization === "Bearer ghp_secret"),
+        "and GraphQL carries the same one",
+      );
+    },
+  );
+});
+
 test("without --include releases the REST release listing is never touched", async () => {
   await withGitHubStub(
     { issues: [issueNode()], releases: [releaseRow()] },
@@ -140,7 +170,7 @@ test("a spent GraphQL point budget refuses the fetch before it spends a point", 
         (/** @type {any} */ err) => {
           assert.ok(err instanceof RateBudgetError, `got ${err?.constructor?.name}`);
           assert.match(err.message, /\b1\b/);
-          assert.match(err.message, new RegExp(`\\b${ISSUE_PAGE_POINTS}\\b`));
+          assert.match(err.message, new RegExp(`\\b${fetchFloor({})}\\b`));
           return true;
         },
       );
@@ -155,11 +185,9 @@ test("a spent GraphQL point budget refuses the fetch before it spends a point", 
 
 test("the deps selection raises the floor by the point it costs", async () => {
   assert.equal(ISSUE_PAGE_POINTS_WITH_DEPS, ISSUE_PAGE_POINTS + 1);
+  assert.equal(fetchFloor({ dependencies: true }), fetchFloor({}) + 1);
   await withGitHubStub(
-    {
-      issues: [issueNode()],
-      budget: { resources: { graphql: { remaining: ISSUE_PAGE_POINTS } } },
-    },
+    { issues: [issueNode()], budget: { resources: { graphql: { remaining: fetchFloor({}) } } } },
     async ({ base, seen }) => {
       // The same budget that affords a plain page cannot afford one carrying blockedBy.
       await fetcherAt(base).fetchAll({});
@@ -168,7 +196,48 @@ test("the deps selection raises the floor by the point it costs", async () => {
         () => fetcherAt(base).fetchAll({ dependencies: true }),
         (/** @type {any} */ err) => {
           assert.ok(err instanceof RateBudgetError, `got ${err?.constructor?.name}`);
-          assert.match(err.message, new RegExp(`\\b${ISSUE_PAGE_POINTS_WITH_DEPS}\\b`));
+          assert.match(err.message, new RegExp(`\\b${fetchFloor({ dependencies: true })}\\b`));
+          return true;
+        },
+      );
+    },
+  );
+});
+
+test("the floor prices the labels listing too — it always runs beside the issues one", async () => {
+  // A budget that affords the issue page alone dies on the concurrent ImportLabels query,
+  // so pricing the issue page alone promised a clean refusal it could not give.
+  assert.equal(fetchFloor({}), ISSUE_PAGE_POINTS + 1);
+  await withGitHubStub(
+    {
+      issues: [issueNode()],
+      budget: { resources: { graphql: { remaining: ISSUE_PAGE_POINTS } } },
+    },
+    async ({ base, seen }) => {
+      await assert.rejects(
+        () => fetcherAt(base).fetchAll({}),
+        (/** @type {any} */ err) => err instanceof RateBudgetError,
+      );
+      assert.deepEqual(
+        seen.filter((r) => r.method === "POST"),
+        [],
+        "refused before either listing is sent",
+      );
+    },
+  );
+});
+
+test("--include prs raises the floor again — a third listing runs with the other two", async () => {
+  assert.equal(fetchFloor({ pullRequests: true }), fetchFloor({}) + 1);
+  await withGitHubStub(
+    { issues: [issueNode()], budget: { resources: { graphql: { remaining: fetchFloor({}) } } } },
+    async ({ base }) => {
+      await fetcherAt(base).fetchAll({});
+      await assert.rejects(
+        () => fetcherAt(base).fetchAll({ pullRequests: true }),
+        (/** @type {any} */ err) => {
+          assert.ok(err instanceof RateBudgetError, `got ${err?.constructor?.name}`);
+          assert.match(err.message, new RegExp(`\\b${fetchFloor({ pullRequests: true })}\\b`));
           return true;
         },
       );
@@ -214,6 +283,116 @@ test("the budget is read once per fetch, from the free probe and not from the pa
   });
 });
 
+// --- the floor is a floor: what a mid-walk exhaustion costs -------------------
+
+/**
+ * One issue whose `blockedBy` overflows page one, so the walk must hydrate the rest.
+ *
+ * @param {(request: any) => any} onHydrate what the ImportIssueBlockedBy follow-up answers
+ */
+function overflowingBlockers(onHydrate) {
+  const page = { pageInfo: { hasNextPage: false, endCursor: null } };
+  return (/** @type {any} */ request) => {
+    if (request.operationName === "ImportIssueBlockedBy") return onHydrate(request);
+    if (request.operationName === "ImportLabels") {
+      return { data: { repository: { labels: { ...page, nodes: [] } } } };
+    }
+    return {
+      data: {
+        repository: {
+          issues: {
+            totalCount: 1,
+            ...page,
+            nodes: [
+              issueNode({
+                number: 7,
+                title: "Add a widget",
+                blockedBy: {
+                  nodes: [{ number: 90, title: "Upstream fix" }],
+                  pageInfo: { hasNextPage: true, endCursor: "blockers-2" },
+                },
+              }),
+            ],
+          },
+        },
+      },
+    };
+  };
+}
+
+test("a budget spent after the gate degrades the blockers instead of failing the run", async () => {
+  // The gate is a floor read once, so a run it lets through can still exhaust the budget
+  // mid-walk. This is what that costs, and CONTRACT.md now says so.
+  /** @type {string[]} */
+  const warnings = [];
+  /** @type {any} */
+  let fetched;
+  await withGitHubStub(
+    {
+      graphql: overflowingBlockers(() => ({
+        errors: [{ type: "RATE_LIMITED", message: "API rate limit exceeded" }],
+      })),
+    },
+    async ({ base }) => {
+      fetched = await fetcherAt(base, { warn: (m) => warnings.push(m) }).fetchAll({
+        dependencies: true,
+      });
+    },
+  );
+  assert.deepEqual(
+    fetched.blockedBy.get("7").map((/** @type {any} */ b) => b.number),
+    [90],
+    "only the blockers page one carried survive; the rest are lost for good",
+  );
+  assert.ok(
+    warnings.some((w) => /point budget stopped the dependency walks/.test(w)),
+    warnings.join(""),
+  );
+});
+
+test("a listing page the budget cannot pay fails the run, so nothing is half-written", async () => {
+  let served = 0;
+  await withGitHubStub(
+    {
+      graphql: (request) => {
+        if (request.operationName === "ImportLabels") {
+          return {
+            data: {
+              repository: {
+                labels: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
+              },
+            },
+          };
+        }
+        served += 1;
+        if (served > 1) {
+          return { errors: [{ type: "RATE_LIMITED", message: "API rate limit exceeded" }] };
+        }
+        return {
+          data: {
+            repository: {
+              issues: {
+                totalCount: 150,
+                pageInfo: { hasNextPage: true, endCursor: "cursor-2" },
+                nodes: [issueNode()],
+              },
+            },
+          },
+        };
+      },
+    },
+    async ({ base }) => {
+      await assert.rejects(
+        () => fetcherAt(base).fetchAll({}),
+        (/** @type {any} */ err) => {
+          assert.equal(err.constructor.name, "RateLimitError");
+          return true;
+        },
+      );
+    },
+  );
+});
+
 // --- `fetching X/Y`, exact from totalCount ------------------------------------
 
 test("the fetch line counts pages from totalCount, not from what has been fetched", async () => {
@@ -221,10 +400,8 @@ test("the fetch line counts pages from totalCount, not from what has been fetche
   const mock = await startMockServer();
   const stream = { ...capture(), isTTY: true, columns: 120 };
   try {
-    // 150 issues over two pages: the total is known from page one, before page two exists.
-    const pageOne = Array.from({ length: 2 }, (_, i) => issueNode({ number: i + 1 }));
-    const pageTwo = [issueNode({ number: 3 })];
-    let served = 0;
+    // One page, and a totalCount the walk never reaches: only totalCount can say "of 2".
+    // Two served pages would let the page counter alone render the same line.
     await withGitHubStub(
       {
         graphql: (request) => {
@@ -237,15 +414,13 @@ test("the fetch line counts pages from totalCount, not from what has been fetche
               },
             };
           }
-          served += 1;
-          const first = served === 1;
           return {
             data: {
               repository: {
                 issues: {
                   totalCount: 150,
-                  pageInfo: { hasNextPage: first, endCursor: first ? "cursor-2" : null },
-                  nodes: first ? pageOne : pageTwo,
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                  nodes: [issueNode({ number: 1 })],
                 },
               },
             },
@@ -264,9 +439,9 @@ test("the fetch line counts pages from totalCount, not from what has been fetche
   } finally {
     await mock.close();
   }
-  // 150 issues at 100 per page is 2 pages — a total only `totalCount` can supply, since the
-  // walk saw 3 rows. The spinner repaints on its own clock, so the finished line is readable.
-  assert.match(stream.buf, /fetching o\/r from GitHub page 2\/2 — done in/);
+  // 150 issues at 100 per page is 2 pages, and this walk fetched exactly one: the "2" can
+  // come from nowhere but `totalCount`. The finished line re-reads the thunk, so it lands.
+  assert.match(stream.buf, /fetching o\/r from GitHub page 1\/2 — done in/);
 });
 
 // --- the pipeline end to end: GraphQL → mapping → the EAT mock ----------------
@@ -497,11 +672,13 @@ async function withGitHubTrapped(fn) {
 }
 
 test("the server engine's output and import body are byte-identical to before the flip", async () => {
-  const { main } = await import("../src/cli.js");
   const { inTempDir, withEnv } = await import("./helpers.js");
   const mock = await startMockServer();
   try {
     await withGitHubTrapped(async (hits) => {
+      // Imported under the trap, not before it. A fetch at module load still escapes it —
+      // the file's static imports build the graph first; the wiring guard pins that half.
+      const { main } = await import("../src/cli.js");
       const out = capture();
       const err = capture();
       const code = await inTempDir(() =>

@@ -124,7 +124,8 @@ export const releaseRow = () => ({
  *   budget?: unknown, graphql?: (request: any) => unknown }} fixture
  *   `budget` is the whole `GET /rate_limit` body; `graphql` replaces the envelope builder
  * @param {(context: { base: string,
- *   seen: { method: string, path: string, operationName?: string }[] }) => Promise<void>} fn
+ *   seen: { method: string, path: string, operationName?: string,
+ *     authorization?: string }[] }) => Promise<void>} fn
  */
 export async function withGitHubStub(fixture, fn) {
   const {
@@ -135,14 +136,20 @@ export async function withGitHubStub(fixture, fn) {
     budget = { resources: { core: { remaining: 5000 }, graphql: { remaining: 5000 } } },
     graphql,
   } = fixture ?? {};
-  /** @type {{ method: string, path: string, operationName?: string }[]} */
+  /** @type {{ method: string, path: string, operationName?: string,
+   *    authorization?: string }[]} */
   const seen = [];
   const page = { pageInfo: { hasNextPage: false, endCursor: null } };
   const server = http.createServer(async (req, res) => {
     const { pathname } = new URL(req.url ?? "", "http://x");
     if (req.method === "POST" && pathname === "/graphql") {
       const request = JSON.parse(await readBody(req));
-      seen.push({ method: "POST", path: pathname, operationName: request.operationName });
+      seen.push({
+        method: "POST",
+        path: pathname,
+        operationName: request.operationName,
+        authorization: req.headers.authorization,
+      });
       /** @type {Record<string, unknown>} */
       const connections = {
         ImportIssues: { issues: { totalCount: issues.length, ...page, nodes: issues } },
@@ -163,7 +170,11 @@ export async function withGitHubStub(fixture, fn) {
       res.end(JSON.stringify(body));
       return;
     }
-    seen.push({ method: req.method ?? "GET", path: pathname });
+    seen.push({
+      method: req.method ?? "GET",
+      path: pathname,
+      authorization: req.headers.authorization,
+    });
     const body =
       pathname === "/rate_limit" ? budget : pathname === "/repos/o/r/releases" ? releases : null;
     res.writeHead(body === null ? 404 : 200, { "Content-Type": "application/json" });

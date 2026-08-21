@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
 import http from "node:http";
 import { Readable, Writable } from "node:stream";
 import { test } from "node:test";
@@ -11,7 +12,7 @@ import { MAPPINGS } from "../src/mappings.js";
 import { makeState, startMockServer } from "../src/mockserver.js";
 import { preflight as realPreflight } from "../src/preflight.js";
 import { VERSION } from "../src/version.js";
-import { capture, inTempDir, withEnv } from "./helpers.js";
+import { capture, inTempDir, withEnv, withGitHubStub } from "./helpers.js";
 
 /**
  * A TTY-flagged readable that answers wizard prompts one line at a time, then EOFs.
@@ -1911,55 +1912,47 @@ test("--dry-run does not soften the deps refusal — the plan would be a promise
   assert.ok(!stdout.includes("Dry run:"), stdout);
 });
 
-test("a dependency budget refusal reaches the CLI as exit 1 with the --token advice (AC 3)", async () => {
-  // AC 3 end to end: RateBudgetError must stay inside the GitHubError hierarchy
-  // cli.main catches, or the refusal becomes an unhandled rejection.
-  const server = http.createServer((req, res) => {
-    const { pathname } = new URL(req.url ?? "", "http://x");
-    const body = pathname === "/repos/o/r/issues" ? [{ number: 7 }, { number: 12 }] : [];
-    res.writeHead(200, { "Content-Type": "application/json", "x-ratelimit-remaining": "1" });
-    res.end(JSON.stringify(body));
-  });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(undefined)));
-  const { port } = /** @type {import("node:net").AddressInfo} */ (server.address());
+test("a point-budget refusal reaches the CLI as exit 1, clean, with nothing written", async () => {
+  // RateBudgetError must stay inside the GitHubError hierarchy cli.main catches, or the
+  // refusal becomes an unhandled rejection. The REST gate's own pin is in github.test.js.
+  const mock = await startMockServer();
   try {
-    await inTempDir(() =>
-      withEnv({ EAT_AGENT_KEY: "key", EAT_API_BASE: "http://127.0.0.1:9/api/v1" }, async () => {
+    await withGitHubStub(
+      { issues: [], budget: { resources: { graphql: { remaining: 1 } } } },
+      async ({ base, seen }) => {
         const err = capture();
-        const code = await main(
-          [
-            "--token",
-            "ghp_test",
-            "--project",
-            "91",
-            "--repo",
-            "o/r",
-            "--engine",
-            "direct",
-            "--include",
-            "issues,deps",
-            "-y",
-          ],
-          {
-            stdout: capture(),
-            stderr: err,
-            preflight: async () => preflightResult(),
-            runDirect: (client, project, owner, repo, opts) =>
-              realRunDirect(client, project, owner, repo, {
-                ...opts,
-                github: new GitHubClient(owner, repo, { apiBase: `http://127.0.0.1:${port}` }),
-              }),
-          },
+        const code = await inTempDir(() =>
+          withEnv({ EAT_AGENT_KEY: "key", EAT_API_BASE: mock.baseUrl }, () =>
+            main(
+              [
+                ...["--project", "91", "--repo", "o/r", "--engine", "direct"],
+                ...["--token", "ghp_secret", "-y"],
+              ],
+              {
+                confirm: null,
+                stdout: capture(),
+                stderr: err,
+                preflight: async () => preflightResult(),
+                runDirect: (client, project, owner, repo, opts) =>
+                  realRunDirect(client, project, owner, repo, { ...opts, apiBase: base }),
+              },
+            ),
+          ),
         );
         assert.equal(code, 1);
-        assert.match(err.buf, /error: --include deps needs at least 2 more GitHub request/);
-        assert.match(err.buf, /--token/);
+        assert.match(err.buf, /error: --engine direct fetches over GitHub's GraphQL API/);
+        assert.match(err.buf, /point budget/);
         assert.doesNotMatch(err.buf, /\n\s+at /, "no stack trace");
-      }),
+        assert.deepEqual(
+          seen.filter((r) => r.method === "POST"),
+          [],
+          "refused before a point is spent",
+        );
+      },
     );
+    assert.equal(mock.state.stories[91], undefined, "and before anything is written");
   } finally {
-    server.closeAllConnections();
-    await new Promise((resolve) => server.close(() => resolve(undefined)));
+    await mock.close();
   }
 });
 
@@ -1974,15 +1967,17 @@ const errorLine = (/** @type {string} */ stderr) =>
  * measured against the server rather than against a stub that was never called.
  *
  * @param {string[]} argv
- * @param {{ token?: string, stdin?: any, stdout?: any }} [options]
+ * @param {{ token?: string, stdin?: any, stdout?: any, dotenv?: string }} [options]
+ *   `dotenv` writes a .env into the temp dir, the one setup `inTempDir` otherwise excludes
  */
-async function runDirectEngine(argv, { token, stdin, stdout } = {}) {
+async function runDirectEngine(argv, { token, stdin, stdout, dotenv } = {}) {
   const mock = await startMockServer();
   /** @type {string[]} */
   const reached = [];
   try {
-    const result = await inTempDir(() =>
-      withEnv(
+    const result = await inTempDir(() => {
+      if (dotenv !== undefined) writeFileSync(".env", dotenv);
+      return withEnv(
         {
           EAT_AGENT_KEY: "key",
           EAT_API_BASE: mock.baseUrl,
@@ -2012,8 +2007,8 @@ async function runDirectEngine(argv, { token, stdin, stdout } = {}) {
           });
           return { code, stdout: out.buf, stderr: err.buf };
         },
-      ),
-    );
+      );
+    });
     return { ...result, reached, requests: mock.state.requests, state: mock.state };
   } finally {
     await mock.close();
@@ -2058,12 +2053,79 @@ test("GITHUB_TOKEN satisfies it too, so a CI run needs no flag", async () => {
   assert.deepEqual(reached, ["preflight", "runDirect"]);
 });
 
+test("a GITHUB_TOKEN in the project's .env satisfies the gate — the documented setup", async () => {
+  // The gate runs before loadConfig, so it must load .env itself; every other CLI test
+  // runs in a temp dir with no .env, which is what let this regression through.
+  const { code, reached, stderr } = await runDirectEngine(directArgv("--engine", "direct", "-y"), {
+    dotenv: "GITHUB_TOKEN=ghp_from_dotenv\n",
+  });
+  assert.equal(code, 0, stderr);
+  assert.deepEqual(reached, ["preflight", "runDirect"]);
+});
+
+test("the .env token is the one the direct engine fetches with", async () => {
+  /** @type {string | undefined} */
+  let seen;
+  const mock = await startMockServer();
+  try {
+    await inTempDir(() =>
+      withEnv(
+        { EAT_AGENT_KEY: "key", EAT_API_BASE: mock.baseUrl, GITHUB_TOKEN: undefined },
+        async () => {
+          writeFileSync(".env", "GITHUB_TOKEN=ghp_from_dotenv\n");
+          const code = await main(directArgv("--engine", "direct", "-y"), {
+            confirm: null,
+            stdout: capture(),
+            stderr: capture(),
+            preflight: async () => preflightResult(),
+            runDirect: async (
+              /** @type {any} */ _c,
+              /** @type {any} */ _p,
+              /** @type {any} */ _o,
+              /** @type {any} */ _r,
+              /** @type {any} */ opts,
+            ) => {
+              seen = opts.token;
+              return outcome();
+            },
+          });
+          assert.equal(code, 0);
+        },
+      ),
+    );
+  } finally {
+    await mock.close();
+  }
+  assert.equal(seen, "ghp_from_dotenv");
+});
+
 test("an empty --token is no token at all", async () => {
   const { code, stderr } = await runDirectEngine(
     directArgv("--engine", "direct", "--token", "", "-y"),
   );
   assert.equal(code, 2);
   assert.match(errorLine(stderr), /--token/);
+});
+
+test("a whitespace --token is no token either — it reaches GraphQL as a 401", async () => {
+  const { code, stderr } = await runDirectEngine(
+    directArgv("--engine", "direct", "--token", " ", "-y"),
+  );
+  assert.equal(code, 2);
+  assert.match(errorLine(stderr), /--token/);
+});
+
+test("a whitespace GITHUB_TOKEN is no token either", async () => {
+  const { code } = await runDirectEngine(directArgv("--engine", "direct", "-y"), { token: "  " });
+  assert.equal(code, 2);
+});
+
+test("the refusal never tells a private-repo member the server engine needs no token", async () => {
+  // HELP (--token) and README both say the server engine needs one for a private repo,
+  // so "needs no token" sent that member to a run that fails less clearly server-side.
+  const { stderr } = await runDirectEngine(directArgv("--engine", "direct", "-y"));
+  assert.match(errorLine(stderr), /only for a private repo/);
+  assert.doesNotMatch(errorLine(stderr), /needs no token/);
 });
 
 test("a customization flag implies --engine direct, so it needs a token too", async () => {

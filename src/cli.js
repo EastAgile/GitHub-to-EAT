@@ -10,7 +10,7 @@ import readline from "node:readline/promises";
 import { parseArgs } from "node:util";
 
 import { EATClient, EATError, EATTimeout } from "./client.js";
-import { ConfigError, loadConfig } from "./config.js";
+import { ConfigError, loadConfig, loadDotenv } from "./config.js";
 import { runDirect as defaultRunDirect } from "./direct.js";
 import { DEFAULT_ENGINE, ENGINES, parseEngine } from "./engine.js";
 import { GitHubError } from "./github.js";
@@ -380,14 +380,17 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     }
   }
 
-  // GitHub's GraphQL API has no anonymous mode and the direct engine fetches over it, so a
-  // tokenless run cannot work — refused here, before the config, the fetch and any write.
-  if (engine === "direct" && !(values.token || process.env.GITHUB_TOKEN)) {
-    return usageError(
-      "--engine direct fetches from GitHub's GraphQL API, which rejects anonymous callers: " +
-        "pass --token <TOKEN>, or set GITHUB_TOKEN. (--engine server needs no token — the " +
-        "EAT server fetches with its own credential.)",
-    );
+  // GitHub's GraphQL API has no anonymous mode, so a tokenless direct run cannot work — and
+  // this gate precedes loadConfig, so it loads .env or a token set there reads as absent.
+  if (engine === "direct") {
+    loadDotenv();
+    if (!(values.token?.trim() || process.env.GITHUB_TOKEN?.trim())) {
+      return usageError(
+        "--engine direct fetches from GitHub's GraphQL API, which rejects anonymous callers: " +
+          "pass --token <TOKEN>, or set GITHUB_TOKEN. (--engine server needs one only for a " +
+          "private repo — EAT fetches public repos with its own credential.)",
+      );
+    }
   }
 
   // Fail closed: off-terminal there is no way to show the [y/N] confirm, so a

@@ -513,10 +513,13 @@ took, so nothing downstream can tell which transport a row arrived on.
 **A token is mandatory on `--engine direct`.** GitHub's GraphQL endpoint rejects
 anonymous callers (probed 2026-08-11: an anonymous `POST /graphql` answers
 403/401), so a run without `--token` / `GITHUB_TOKEN` cannot fetch at all. The
-CLI refuses it as a **usage error (exit 2) before it loads configuration,
-contacts EAT, fetches anything, or writes anything** — not as a fetch failure
-halfway in. The refusal names both ways to supply a token, and says the server
-engine needs none. `--engine server` is untouched: its fetch is EAT's own, on
+CLI refuses it as a **usage error (exit 2) before it contacts EAT, fetches
+anything, or writes anything** — not as a fetch failure halfway in. The gate
+runs ahead of the configuration load, so it loads the project's `.env` itself:
+a `GITHUB_TOKEN` set there satisfies it exactly as an exported one does, which
+is the setup README.md documents. An all-whitespace token is no token. The
+refusal names both ways to supply a token, and says the server engine needs one
+only for a private repo. `--engine server` is untouched: its fetch is EAT's own, on
 the platform PAT, and a tokenless server run imports exactly as before. The
 transport constructor refuses a missing token too, so no later path can reach
 GraphQL anonymously.
@@ -524,9 +527,11 @@ GraphQL anonymously.
 **The point budget is read from a free probe, and only the GraphQL bucket is
 gated.** Before the first query the stage reads `GET /rate_limit` — a route
 GitHub does not charge for — and refuses the run when
-`resources.graphql.remaining` is below what one `ImportIssues` page costs: 4
-points, or 5 with the `blockedBy` selection `--include deps` adds (measured
-server-side, and flat at every `first:` from 1 to 100). The refusal is a
+`resources.graphql.remaining` is below the first page of every listing the run
+starts: one `ImportIssues` page at 4 points, 5 with the `blockedBy` selection
+`--include deps` adds (measured server-side, and flat at every `first:` from 1
+to 100), plus 1 for the `ImportLabels` page that always runs beside it and 1
+more for `ImportPullRequests` under `--include prs`. The refusal is a
 `RateBudgetError` raised before any query is sent, so nothing is spent and
 nothing is written; re-running after the reset is a clean retry. **A host that
 publishes no `graphql` bucket is not gated**, exactly as a host publishing no
@@ -537,6 +542,21 @@ ungated**, mirroring the server's own split (its story #47448): gating it would
 turn a release import that runs today into a refusal, and the two buckets are
 not interchangeable. No token raises the GraphQL point budget, so the refusal
 advises waiting for the reset rather than passing one.
+
+**That gate is a floor, not a forecast, and it is weaker than the REST gate it
+replaces.** It prices one page of each listing, reads the probe once before page
+one, and prices no later page, no per-issue overflow hydration and no release
+request. The REST dependency gate documented below was proportional — it
+compared the whole issue count against the budget — so a run this gate lets
+through can still exhaust the budget mid-walk, where that one could not. What
+that costs depends on which walk runs out. **A listing page fails the run**, so
+nothing is half-written and re-running after the reset is clean. **A per-issue
+`blockedBy` hydration page degrades instead**: the walk stops, a warning names
+the point budget, and the import completes — writing stories that keep only the
+blockers their own listing page carried. An import never updates a story it
+already created, so those blockers are unrepairable by re-running; the repair is
+a fresh import into an empty project. Re-check the budget before a large
+`--include deps` run rather than relying on the floor.
 
 **`fetching X/Y` is exact.** The listing reports `totalCount` with its first
 page, so the fetch line names the page it is on out of the pages there are —
@@ -658,7 +678,9 @@ unchanged; story #57636 deletes them. All of them are `per_page=100` with
   **A run is refused up front when it cannot afford the stage.** This gate is
   `src/github.js`'s own and, since #57634, no longer on the direct engine's path
   — the engine's `--include deps` spends no REST request at all, and the
-  GraphQL point-budget probe above is what gates a run now. Before spending
+  GraphQL point-budget probe above is what gates a run now. That probe is a
+  floor and this gate is proportional, so the property the next sentence names
+  is the one the move gave up (see "a floor, not a forecast" above). Before spending
   a single dependency request the fetcher compares the issue count against the
   `x-ratelimit-remaining` its earlier responses reported; a run short of that
   budget fails with a `RateBudgetError`, rather than dying halfway with an

@@ -47,6 +47,21 @@ export const ISSUE_PAGE_POINTS = 4;
 /** The same page carrying `blockedBy`, which `--include deps` adds (CONTRACT.md). */
 export const ISSUE_PAGE_POINTS_WITH_DEPS = 5;
 
+/** GraphQL's floor for a plain connection page — the labels and pull-request listings. */
+export const LISTING_PAGE_POINTS = 1;
+
+/**
+ * What a fetch must afford before its first page. `ImportLabels` always runs beside the issue
+ * listing and `ImportPullRequests` joins under `--include prs`, so pricing one would under-gate.
+ *
+ * @param {{ dependencies?: boolean, pullRequests?: boolean }} [options]
+ * @returns {number}
+ */
+export function fetchFloor({ dependencies = false, pullRequests = false } = {}) {
+  const issues = dependencies ? ISSUE_PAGE_POINTS_WITH_DEPS : ISSUE_PAGE_POINTS;
+  return issues + LISTING_PAGE_POINTS + (pullRequests ? LISTING_PAGE_POINTS : 0);
+}
+
 /**
  * The fetch stage's two sources. The issue graph rides GraphQL; `releases` is the one
  * listing GraphQL does not serve, so it stays on REST, matching the server exactly.
@@ -63,19 +78,20 @@ export const ISSUE_PAGE_POINTS_WITH_DEPS = 5;
  * Gating the releases walk's `core` spend too would refuse a run that works (server #47448).
  *
  * @param {RestSource} probe
- * @param {boolean} dependencies whether `--include deps` adds the `blockedBy` selection
+ * @param {{ dependencies?: boolean, pullRequests?: boolean }} options the selections that price it
  */
-async function assertPointBudget(probe, dependencies) {
+async function assertPointBudget(probe, options) {
   const remaining = await probe.graphqlBudget();
   // A host publishing no budget cannot be gated, exactly as a headerless one never was.
   if (remaining === null) return;
-  const cost = dependencies ? ISSUE_PAGE_POINTS_WITH_DEPS : ISSUE_PAGE_POINTS;
+  const cost = fetchFloor(options);
   if (remaining >= cost) return;
   throw new RateBudgetError(
     `--engine direct fetches over GitHub's GraphQL API, whose point budget has ${remaining} ` +
-      `point(s) left; one page of the issue listing costs ${cost}. That budget is a separate ` +
-      "bucket from the REST request limit and no token raises it — wait for it to reset " +
-      "(up to an hour) and re-run.",
+      `point(s) left; the first page of the listings this run needs costs ${cost}. That budget ` +
+      "is a separate bucket from the REST request limit and no token raises it — wait for it " +
+      "to reset (up to an hour) and re-run. It is a floor, not a forecast: a longer walk can " +
+      "still exhaust the budget after it starts.",
   );
 }
 
@@ -94,16 +110,16 @@ export class HybridFetcher {
    * @param {string} owner
    * @param {string} repo
    * @param {{ token?: string, timeout?: number, apiBase?: string,
-   *   warn?: (message: string) => void, onProgress?: (status: any) => void,
-   *   graph?: IssueGraphSource, rest?: RestSource }} [options]
-   *   `graph` and `rest` are test seams; production passes neither
+   *   warn?: (message: string) => void, onProgress?: (status: any) => void }} [options]
    * @throws {import("./github.js").GitHubAuthError} without a token — GraphQL has no
    *   anonymous mode
    */
-  constructor(owner, repo, { token, timeout, apiBase, warn, onProgress, graph, rest } = {}) {
+  constructor(owner, repo, { token, timeout, apiBase, warn, onProgress } = {}) {
+    // `shared` reaches both transports: the bearer must ride REST too, or the free probe
+    // reads the anonymous bucket and a private repo 404s on /releases.
     const shared = { token, timeout, apiBase, warn };
-    this.#graph = graph ?? new GitHubGraphQLFetcher(owner, repo, { ...shared, onProgress });
-    this.#rest = rest ?? new GitHubClient(owner, repo, shared);
+    this.#graph = new GitHubGraphQLFetcher(owner, repo, { ...shared, onProgress });
+    this.#rest = new GitHubClient(owner, repo, shared);
   }
 
   /**
@@ -112,7 +128,7 @@ export class HybridFetcher {
    *   subIssues: Map<string, string[]>, releases: any[], blockedBy: Map<string, any[]> }>}
    */
   async fetchAll({ releases = false, pullRequests = false, dependencies = false } = {}) {
-    await assertPointBudget(this.#rest, dependencies);
+    await assertPointBudget(this.#rest, { dependencies, pullRequests });
     const [graph, releaseRows] = await Promise.all([
       this.#graph.fetchAll({ pullRequests, dependencies }),
       releases ? this.#rest.listReleases() : [],

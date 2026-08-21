@@ -440,10 +440,12 @@ test("the deps legend names the blocker text both engines write", () => {
   assert.ok(legend.includes(blockedByDesc(90, "Upstream fix")), legend);
 });
 
-test("only the direct engine's deps legend names the request budget it spends", () => {
-  assert.match(renderLegend(["issues", "deps"], "direct"), /--token/);
-  // The server holds the platform PAT — a 60/h note there would be a lie.
-  assert.ok(!renderLegend(["issues", "deps"], "server").includes("--token"));
+test("only the direct engine's deps legend names the budget it spends", () => {
+  // The server holds the platform PAT and spends its own budget, so a cost note there
+  // would be a lie. The direct run is never anonymous now, so it advises no --token.
+  assert.match(renderLegend(["issues", "deps"], "direct"), /one extra point per page/);
+  assert.ok(!renderLegend(["issues", "deps"], "server").includes("one extra point"));
+  assert.ok(!renderLegend(["issues", "deps"], "direct").includes("--token"));
 });
 
 test("a run without deps prints no dependency line", () => {
@@ -462,10 +464,14 @@ test("both engines' deps legends state the unimported-blocker rule", () => {
   }
 });
 
-test("the deps cost line is a lower bound, and direct-only", () => {
+test("the deps cost line prices the GraphQL listing, not a per-issue REST stage", () => {
+  // #57634 moved the blockers onto the issue listing. The old line priced a REST stage
+  // that no longer runs and advised --token for a run the CLI now refuses outright.
   const direct = renderLegend(["issues", "deps"], "direct");
-  assert.match(direct, /at least one extra GitHub request per issue/);
-  assert.ok(!renderLegend(["issues", "deps"], "server").includes("extra GitHub request"));
+  assert.match(direct, /rides the issue listing: one extra point per page/);
+  assert.match(direct, /more than 100 blockers/);
+  assert.doesNotMatch(direct, /extra GitHub request/);
+  assert.doesNotMatch(direct, /anonymous/);
 });
 // --- pull requests in the legend (#31933) ------------------------------------
 

@@ -210,9 +210,11 @@ export const PRS_LEGEND = prsLegend();
 const DEPENDENCY_LINE =
   "issue 'blocked by' dependency → a blocker on its story " +
   `('${blockedByDesc(90, "Upstream fix")}', unresolved)`;
-// A lower bound: a listing past 100 dependencies pages, and each page is a request.
+// Since #57634 the blockers ride the GraphQL issue listing, so only an issue past 100
+// of them costs a request of its own. A direct run is never anonymous now (src/cli.js).
 const DEPENDENCY_COST_LINE =
-  "costs at least one extra GitHub request per issue — an anonymous run (60/h) may need --token";
+  "rides the issue listing: one extra point per page, plus a follow-up request for an issue " +
+  "with more than 100 blockers";
 const DEPENDENCY_UNIMPORTED_LINE =
   "a blocker is recorded whether or not the blocking issue is itself imported";
 
