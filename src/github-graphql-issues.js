@@ -1,6 +1,7 @@
 /**
  * The `ImportIssues` / `ImportPullRequests` listings, the follow-ups draining an overflowing
- * connection, and the rename layer keeping REST's names for `src/mapping.js`. Not wired: CONTRACT.md.
+ * connection, and the rename layer keeping REST's names for `src/mapping.js`. Since #57634 this
+ * is the direct engine's only issue path: CONTRACT.md.
  */
 
 import { GITHUB_API_BASE, GitHubError, RateLimitError, RepoNotFoundError } from "./github.js";

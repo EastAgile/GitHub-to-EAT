@@ -1,13 +1,16 @@
 /**
- * Client-side GitHub REST fetcher for the direct engine.
+ * Client-side GitHub REST fetcher. Since #57634 an `--engine direct` run reaches it for the
+ * release listing and the free `GET /rate_limit` probe alone; the listings below still ship
+ * and are still tested, and story #57636 deletes them.
  *
- * Pulls a repo's issues, their comments, and labels from the repo-wide list
+ * The budgets here are this module's own, not an `--engine direct` run's. It pulls a repo's
+ * issues, their comments, and labels from the repo-wide list
  * endpoints (`per_page=100`, `Link`-header pagination), which keeps a mid-sized flat
  * repo inside the anonymous 60 req/h budget; a token (`--token` / `GITHUB_TOKEN`)
  * lifts the ceiling to 5000/h and reaches private repos. Two stages are per-issue: the
  * sub-issue listing, charged only to rows that advertise one, and — under
  * `--include deps` — the dependency listing, which has no rollup to gate on and so
- * bills every issue, making it the dominant budget term. Both degrade rather than
+ * bills every issue, making it the dominant term of that budget. Both degrade rather than
  * failing the run; the dependency stage refuses up front when the observed budget
  * cannot cover it. Zero runtime deps: global `fetch` only.
  */
@@ -53,7 +56,7 @@ export class RateLimitError extends GitHubError {}
 /** The supplied token was rejected (HTTP 401). */
 export class GitHubAuthError extends GitHubError {}
 
-/** An anonymous run cannot afford an opt-in per-issue stage (`--include deps`). */
+/** A pre-flight budget refusal: this module's per-issue REST stage, or the GraphQL floor. */
 export class RateBudgetError extends GitHubError {}
 
 /**
@@ -333,8 +336,11 @@ export class GitHubClient {
       const payload = await response.json();
       const remaining = payload?.resources?.graphql?.remaining;
       return Number.isFinite(remaining) ? Number(remaining) : null;
-    } catch {
-      return null;
+    } catch (err) {
+      // Fail open only on the shapes CONTRACT.md names — a 404, an unreadable body, an
+      // unreachable host. A bug in this file must surface, not read as "no budget".
+      if (err instanceof GitHubError || err instanceof SyntaxError) return null;
+      throw err;
     }
   }
 

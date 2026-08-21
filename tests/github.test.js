@@ -1579,6 +1579,28 @@ test("a /rate_limit route that 404s reports no budget rather than failing the ru
   assert.equal(budget, null);
 });
 
+test("an unreachable host reports no budget — the transport shape CONTRACT.md names", async () => {
+  // The four payload shapes and the 404 above never leave the catch's transport branch.
+  const budget = await new GitHubClient("o", "r", {
+    apiBase: "http://127.0.0.1:1",
+    token: "t",
+    timeout: 2,
+  }).graphqlBudget();
+  assert.equal(budget, null);
+});
+
+test("the probe rethrows a failure that is not a fetch failure, rather than reading as 'no budget'", async () => {
+  const client = new GitHubClient("o", "r", { apiBase: "http://127.0.0.1:1", token: "t" });
+  // A bug in this file must surface; a bare catch would report it as an ungated host.
+  const boom = new TypeError("a later refactor broke the probe");
+  Object.defineProperty(client, "apiBase", {
+    get() {
+      throw boom;
+    },
+  });
+  await assert.rejects(() => client.graphqlBudget(), boom);
+});
+
 test("the probe sends the token, so it reads that token's own budget", async () => {
   /** @type {string | undefined} */
   let auth;

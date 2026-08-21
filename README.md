@@ -210,7 +210,8 @@ don't support plan computation, it falls back to a local preview.
 
 **Tokens:** `--engine direct` always needs one — it reads GitHub's GraphQL API,
 which rejects anonymous callers, and a tokenless run exits `2` with a usage error
-before it fetches or writes anything. On the default server engine a public repo
+before it fetches or writes anything. `GITHUB_TOKEN` in your `.env` counts, the
+same as `--token` or an exported variable. On the default server engine a public repo
 needs none (the server uses its platform credential); a **private** repo — or a
 server without that credential — needs `--token <TOKEN>` or the `GITHUB_TOKEN`
 env var. The token needs `repo`, or fine-grained *Issues: Read*, on that repo.
