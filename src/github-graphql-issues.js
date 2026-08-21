@@ -575,8 +575,6 @@ export class GitHubGraphQLFetcher {
   /**
    * github.rs's shared `refused` flag: once GitHub rate-limits one dependency follow-up, the
    * issues behind it keep what rode their own page instead of each re-walking into the limit.
-   *
-   * @type {boolean}
    */
   #dependenciesRateLimited = false;
 
