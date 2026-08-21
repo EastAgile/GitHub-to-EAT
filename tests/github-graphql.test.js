@@ -419,6 +419,271 @@ test("no SchemaLevel ladder: an undefinedField error falls to the generic GitHub
   });
 });
 
+// --- a refusal scoped to one enrichment field (story #259658) ----------------
+
+/**
+ * One error GitHub scoped to a single field of the selection.
+ *
+ * @param {string | undefined} type
+ * @param {(string | number)[] | undefined} path
+ * @param {string} [message]
+ */
+const scopedTo = (type, path, message = "Resource not accessible by personal access token") => ({
+  ...(type === undefined ? {} : { type }),
+  message,
+  ...(path === undefined ? {} : { path }),
+});
+
+const BLOCKED_BY_PATH = ["repository", "issues", "nodes", 3, "blockedBy"];
+
+test("without an enrichment field named, a scoped refusal still classifies and throws", async () => {
+  const { handler } = envelope({
+    data: { repository: { id: "R_1" } },
+    errors: [scopedTo("FORBIDDEN", BLOCKED_BY_PATH)],
+  });
+  await withGitHub(handler, async (base) => {
+    await assert.rejects(clientAt(base).client.query("Op", QUERY, {}), GitHubAuthError);
+  });
+});
+
+test("a refusal scoped to the named enrichment field resolves to the partial data", async () => {
+  const { handler } = envelope({
+    data: { repository: { id: "R_1" } },
+    errors: [scopedTo("FORBIDDEN", BLOCKED_BY_PATH)],
+  });
+  await withGitHub(handler, async (base) => {
+    /** @type {string[]} */
+    const refused = [];
+    const data = await clientAt(base).client.query(
+      "Op",
+      QUERY,
+      {},
+      {
+        enrichmentField: "blockedBy",
+        onEnrichmentRefused: (message) => refused.push(message),
+      },
+    );
+    // github.rs `classify_gql_errors`: the enrichment is lost, the import is not.
+    assert.deepEqual(data, { repository: { id: "R_1" } });
+    assert.deepEqual(refused, ["Resource not accessible by personal access token"]);
+  });
+});
+
+test("only a string path segment names the field, as the server's as_str() match does", async () => {
+  for (const path of [
+    ["repository", "issues", "nodes", 0, "subIssues"],
+    ["repository", "issues"],
+    [],
+    undefined,
+  ]) {
+    const { handler } = envelope({
+      data: { repository: { id: "R_1" } },
+      errors: [scopedTo("FORBIDDEN", path)],
+    });
+    await withGitHub(handler, async (base) => {
+      await assert.rejects(
+        clientAt(base).client.query("Op", QUERY, {}, { enrichmentField: "blockedBy" }),
+        GitHubAuthError,
+      );
+    });
+  }
+});
+
+test("a path that is not a list is never read as a scoped refusal", async () => {
+  const { handler } = envelope({
+    data: { repository: { id: "R_1" } },
+    errors: [{ type: "FORBIDDEN", message: "no", path: "repository.issues.nodes.0.blockedBy" }],
+  });
+  await withGitHub(handler, async (base) => {
+    await assert.rejects(
+      clientAt(base).client.query("Op", QUERY, {}, { enrichmentField: "blockedBy" }),
+      GitHubAuthError,
+    );
+  });
+});
+
+test("a scoped refusal wins over a sibling error, as classify_gql_errors does", async () => {
+  const { handler } = envelope({
+    data: { repository: { id: "R_1" } },
+    errors: [scopedTo("FORBIDDEN", BLOCKED_BY_PATH), { type: "RATE_LIMITED", message: "slow" }],
+  });
+  await withGitHub(handler, async (base) => {
+    /** @type {string[]} */
+    const refused = [];
+    const data = await clientAt(base).client.query(
+      "Op",
+      QUERY,
+      {},
+      {
+        enrichmentField: "blockedBy",
+        onEnrichmentRefused: (message) => refused.push(message),
+      },
+    );
+    // github.rs `classify_gql_errors` returns Schema on the first scoped match, before it
+    // ever reaches `errors.first()`: the sibling never decides a query the server degrades.
+    assert.deepEqual(data, { repository: { id: "R_1" } });
+    assert.deepEqual(refused, ["Resource not accessible by personal access token"]);
+  });
+});
+
+test("only a refusal type is exempted; a fatal one scoped to the field still decides", async () => {
+  /** @type {[string, any][]} */
+  const fatal = [
+    ["RATE_LIMITED", RateLimitError],
+    ["UNAUTHORIZED", GitHubAuthError],
+    ["BAD_CREDENTIALS", GitHubAuthError],
+    ["NOT_FOUND", RepoNotFoundError],
+  ];
+  for (const [type, expected] of fatal) {
+    const { handler } = envelope({
+      data: { repository: { id: "R_1" } },
+      errors: [scopedTo(type, BLOCKED_BY_PATH)],
+    });
+    await withGitHub(handler, async (base) => {
+      /** @type {string[]} */
+      const refused = [];
+      await assert.rejects(
+        clientAt(base).client.query(
+          "Op",
+          QUERY,
+          {},
+          {
+            enrichmentField: "blockedBy",
+            onEnrichmentRefused: (message) => refused.push(message),
+          },
+        ),
+        expected,
+        type,
+      );
+      assert.deepEqual(refused, [], type);
+    });
+  }
+});
+
+test("a permission refusal, however typed and cased, is what the exemption covers", async () => {
+  for (const type of ["FORBIDDEN", "INSUFFICIENT_SCOPES", "forbidden", undefined]) {
+    const { handler } = envelope({
+      data: { repository: { id: "R_1" } },
+      // A sibling rides along, so each case proves the precedence too, not only the type.
+      errors: [scopedTo(type, BLOCKED_BY_PATH), { type: "RATE_LIMITED", message: "slow" }],
+    });
+    await withGitHub(handler, async (base) => {
+      /** @type {string[]} */
+      const refused = [];
+      const data = await clientAt(base).client.query(
+        "Op",
+        QUERY,
+        {},
+        {
+          enrichmentField: "blockedBy",
+          onEnrichmentRefused: (message) => refused.push(message),
+        },
+      );
+      assert.deepEqual(data, { repository: { id: "R_1" } }, String(type));
+      assert.equal(refused.length, 1, String(type));
+    });
+  }
+});
+
+test("a response carrying no errors at all never reports an enrichment refusal", async () => {
+  const { handler } = envelope({ data: { repository: { id: "R_1" } } });
+  await withGitHub(handler, async (base) => {
+    /** @type {string[]} */
+    const refused = [];
+    await clientAt(base).client.query(
+      "Op",
+      QUERY,
+      {},
+      { enrichmentField: "blockedBy", onEnrichmentRefused: (message) => refused.push(message) },
+    );
+    assert.deepEqual(refused, []);
+  });
+});
+
+test("every scoped refusal on one response is reported once, not once per node", async () => {
+  const { handler } = envelope({
+    data: { repository: { id: "R_1" } },
+    errors: [
+      scopedTo("FORBIDDEN", ["repository", "issues", "nodes", 0, "blockedBy"]),
+      scopedTo("FORBIDDEN", ["repository", "issues", "nodes", 1, "blockedBy"], "second"),
+    ],
+  });
+  await withGitHub(handler, async (base) => {
+    /** @type {string[]} */
+    const refused = [];
+    await clientAt(base).client.query(
+      "Op",
+      QUERY,
+      {},
+      {
+        enrichmentField: "blockedBy",
+        onEnrichmentRefused: (message) => refused.push(message),
+      },
+    );
+    assert.equal(refused.length, 1);
+  });
+});
+
+test("terminal escapes in a scoped refusal are stripped before the caller sees them", async () => {
+  const { handler } = envelope({
+    data: { repository: { id: "R_1" } },
+    errors: [scopedTo("FORBIDDEN", BLOCKED_BY_PATH, "\x1b[2Jrefused\r\n\x1b]0;pwned\x07")],
+  });
+  await withGitHub(handler, async (base) => {
+    /** @type {string[]} */
+    const refused = [];
+    await clientAt(base).client.query(
+      "Op",
+      QUERY,
+      {},
+      {
+        enrichmentField: "blockedBy",
+        onEnrichmentRefused: (message) => refused.push(message),
+      },
+    );
+    assert.match(refused[0], /refused/);
+    assert.doesNotMatch(refused[0], /\p{Cc}/u);
+  });
+});
+
+test("a scoped refusal that left no data behind is an unexpected shape, quoting the host", async () => {
+  const { handler } = envelope({
+    errors: [scopedTo("FORBIDDEN", BLOCKED_BY_PATH, "\x1b[2JResource not accessible")],
+  });
+  await withGitHub(handler, async (base) => {
+    await assert.rejects(
+      clientAt(base).client.query("Op", QUERY, {}, { enrichmentField: "blockedBy" }),
+      (err) => {
+        assert.ok(err instanceof GitHubError);
+        assert.match(/** @type {Error} */ (err).message, /unexpected response shape/);
+        // Without the host's own words the likeliest misconfiguration reads as a malformed
+        // payload; the message is scrubbed here as every other remote text is.
+        assert.match(/** @type {Error} */ (err).message, /Resource not accessible/);
+        assert.doesNotMatch(/** @type {Error} */ (err).message, /\p{Cc}/u);
+        return true;
+      },
+    );
+  });
+});
+
+test("a scoped refusal with no listener still resolves rather than throwing", async () => {
+  const { handler } = envelope({
+    data: { repository: { id: "R_1" } },
+    errors: [scopedTo("FORBIDDEN", BLOCKED_BY_PATH)],
+  });
+  await withGitHub(handler, async (base) => {
+    const data = await clientAt(base).client.query(
+      "Op",
+      QUERY,
+      {},
+      {
+        enrichmentField: "blockedBy",
+      },
+    );
+    assert.deepEqual(data, { repository: { id: "R_1" } });
+  });
+});
+
 // --- HTTP statuses (the REST mapping, reused) --------------------------------
 
 test("an HTTP 404 maps to RepoNotFoundError naming the repo", async () => {

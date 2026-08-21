@@ -3,7 +3,7 @@
  * connection, and the rename layer keeping REST's names for `src/mapping.js`. Not wired: CONTRACT.md.
  */
 
-import { GITHUB_API_BASE, GitHubError, RepoNotFoundError } from "./github.js";
+import { GITHUB_API_BASE, GitHubError, RateLimitError, RepoNotFoundError } from "./github.js";
 import { GitHubGraphQLClient, UNEXPECTED_SHAPE } from "./github-graphql.js";
 
 const PER_PAGE = 100;
@@ -19,6 +19,15 @@ export const MAX_LISTING_PAGES = 50_000;
  * path's own bound: 2000 children is far past any real hierarchy. Exported so tests need no guess.
  */
 export const MAX_SUB_ISSUE_PAGES = 20;
+
+/**
+ * Pages one issue's `blockedBy` walk may read, github.rs `MAX_DEPENDENCY_PAGES` and the REST
+ * path's own bound: 2000 blockers means a broken upstream. Exported so tests need no guess.
+ */
+export const MAX_DEPENDENCY_PAGES = 20;
+
+/** Named apart from the selection because a scoped refusal names it in the error `path`. */
+const BLOCKED_BY_FIELD = "blockedBy";
 
 // A repo-wide overflow would otherwise render one line per issue.
 const MAX_NAMED_OVERFLOWS = 10;
@@ -80,16 +89,31 @@ export function nodeSelection(stateDetail, extras) {
 }
 
 /**
- * The issue node, at the server's `SchemaLevel::FULL` minus `blockedBy`: no degradation
- * ladder (CONTRACT.md), and the dependency connection is story #259658.
+ * The issue-dependency sub-selection (github.rs `issue_node_selection`). `number` + `title`
+ * are the whole of it because they are the whole of what a blocker's text renders.
  *
  * @returns {string}
  */
-export function issueNodeSelection() {
+export function blockedBySelection() {
+  return (
+    `blockedBy(first: ${PER_PAGE}) { pageInfo { hasNextPage endCursor } ` +
+    "nodes { number title } }"
+  );
+}
+
+/**
+ * The issue node, at the server's `SchemaLevel::FULL`: no degradation ladder (CONTRACT.md).
+ *
+ * @param {boolean} [dependencies] `--include deps`, which alone adds `blockedBy`: a run
+ *   without it must not carry the connection at all, nor pay the point it costs
+ * @returns {string}
+ */
+export function issueNodeSelection(dependencies = false) {
   return nodeSelection("stateReason", [
     "issueType { name }",
     commentsSelection(),
     `subIssues(first: ${PER_PAGE}) { pageInfo { hasNextPage endCursor } nodes { number } }`,
+    ...(dependencies ? [blockedBySelection()] : []),
   ]);
 }
 
@@ -107,15 +131,16 @@ export function pullRequestNodeSelection() {
  * `rateLimit` rides every listing query because GraphQL scores nodes returned, so the
  * REST-era `x-ratelimit-remaining` header no longer describes the spend.
  *
+ * @param {boolean} [dependencies] see {@link issueNodeSelection}
  * @returns {string}
  */
-export function issuesQuery() {
+export function issuesQuery(dependencies = false) {
   return (
     "query ImportIssues($owner: String!, $name: String!, $first: Int!, $after: String) { " +
     "rateLimit { remaining resetAt } " +
     "repository(owner: $owner, name: $name) { " +
     "issues(first: $first, after: $after, orderBy: {field: CREATED_AT, direction: DESC}) { " +
-    `totalCount pageInfo { hasNextPage endCursor } nodes { ${issueNodeSelection()} } } } }`
+    `totalCount pageInfo { hasNextPage endCursor } nodes { ${issueNodeSelection(dependencies)} } } } }`
   );
 }
 
@@ -204,6 +229,21 @@ export function issueSubIssuesQuery() {
     "$first: Int!, $after: String) { repository(owner: $owner, name: $name) { " +
     "issue(number: $number) { subIssues(first: $first, after: $after) { " +
     "pageInfo { hasNextPage endCursor } nodes { number } } } } }"
+  );
+}
+
+/**
+ * One issue's blockers past the page its listing node carried (github.rs
+ * `issue_blocked_by_query`).
+ *
+ * @returns {string}
+ */
+export function issueBlockedByQuery() {
+  return (
+    "query ImportIssueBlockedBy($owner: String!, $name: String!, $number: Int!, " +
+    "$first: Int!, $after: String) { repository(owner: $owner, name: $name) { " +
+    "issue(number: $number) { blockedBy(first: $first, after: $after) { " +
+    "pageInfo { hasNextPage endCursor } nodes { number title } } } } }"
   );
 }
 
@@ -431,15 +471,29 @@ function vanishedNode(noun, number, kind) {
  *
  * @param {any} node one `ImportIssues` node
  * @param {string} issueUrl the issue's REST API URL, for its comments' `issue_url`
- * @returns {{ issue: any, comments: any[], subIssues: string[],
- *   truncated: { comments: string | null, subIssues: string | null } }}
+ * @param {boolean} [dependencies] whether the query carried `blockedBy` at all
+ * @returns {{ issue: any, comments: any[], subIssues: string[], blockedBy: any[] | null,
+ *   truncated: { comments: string | null, subIssues: string | null,
+ *   blockedBy: string | null } }} `blockedBy` is null where the host refused the listing
+ *   outright, and `[]` where the issue genuinely has no blockers
  */
-export function fetchedIssue(node, issueUrl) {
+export function fetchedIssue(node, issueUrl, dependencies = false) {
+  const connection = dependencies ? node.blockedBy : null;
+  // Under the flag an absent or unreadable connection is the host refusing the selection
+  // (github.rs `dependencies_lost`): the issue lost its whole listing, not a page of one.
+  const refused =
+    dependencies &&
+    (connection === null || typeof connection !== "object" || Array.isArray(connection));
   return {
     issue: issueRow(node),
     comments: commentRows(node.comments, issueUrl),
     subIssues: subIssueNumbers(node),
-    truncated: { comments: nextCursor(node.comments), subIssues: nextCursor(node.subIssues) },
+    blockedBy: refused ? null : connectionNodes(connection),
+    truncated: {
+      comments: nextCursor(node.comments),
+      subIssues: nextCursor(node.subIssues),
+      blockedBy: refused ? null : nextCursor(connection),
+    },
   };
 }
 
@@ -491,7 +545,23 @@ export class Pager {
 }
 
 /** The listings this fetcher does not cover yet, by the option that would ask for one. */
-const UNIMPLEMENTED = /** @type {const} */ (["releases", "dependencies"]);
+const UNIMPLEMENTED = /** @type {const} */ (["releases"]);
+
+/**
+ * The first {@link MAX_NAMED_OVERFLOWS} rows of a shortfall, `#`-prefixed, plus a count of
+ * whatever did not fit.
+ *
+ * @param {string[]} numbers
+ * @returns {string}
+ */
+function namedNumbers(numbers) {
+  const named = numbers
+    .slice(0, MAX_NAMED_OVERFLOWS)
+    .map((number) => `#${number}`)
+    .join(", ");
+  const rest = numbers.length - MAX_NAMED_OVERFLOWS;
+  return `${named}${rest > 0 ? `, and ${rest} more` : ""}`;
+}
 
 /** GraphQL fetcher for one repo's issues, its pull requests, their comments, labels, hierarchy. */
 export class GitHubGraphQLFetcher {
@@ -503,6 +573,18 @@ export class GitHubGraphQLFetcher {
 
   /** @type {((status: any) => void) | undefined} */
   #onProgress;
+
+  /**
+   * github.rs's shared `refused` flag: once GitHub rate-limits one dependency follow-up, the
+   * issues behind it keep what rode their own page instead of each re-walking into the limit.
+   */
+  #dependenciesRateLimited = false;
+
+  /** @type {string | null} what the host said when it refused the `blockedBy` selection */
+  #dependencyRefusal = null;
+
+  /** @type {string | null} what stopped the first blocker walk that could not finish */
+  #dependencyTruncation = null;
 
   /**
    * @param {string} owner
@@ -548,25 +630,34 @@ export class GitHubGraphQLFetcher {
    * @param {string} label the listing's name, for the shortfall warning
    * @param {(data: Record<string, any>) => any} connectionAt
    * @param {(connection: any, page: number) => void} [onPage]
+   * @param {{ enrichmentField?: string, onEnrichmentRefused?: (message: string) => void }}
+   *   [enrichment] a selection whose refusal costs that field alone, never the listing
    * @returns {Promise<any[]>}
    */
-  async #walk(operationName, query, label, connectionAt, onPage) {
+  async #walk(operationName, query, label, connectionAt, onPage, enrichment) {
     const pager = new Pager();
     /** @type {any[]} */
     const out = [];
     for (;;) {
-      const data = await this.#client.query(operationName, query, {
-        owner: this.owner,
-        name: this.repo,
-        first: PER_PAGE,
-        after: pager.after,
-      });
+      const data = await this.#client.query(
+        operationName,
+        query,
+        {
+          owner: this.owner,
+          name: this.repo,
+          first: PER_PAGE,
+          after: pager.after,
+        },
+        enrichment,
+      );
       const connection = connectionAt(data);
-      if (connection === null || typeof connection !== "object") {
+      if (connection === null || typeof connection !== "object" || Array.isArray(connection)) {
         throw new GitHubError(`${UNEXPECTED_SHAPE} (expected the repository's ${label})`);
       }
       onPage?.(connection, pager.page);
-      out.push(...connectionNodes(connection));
+      const nodes = connectionNodes(connection);
+      this.#checkUnreadableNodes(connection, nodes.length, label, pager.page);
+      out.push(...nodes);
       const cursor = nextCursor(connection);
       if (cursor === "") {
         this.#warn(
@@ -576,6 +667,32 @@ export class GitHubGraphQLFetcher {
       }
       if (!pager.advance(cursor === "" ? null : cursor)) return out;
     }
+  }
+
+  /**
+   * Fail, or warn, on the nodes {@link connectionNodes} dropped as unreadable. A page that
+   * lost every one is otherwise indistinguishable from a repository with nothing to list,
+   * and a scoped enrichment refusal can null whole nodes rather than the field.
+   *
+   * @param {any} connection
+   * @param {number} kept how many nodes survived the drop
+   * @param {string} label the listing's name
+   * @param {number} page
+   */
+  #checkUnreadableNodes(connection, kept, label, page) {
+    if (!Array.isArray(connection.nodes)) return;
+    const dropped = connection.nodes.length - kept;
+    if (dropped <= 0) return;
+    if (kept === 0) {
+      throw new GitHubError(
+        `${UNEXPECTED_SHAPE} (all ${dropped} of the repository's ${label} on page ${page} ` +
+          "came back unreadable)",
+      );
+    }
+    this.#warn(
+      `warning: ${dropped} of the ${connection.nodes.length} ${label} on page ${page} came ` +
+        "back unreadable and are not imported.\n",
+    );
   }
 
   /**
@@ -716,24 +833,85 @@ export class GitHubGraphQLFetcher {
   }
 
   /**
+   * One issue's blockers past the page its listing node carried, appended to `rows`
+   * (github.rs `hydrate_blocked_by`). Enrichment-only: every failure truncates, none throws.
+   *
+   * @param {string} number
+   * @param {any[]} rows the blockers the listing node already yielded
+   * @param {string} cursor the listing node's resume cursor, "" when GitHub sent none
+   * @returns {Promise<"drained" | "short" | "capped">} how the walk ended
+   */
+  async #hydrateBlockedBy(number, rows, cursor) {
+    if (cursor === "") return "short";
+    const pager = new Pager();
+    pager.advance(cursor);
+    for (;;) {
+      if (this.#dependenciesRateLimited) return "short";
+      let issue;
+      try {
+        issue = await this.#hydratePage(
+          "ImportIssueBlockedBy",
+          issueBlockedByQuery(),
+          COMMENT_PARENT.issue.field,
+          number,
+          pager.after,
+        );
+      } catch (err) {
+        if (!(err instanceof GitHubError)) throw err;
+        if (err instanceof RateLimitError) this.#dependenciesRateLimited = true;
+        // One identical cause-less line for a revoked token, a vanished node and a
+        // transport flap sends the reader nowhere; github.rs carries a `cause` too.
+        this.#dependencyTruncation ??= err.message;
+        // github.rs truncates on every one of these — an errored page, a NOT_FOUND, a
+        // refusal — because a blocker is enrichment and an import never turns on one.
+        return "short";
+      }
+      const connection = issue?.blockedBy;
+      // Not the loud shape error the comment and sub-issue walks raise: failing here would
+      // cost the whole import a listing the server would only have truncated.
+      if (connection === null || typeof connection !== "object" || Array.isArray(connection)) {
+        return "short";
+      }
+      for (const row of connectionNodes(connection)) rows.push(row);
+      const next = nextCursor(connection);
+      if (next === "") return "short";
+      if (next !== null && pager.page >= MAX_DEPENDENCY_PAGES) return "capped";
+      if (next === pager.after) return "short";
+      if (!pager.advance(next)) return "drained";
+    }
+  }
+
+  /**
    * Report a connection hydration could not drain, in one line however many rows did.
    *
    * @param {string} noun the short rows' node kind, as github.rs `CommentParent::noun` says it
    * @param {string} kind the connection's name, as a reader would say it
    * @param {string} cause what stopped the walk, as the sentence's verb phrase
    * @param {string[]} numbers the rows whose connection stayed short
+   * @param {string | null} [said] what the first failure reported, when one raised an error
    */
-  #warnOverflow(noun, kind, cause, numbers) {
+  #warnOverflow(noun, kind, cause, numbers, said = null) {
     if (!numbers.length) return;
-    const named = numbers
-      .slice(0, MAX_NAMED_OVERFLOWS)
-      .map((number) => `#${number}`)
-      .join(", ");
-    const rest = numbers.length - MAX_NAMED_OVERFLOWS;
+    const quoted = said === null || said === "" ? "" : ` (${said})`;
     this.#warn(
-      `warning: ${numbers.length} ${noun}(s) ${cause}: ${named}` +
-        `${rest > 0 ? `, and ${rest} more` : ""} — the rest of those ${kind} are not ` +
-        "imported.\n",
+      `warning: ${numbers.length} ${noun}(s) ${cause}: ${namedNumbers(numbers)}${quoted} — the ` +
+        `rest of those ${kind} are not imported.\n`,
+    );
+  }
+
+  /**
+   * Report the issues that lost their blocker listing whole — the complement of the partial
+   * loss the overflow line reports.
+   *
+   * @param {string[]} numbers
+   */
+  #warnBlockedByRefused(numbers) {
+    if (!numbers.length) return;
+    const cause = this.#dependencyRefusal === null ? "" : ` (${this.#dependencyRefusal})`;
+    this.#warn(
+      `warning: ${numbers.length} ${COMMENT_PARENT.issue.noun}(s) were refused their dependency ` +
+        `listing and import with no blockers at all: ${namedNumbers(numbers)}${cause}. A refusal ` +
+        "this shape usually means the token cannot read issue dependencies.\n",
     );
   }
 
@@ -742,27 +920,39 @@ export class GitHubGraphQLFetcher {
    * `pullRequests` the PR rows too.
    *
    * @param {{ pullRequests?: boolean, releases?: boolean, dependencies?: boolean }} [options]
-   *   `pullRequests` (`--include prs`) adds the `pullRequests` connection; `releases` and
-   *   `dependencies` are refused, because a flag that silently no-ops drops rows
+   *   `pullRequests` (`--include prs`) adds the `pullRequests` connection and `dependencies`
+   *   (`--include deps`) the issue nodes' `blockedBy`; `releases` is refused, because a flag
+   *   that silently no-ops drops rows
    * @returns {Promise<{ issues: any[], comments: any[], labels: any[],
-   *   subIssues: Map<string, string[]> }>}
+   *   subIssues: Map<string, string[]>, blockedBy: Map<string, any[]> }>}
    */
   async fetchAll(options = {}) {
     for (const name of UNIMPLEMENTED) {
       if (options[name]) {
         throw new GitHubError(
           `the GraphQL fetch does not list ${name} yet; it lists issues, pull requests, their ` +
-            "comments, the repo's labels and the sub-issue hierarchy",
+            "comments, the repo's labels, the sub-issue hierarchy and issue dependencies",
         );
       }
     }
+    const dependencies = Boolean(options.dependencies);
     const [nodes, labelNodes, prNodes] = await Promise.all([
       this.#walk(
         "ImportIssues",
-        issuesQuery(),
+        issuesQuery(dependencies),
         "issues",
         (data) => data.repository?.issues,
         (connection, page) => this.#reportPage(connection, page),
+        // A refusal GitHub scopes to `blockedBy` costs that enrichment and never the import.
+        // Only a permission refusal is absorbed here — CONTRACT.md, story #384801.
+        dependencies
+          ? {
+              enrichmentField: BLOCKED_BY_FIELD,
+              onEnrichmentRefused: (message) => {
+                if (message) this.#dependencyRefusal ??= message;
+              },
+            }
+          : undefined,
       ),
       this.#walk("ImportLabels", labelsQuery(), "labels", (data) => data.repository?.labels),
       // Queried only when asked for: github.rs skips `collect_pull_requests` entirely, so a
@@ -784,6 +974,8 @@ export class GitHubGraphQLFetcher {
     const comments = [];
     /** @type {Map<string, string[]>} */
     const subIssues = new Map();
+    /** @type {Map<string, any[]>} */
+    const blockedBy = new Map();
     /** @type {string[]} */
     const overflowedComments = [];
     /** @type {string[]} */
@@ -792,6 +984,12 @@ export class GitHubGraphQLFetcher {
     const overflowedSubIssues = [];
     /** @type {string[]} */
     const cappedSubIssues = [];
+    /** @type {string[]} */
+    const overflowedBlockedBy = [];
+    /** @type {string[]} */
+    const cappedBlockedBy = [];
+    /** @type {string[]} */
+    const refusedBlockedBy = [];
     let unnumbered = 0;
     let unnumberedPrs = 0;
     // Sequential, and only once the listing is complete: a wide hierarchy or a long thread
@@ -799,7 +997,7 @@ export class GitHubGraphQLFetcher {
     for (const node of nodes) {
       const number = issueNumber(node.number);
       const issueUrl = number === null ? "" : this.#issueUrl(number);
-      const fetched = fetchedIssue(node, issueUrl);
+      const fetched = fetchedIssue(node, issueUrl, dependencies);
       issues.push(fetched.issue);
       // The row still ships, as the REST path ships one whose number it could not read;
       // only the number-keyed stages skip it, because nothing can join to an unreadable id.
@@ -828,6 +1026,22 @@ export class GitHubGraphQLFetcher {
         if (outcome === "capped") cappedSubIssues.push(number);
         else if (outcome === "short") overflowedSubIssues.push(number);
       }
+      // No flag test here: a flag-off fetch reports no blockers and no resume cursor, so
+      // every branch below is already a no-op for it.
+      if (fetched.blockedBy === null) {
+        refusedBlockedBy.push(number);
+      } else {
+        if (fetched.truncated.blockedBy !== null) {
+          const outcome = await this.#hydrateBlockedBy(
+            number,
+            fetched.blockedBy,
+            fetched.truncated.blockedBy,
+          );
+          if (outcome === "capped") cappedBlockedBy.push(number);
+          else if (outcome === "short") overflowedBlockedBy.push(number);
+        }
+        if (fetched.blockedBy.length) blockedBy.set(number, fetched.blockedBy);
+      }
       for (const row of fetched.comments) comments.push(row);
       if (fetched.subIssues.length) subIssues.set(number, fetched.subIssues);
     }
@@ -855,9 +1069,14 @@ export class GitHubGraphQLFetcher {
       for (const row of fetched.comments) comments.push(row);
     }
     if (unnumbered > 0) {
+      // Under the flag those rows lose their blockers too, and they are the one loss the
+      // refusal count cannot name: nothing joins a blocker to an unreadable number.
+      const lost = dependencies
+        ? "comments, sub-issue cross-links and dependencies"
+        : "comments and sub-issue cross-links";
       this.#warn(
         `warning: ${unnumbered} ${COMMENT_PARENT.issue.noun}(s) arrived without a usable issue ` +
-          "number — their comments and sub-issue cross-links are not imported.\n",
+          `number — their ${lost} are not imported.\n`,
       );
     }
     // Its own line and its own noun: a PR has no sub-issue connection, so the issue
@@ -893,6 +1112,28 @@ export class GitHubGraphQLFetcher {
         "hierarchy may read",
       cappedSubIssues,
     );
-    return { issues, comments, labels, subIssues };
+    this.#warnOverflow(
+      COMMENT_PARENT.issue.noun,
+      "dependencies",
+      "have dependencies this fetch could not finish reading",
+      overflowedBlockedBy,
+      this.#dependencyTruncation,
+    );
+    this.#warnOverflow(
+      COMMENT_PARENT.issue.noun,
+      "dependencies",
+      `carry more than ${MAX_DEPENDENCY_PAGES * PER_PAGE} dependencies, the most one issue's ` +
+        "blocker listing may read",
+      cappedBlockedBy,
+    );
+    this.#warnBlockedByRefused(refusedBlockedBy);
+    if (this.#dependenciesRateLimited) {
+      this.#warn(
+        "warning: GitHub's GraphQL point budget stopped the dependency walks; the issues " +
+          "after it keep only the blockers their own listing page carried, and the rest of " +
+          "the import continues.\n",
+      );
+    }
+    return { issues, comments, labels, subIssues, blockedBy };
   }
 }
