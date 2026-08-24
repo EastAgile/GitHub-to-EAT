@@ -11,7 +11,8 @@ import {
   storyLabelKeys,
   unionImported,
 } from "./dedup.js";
-import { GitHubClient } from "./github.js";
+import { GitHubClient, RateBudgetError } from "./github.js";
+import { GitHubGraphQLFetcher } from "./github-graphql-issues.js";
 import { GITHUB_LOGIN } from "./importer.js";
 import {
   clampPlan,
@@ -36,6 +37,105 @@ import {
 import { includeWith } from "./mappings.js";
 import { runWithProgress } from "./progress.js";
 import { writePlan } from "./writer.js";
+
+/**
+ * Points one `ImportIssues` page costs (measured server-side, CONTRACT.md). Flat at every
+ * `first:` 1–100, so it is what any fetch must afford before it starts, whatever the size.
+ */
+export const ISSUE_PAGE_POINTS = 4;
+
+/** The same page carrying `blockedBy`, which `--include deps` adds (CONTRACT.md). */
+export const ISSUE_PAGE_POINTS_WITH_DEPS = 5;
+
+/** GraphQL's floor for a plain connection page — the labels and pull-request listings. */
+export const LISTING_PAGE_POINTS = 1;
+
+/**
+ * What a fetch must afford before its first page. `ImportLabels` always runs beside the issue
+ * listing and `ImportPullRequests` joins under `--include prs`, so pricing one would under-gate.
+ *
+ * @param {{ dependencies?: boolean, pullRequests?: boolean }} [options]
+ * @returns {number}
+ */
+export function fetchFloor({ dependencies = false, pullRequests = false } = {}) {
+  const issues = dependencies ? ISSUE_PAGE_POINTS_WITH_DEPS : ISSUE_PAGE_POINTS;
+  return issues + LISTING_PAGE_POINTS + (pullRequests ? LISTING_PAGE_POINTS : 0);
+}
+
+/**
+ * The fetch stage's two sources. The issue graph rides GraphQL; `releases` is the one
+ * listing GraphQL does not serve, so it stays on REST, matching the server exactly.
+ *
+ * @typedef {{ fetchAll(options?: { pullRequests?: boolean, dependencies?: boolean }):
+ *   Promise<{ issues: any[], comments: any[], labels: any[],
+ *     subIssues: Map<string, string[]>, blockedBy: Map<string, any[]> }> }} IssueGraphSource
+ * @typedef {{ listReleases(): Promise<any[]>,
+ *   graphqlBudget(): Promise<number | null> }} RestSource
+ */
+
+/**
+ * Refuse before a point is spent, reading the free probe rather than pages already fetched.
+ * Gating the releases walk's `core` spend too would refuse a run that works (server #47448).
+ *
+ * @param {RestSource} probe
+ * @param {{ dependencies?: boolean, pullRequests?: boolean }} options the selections that price it
+ */
+async function assertPointBudget(probe, options) {
+  const remaining = await probe.graphqlBudget();
+  // A host publishing no budget cannot be gated, exactly as a headerless one never was.
+  if (remaining === null) return;
+  const cost = fetchFloor(options);
+  if (remaining >= cost) return;
+  throw new RateBudgetError(
+    `--engine direct fetches over GitHub's GraphQL API, whose point budget has ${remaining} ` +
+      `point(s) left; the first page of the listings this run needs costs ${cost}. That budget ` +
+      "is a separate bucket from the REST request limit and no token raises it — wait for it " +
+      "to reset (up to an hour) and re-run. It is a floor, not a forecast: a longer walk can " +
+      "still exhaust the budget after it starts.",
+  );
+}
+
+/**
+ * The direct engine's fetch stage: the issue graph, its comments, the labels, the sub-issue
+ * hierarchy and (under `--include deps`) the blockers over GraphQL; releases over REST.
+ */
+export class HybridFetcher {
+  /** @type {IssueGraphSource} */
+  #graph;
+
+  /** @type {RestSource} */
+  #rest;
+
+  /**
+   * @param {string} owner
+   * @param {string} repo
+   * @param {{ token?: string, timeout?: number, apiBase?: string,
+   *   warn?: (message: string) => void, onProgress?: (status: any) => void }} [options]
+   * @throws {import("./github.js").GitHubAuthError} without a token — GraphQL has no
+   *   anonymous mode
+   */
+  constructor(owner, repo, { token, timeout, apiBase, warn, onProgress } = {}) {
+    // `shared` reaches both transports: the bearer must ride REST too, or the free probe
+    // reads the anonymous bucket and a private repo 404s on /releases.
+    const shared = { token, timeout, apiBase, warn };
+    this.#graph = new GitHubGraphQLFetcher(owner, repo, { ...shared, onProgress });
+    this.#rest = new GitHubClient(owner, repo, shared);
+  }
+
+  /**
+   * @param {{ releases?: boolean, pullRequests?: boolean, dependencies?: boolean }} [options]
+   * @returns {Promise<{ issues: any[], comments: any[], labels: any[],
+   *   subIssues: Map<string, string[]>, releases: any[], blockedBy: Map<string, any[]> }>}
+   */
+  async fetchAll({ releases = false, pullRequests = false, dependencies = false } = {}) {
+    await assertPointBudget(this.#rest, { dependencies, pullRequests });
+    const [graph, releaseRows] = await Promise.all([
+      this.#graph.fetchAll({ pullRequests, dependencies }),
+      releases ? this.#rest.listReleases() : [],
+    ]);
+    return { ...graph, releases: releaseRows };
+  }
+}
 
 /**
  * The client surface the pipeline needs — the writer's methods plus the
@@ -361,15 +461,16 @@ function attachedPeople(plan) {
  *     => Promise<import("./mapping.js").Customization>,
  *   announce?: (fetched: { issues: any[], comments: any[], labels: any[] },
  *     customization: import("./mapping.js").Customization) => Promise<void>,
+ *   apiBase?: string,
  *   github?: { fetchAll(options?: { releases?: boolean, pullRequests?: boolean,
  *     dependencies?: boolean }):
  *     Promise<{ issues: any[], comments: any[], labels: any[],
  *     subIssues?: Map<string, string[]>, releases?: any[],
- *     blockedBy?: Map<string, any[]>, dependencyRequests?: number }> } }} options
+ *     blockedBy?: Map<string, any[]> }> } }} options
  *   `customize` (the wizard) runs at the
  *   fetch→map seam so its questions use real data; `announce` (the customized
  *   legend + confirm) runs right after, and may throw to abort before any
- *   write; `github` is a test seam
+ *   write; `github` and `apiBase` are test seams
  * @returns {Promise<import("./importer.js").ImportOutcome>}
  */
 export async function runDirect(client, projectId, owner, repo, options) {
@@ -378,8 +479,19 @@ export async function runDirect(client, projectId, owner, repo, options) {
   // holds an open `\r` line, which would otherwise swallow the first warning.
   /** @type {string[]} */
   const fetchWarnings = [];
+  // Exact where the REST path had no count at all: GraphQL's `totalCount` prices the walk
+  // on its first page, so the spinner can say how far along it is.
+  let pages = "";
   const source =
-    github ?? new GitHubClient(owner, repo, { token, warn: (m) => fetchWarnings.push(m) });
+    github ??
+    new HybridFetcher(owner, repo, {
+      token,
+      apiBase: options.apiBase,
+      warn: (m) => fetchWarnings.push(m),
+      onProgress: ({ progress_current: current, progress_total: total }) => {
+        pages = total == null ? ` page ${current}` : ` page ${current}/${total}`;
+      },
+    });
   const releases = included.includes("releases");
   // Every issue row carries its own milestone, so the epic mapping costs no extra fetch.
   const epics = included.includes("milestones");
@@ -388,7 +500,7 @@ export async function runDirect(client, projectId, owner, repo, options) {
   const pullRequests = included.includes("prs");
   const fetched = await runWithProgress(
     () => source.fetchAll({ releases, pullRequests, dependencies }),
-    `fetching ${owner}/${repo} from GitHub`,
+    () => `fetching ${owner}/${repo} from GitHub${pages}`,
     { stream },
   );
   for (const message of fetchWarnings) (stream ?? process.stderr).write(message);
@@ -483,15 +595,8 @@ export async function runDirect(client, projectId, owner, repo, options) {
   }
 
   if (dryRun) {
-    // The stage has no rollup to gate on, so its price is per-issue and only a
-    // finished run can state it — the preview is where that lands.
-    if (dependencies) {
-      stream?.write(
-        `note: --include deps cost ${fetched.dependencyRequests ?? 0} extra GitHub request(s) ` +
-          "(at least one per issue, more where a listing paginates); an anonymous run has 60/h, " +
-          "a --token run 5000/h — and a real run spends them again, this preview did not save them.\n",
-      );
-    }
+    // The deps request note is gone with the REST stage that priced it: `blockedBy` now
+    // rides the listing page for one extra point, which is not a request count (#57634).
     // Epics are written first, so a GitHub label sharing a milestone's name arrives as the
     // epic's backing label and 409s into *existing* — unsubtracted, the preview over-reports.
     const epicNames = new Set((plan.epics ?? []).map((epic) => epicTitleKey(epic.title)));

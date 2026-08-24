@@ -16,8 +16,10 @@ releases are excluded by default; opt in with `--include` (see below).
 Re-running an import never duplicates: items that were already imported are
 skipped.
 
-You never supply a GitHub token for public repos: the EAT **server** fetches the
-issues with a platform credential, so all you provide is your EAT project key.
+On the default engine you never supply a GitHub token for a public repo: the EAT
+**server** fetches the issues with a platform credential, so all you provide is
+your EAT project key. `--engine direct` is the exception — it reads GitHub
+itself, over an API that rejects anonymous callers, so it always needs a token.
 
 ## Requirements
 
@@ -65,7 +67,7 @@ cp .env.example .env
 | `EAT_AGENT_KEY` | yes      | —                                         | Owner-role agent API key for the project      |
 | `EAT_API_BASE`  | no       | `https://api.eastagiletracker.com/api/v1` | API base URL (override for self-hosted/local) |
 | `EAT_APP_BASE`  | no       | `https://eastagiletracker.com`            | Web app base URL, used for the board link     |
-| `GITHUB_TOKEN`  | no       | —                                         | GitHub token for **private** repos (or use `--token`); public repos need none |
+| `GITHUB_TOKEN`  | see note | —                                         | GitHub token (or use `--token`). Required for `--engine direct`; on the default server engine, only for **private** repos |
 
 ## Usage
 
@@ -135,23 +137,20 @@ must contain `issues` — the other types only add to an issue import:
   #35629. The server engine needs a tracker new enough to accept
   `include_dependencies`; against an older one the run is refused up front,
   naming `--engine direct`, rather than reporting success with no blockers in it.
-  This costs **at least one extra GitHub request per issue** — the issue row
-  carries no dependency count to gate the request on, and a listing past 100
-  dependencies pages — so an anonymous run (60 req/h) may need `--token`; the
-  direct engine refuses up front rather than dying halfway. `--dry-run` reports
-  what the flag spent, but note that it *spends* it: the preview costs the same
-  requests as the real run, so previewing first saves no budget. If a listing
+  On `--engine direct` the blockers ride the issue listing itself, so the flag
+  costs no extra GitHub request — one extra point per listing page, plus a
+  follow-up for an issue with more than 100 blockers. A `--dry-run` spends the
+  same budget as the real run, so previewing first saves none. If a listing
   fails, that issue is imported without its blockers and the run keeps going.
 
 **Sub-issues** need no flag. EAT has no parent/child story relation, so on
 `--engine direct` the hierarchy rides the description's last paragraph instead:
 a parent gains `Sub-issues: #12, #14`, and each child gains `Sub-issue of #7`.
 A child listed by two parents keeps only the first, so the two directions never
-contradict each other. This costs one extra request per issue that advertises
-sub-issues — a flat repo pays nothing — and it is the one term that can push a
-large run past the anonymous 60 req/h ceiling, so pass `--token` for a
-hierarchy-heavy repo. If that listing fails or the budget runs out, the run
-says so and keeps going; it never trades the whole import for the cross-links.
+contradict each other. The hierarchy rides the issue listing, so it costs no
+extra request — only a follow-up for a parent with more than 100 children. If
+that walk falls short, the run says so and keeps going; it never trades the
+whole import for the cross-links.
 
 ### Customizing an import
 
@@ -209,10 +208,13 @@ import plan — how many stories it *would* import and how many it *would* skip
 as already imported — without writing anything. Against older servers that
 don't support plan computation, it falls back to a local preview.
 
-**Private repos:** public repos need no GitHub token (the server uses its platform
-credential). For a **private** repo — or a server without that platform credential
-— supply a GitHub token with `--token <TOKEN>` or the `GITHUB_TOKEN` env var (it
-needs `repo`, or fine-grained *Issues: Read*, on that repo).
+**Tokens:** `--engine direct` always needs one — it reads GitHub's GraphQL API,
+which rejects anonymous callers, and a tokenless run exits `2` with a usage error
+before it fetches or writes anything. `GITHUB_TOKEN` in your `.env` counts, the
+same as `--token` or an exported variable. On the default server engine a public repo
+needs none (the server uses its platform credential); a **private** repo — or a
+server without that credential — needs `--token <TOKEN>` or the `GITHUB_TOKEN`
+env var. The token needs `repo`, or fine-grained *Issues: Read*, on that repo.
 
 ### Exit codes
 
@@ -220,13 +222,16 @@ needs `repo`, or fine-grained *Issues: Read*, on that repo).
 | ---- | ----------------------------------------------------------------- |
 | `0`  | Success                                                           |
 | `1`  | Runtime error (bad key, project not found, timeout) or the import reported per-item errors |
-| `2`  | Usage error (bad or missing arguments, or a writing run off a terminal without `--yes`) |
+| `2`  | Usage error (bad or missing arguments, `--engine direct` without a token, or a writing run off a terminal without `--yes`) |
 
 ## Troubleshooting
 
 - **`no interactive terminal to confirm on`** — the run would write but has no
   TTY to show the `[y/N]` prompt on (a pipe, CI, an agent). Add `--yes` to
   import without confirmation, or `--dry-run` to preview the plan instead.
+- **`--engine direct fetches from GitHub's GraphQL API`** — that engine reads
+  GitHub itself and GitHub refuses anonymous GraphQL callers. Pass
+  `--token <TOKEN>`, set `GITHUB_TOKEN`, or drop `--engine direct`.
 - **`authentication failed`** — check `EAT_AGENT_KEY` is an owner-role agent key
   for this project and hasn't been revoked.
 - **`not found: /projects/<id>`** — the project id is wrong or the key can't

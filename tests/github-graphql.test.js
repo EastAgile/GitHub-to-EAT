@@ -915,7 +915,7 @@ test("a trailing slash on the API base does not double up the /graphql path", as
   assert.equal(seen.url, "/graphql");
 });
 
-// --- the wiring CONTRACT.md promises has not happened yet --------------------
+// --- the wiring CONTRACT.md describes, pinned rather than restated -----------
 
 /**
  * Which `src/` and `bin/` modules import `module`. Static `from`, `export * from`, dynamic
@@ -955,7 +955,36 @@ test("only the issue listing imports the transport, as CONTRACT.md claims", asyn
   assert.deepEqual(await importersOf("github-graphql.js"), ["src/github-graphql-issues.js"]);
 });
 
-test("no engine or fetch stage calls the issue listing yet, as CONTRACT.md claims", async () => {
-  // Wiring it (story #57634) must land with CONTRACT.md's "not yet wired" truthed up.
-  assert.deepEqual(await importersOf("github-graphql-issues.js"), []);
+test("the direct engine is the only caller of the issue listing, as CONTRACT.md claims", async () => {
+  // Story #57634 flipped this from "nothing imports it": the set is still exact, so any
+  // second caller — a helper, bin/, a re-export — fails here as it did before the flip.
+  assert.deepEqual(await importersOf("github-graphql-issues.js"), ["src/direct.js"]);
+});
+
+/**
+ * Which of `modules` the file at `path` imports. The mirror of {@link importersOf}: that one
+ * asks who reaches a module, this one asks what one module is allowed to reach.
+ *
+ * @param {string} path repo-relative path
+ * @param {string[]} modules candidate imported file names
+ * @returns {Promise<string[]>}
+ */
+async function importsIn(path, modules) {
+  const source = await readFile(new URL(`../${path}`, import.meta.url), "utf8");
+  return modules.filter((module) =>
+    new RegExp(
+      `(?:from|import|require)\\s*\\(?\\s*["'][^"']*${module.replace(/\./g, "\\.")}["']`,
+    ).test(source),
+  );
+}
+
+test("the server engine reaches neither transport — its fetch is EAT's own", async () => {
+  const transports = ["github.js", "github-graphql.js", "github-graphql-issues.js"];
+  // src/importer.js is the server engine whole: one POST /import/json and its status poll.
+  assert.deepEqual(await importsIn("src/importer.js", transports), []);
+  // The guard is only worth as much as its scanner, so prove it can see an import at all.
+  assert.deepEqual(await importsIn("src/direct.js", transports), [
+    "github.js",
+    "github-graphql-issues.js",
+  ]);
 });

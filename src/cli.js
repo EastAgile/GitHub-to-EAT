@@ -10,7 +10,7 @@ import readline from "node:readline/promises";
 import { parseArgs } from "node:util";
 
 import { EATClient, EATError, EATTimeout } from "./client.js";
-import { ConfigError, loadConfig } from "./config.js";
+import { ConfigError, loadConfig, loadDotenv } from "./config.js";
 import { runDirect as defaultRunDirect } from "./direct.js";
 import { DEFAULT_ENGINE, ENGINES, parseEngine } from "./engine.js";
 import { GitHubError } from "./github.js";
@@ -42,7 +42,8 @@ options:
   --customize           customize the import per run, interactively (implies --engine direct; needs a terminal)
   --dry-run             run preflight and show the plan without importing anything
   -y, --yes             skip the interactive confirmation prompt (required off a terminal, unless --dry-run)
-  --token GITHUB_TOKEN  GitHub token for a private repo (or set GITHUB_TOKEN); public repos need none
+  --token GITHUB_TOKEN  GitHub token (or set GITHUB_TOKEN); required by --engine direct,
+                        and by --engine server only for a private repo
 
 customization (each implies --engine direct; no terminal needed; not with --customize):
   --states STATES       issue states to import: all|open|closed (default: all)
@@ -375,6 +376,19 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     if (!stdin.isTTY || !stdout.isTTY) {
       return usageError(
         "--customize needs an interactive terminal (stdin and stdout must be TTYs)",
+      );
+    }
+  }
+
+  // GitHub's GraphQL API has no anonymous mode, so a tokenless direct run cannot work — and
+  // this gate precedes loadConfig, so it loads .env or a token set there reads as absent.
+  if (engine === "direct") {
+    loadDotenv();
+    if (!(values.token?.trim() || process.env.GITHUB_TOKEN?.trim())) {
+      return usageError(
+        "--engine direct fetches from GitHub's GraphQL API, which rejects anonymous callers: " +
+          "pass --token <TOKEN>, or set GITHUB_TOKEN. (--engine server needs one only for a " +
+          "private repo — EAT fetches public repos with its own credential.)",
       );
     }
   }
