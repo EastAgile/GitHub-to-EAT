@@ -251,6 +251,17 @@ test("the labels query walks the repository's own label listing", () => {
   );
 });
 
+test("the labels connection stays orderBy-free, keeping the measured order divergence", () => {
+  // Its own test, not an assertion inside the shape check: every `orderBy` placement also
+  // breaks that regex, so folded in there this could never be the assertion that fails.
+  assert.doesNotMatch(
+    labelsQuery(),
+    /orderBy/,
+    "CONTRACT.md records a REST/GraphQL repo-label order divergence measured 2026-08-24; " +
+      "sorting this connection retires it and makes the harness assert an agreement it forced",
+  );
+});
+
 // --- the rename layer, ported from github.rs `impl From<GqlIssueNode> for GhIssue` ---
 
 test("the rename layer gives an issue row REST's field names", () => {
