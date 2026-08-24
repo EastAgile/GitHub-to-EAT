@@ -907,7 +907,21 @@ engine's mapper needs it:
 
 - **A repo-wide label listing** (`ImportLabels`). The server reads labels off
   each issue. `src/mapping.js` also takes the repo's own list as its colour
-  authority, and a label that no issue carries has no other source.
+  authority, and a label that no issue carries has no other source. **The two
+  transports return this listing in different orders**, measured on live GitHub
+  2026-08-24 across a page boundary: `golang/go` (143 labels) and
+  `kubernetes/kubernetes` (214) each returned the same *set* over both transports
+  in a different sequence, diverging at index 0. `GET /labels` sorts by name;
+  `labelsQuery()` passes no `orderBy`, so the connection does not. No imported
+  row differs — the list is a colour lookup keyed by name, and nothing
+  downstream reads its order. There is no server spelling to match here, because
+  the server has no repo-wide label listing at all, so the pin is that
+  `labelsQuery()` stays `orderBy`-free
+  (`tests/github-graphql-issues.test.js`), and the local parity tool compares
+  this listing as a **multiset**. Per-issue labels and assignees are the
+  opposite case and stay compared **in order**: measured the same day, label
+  order agreed on 8/8 issues and assignee order on 12/12, across four
+  repositories.
 - **`issue_url` on every comment row.** GraphQL nests comments under their
   issue, where REST listed them repo-wide. The mapper joins on `issue_url`, so
   the listing rebuilds it from the API base, the repo and the issue number.
@@ -1016,10 +1030,13 @@ sequence after the flip. No row is lost, gained or duplicated — a re-run skips
 story it already created — but the order a reader sees differs from a pre-flip
 import of the same repository. The local parity tool cannot catch this: its
 fixture serves one array to both renderings, so it asserts an order equality
-real GitHub violates. Only a fixture backed by live GitHub can, which is the
-fixture-artifact risk story #330976 records for labels and assignees and this
-proves for blockers. **Without the flag the connection is not in the query at all**, so
-a default run pays no extra point and every output row is byte-identical to a
+real GitHub violates. Only a fixture backed by live GitHub can. Story #330976
+settled that same fixture-artifact risk for the other two ordered comparisons by
+measuring them rather than reasoning about them: the repo-wide label listing
+diverges the way blockers do and is now compared as a multiset, while per-issue
+labels and assignees agree over both transports and stay ordered (see the
+`ImportLabels` bullet above for the numbers). **Without the flag the connection
+is not in the query at all**, so a default run pays no extra point and every output row is byte-identical to a
 run before the flag existed; a test pins it, as the `pullRequests` one is
 pinned. The server measured the cost on `directus/directus` (2026-08-14) by
 reading `rateLimit { cost }`: the page selection costs 4 points without the
