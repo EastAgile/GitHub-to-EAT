@@ -249,6 +249,9 @@ test("the labels query walks the repository's own label listing", () => {
     query,
     /labels\(first: \$first, after: \$after\) \{ pageInfo \{ hasNextPage endCursor \} nodes \{ name color \} \}/,
   );
+  // Load-bearing: `GET /labels` sorts by name and this connection does not, so an `orderBy`
+  // here would quietly retire the order divergence CONTRACT.md measured on 2026-08-24.
+  assert.doesNotMatch(query, /orderBy/);
 });
 
 // --- the rename layer, ported from github.rs `impl From<GqlIssueNode> for GhIssue` ---
