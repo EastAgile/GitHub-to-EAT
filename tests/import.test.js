@@ -1209,8 +1209,9 @@ test("--include issues,deps reaches the direct pipeline instead of a usage error
   try {
     await inTempDir(() =>
       withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
-        const argv = ["--project", "91", "--repo", "o/r", "--engine", "direct", "-y"];
-        const code = await main([...argv, "--include", "issues,deps"], {
+        const argv = ["--project", "91", "--repo", "o/r", "--engine", "direct"];
+        const auth = ["--token", "ghp_test", "-y"];
+        const code = await main([...argv, ...auth, "--include", "issues,deps"], {
           stdout: out,
           stderr: capture(),
           runDirect: async (_client, _project, _owner, _repo, opts) => {
