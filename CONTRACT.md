@@ -913,8 +913,13 @@ engine's mapper needs it:
   `kubernetes/kubernetes` (214) each returned the same *set* over both transports
   in a different sequence, diverging at index 0. `GET /labels` sorts by name;
   `labelsQuery()` passes no `orderBy`, so the connection does not. No imported
-  row differs — the list is a colour lookup keyed by name, and nothing
-  downstream reads its order. There is no server spelling to match here, because
+  row differs, and structurally rather than by luck: `src/mapping.js` folds this
+  listing into `repoColors`, a `Map` keyed by the **lowercased** name, and the
+  label creates come from each issue's own `labels` array, never from this
+  listing. The one path by which order could leak is two labels differing only
+  in case, which `new Map()` would resolve last-wins — not observed in 2051
+  labels across four repositories sampled the same day. There is no server
+  spelling to match here, because
   the server has no repo-wide label listing at all, so the pin is that
   `labelsQuery()` stays `orderBy`-free
   (`tests/github-graphql-issues.test.js`), and the local parity tool compares
