@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { AuthError, EATClient } from "../src/client.js";
+import { AuthError, EATClient, EATError } from "../src/client.js";
 import { markerFor } from "../src/dedup.js";
 import { runDirect } from "../src/direct.js";
 import { DEFAULT_CUSTOMIZATION, FALLBACK_LIMITS } from "../src/mapping.js";
@@ -2637,6 +2637,34 @@ test("a story left with half its blockers by an interrupted run warns on the re-
     assert.equal(rerun.skipped, 2, "the half-written story stays skipped");
     assert.match(out.buf, /warning: issue #7 .*blockers 1\/2/);
     assert.match(out.buf, /delete that story in EAT and re-run/);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a comment the server rejects is reported by the direct engine, not fatal", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const rejected = new EATError('failed (400): {"code":"invalid_parameter"}');
+    rejected.status = 400;
+    // Shadow just this method on the instance; every other write still goes to the mock.
+    client.createComment = async () => {
+      throw rejected;
+    };
+
+    const out = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    });
+
+    // The run completes and both stories import; the refusal surfaces as a row error.
+    assert.equal(out.importedStories, 2);
+    assert.equal(out.errors.length, 1);
+    const row = /** @type {{ code: string, row: string }} */ (out.errors[0]);
+    assert.equal(row.row, "3");
+    assert.equal(row.code, "invalid_parameter");
   } finally {
     await mock.close();
   }

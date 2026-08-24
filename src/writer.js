@@ -55,6 +55,8 @@ export class BlockerWriteUnsupported extends EATError {}
  * @property {number} comments
  * @property {number} blockers
  * @property {number} links
+ * @property {{ code: string, row: string, detail: string }[]} errors row-scoped
+ *   refusals the run contained and skipped, in write order
  */
 
 /**
@@ -99,6 +101,35 @@ function isRetryable(err) {
   }
   if (err instanceof EATError) return err.status === undefined || err.status >= 500;
   return false;
+}
+
+/**
+ * A row-scoped failure: the server refused THIS row's content, so skipping it and
+ * reporting it beats losing the run. Auth/404/409 stay fatal — they say the run
+ * itself is wrong (bad key, wrong story, replayed key), not one row's text.
+ *
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isRowScoped(err) {
+  if (err instanceof AuthError || err instanceof NotFoundError || err instanceof ConflictError) {
+    return false;
+  }
+  return (
+    err instanceof EATError && err.status !== undefined && err.status >= 400 && err.status < 500
+  );
+}
+
+/**
+ * The server's machine code when it sent one, so the report says `invalid_parameter`
+ * rather than a status number the user cannot look up.
+ *
+ * @param {EATError} err
+ * @returns {string}
+ */
+function rowErrorCode(err) {
+  const match = /"code"\s*:\s*"([a-z_]+)"/.exec(err.message);
+  return match ? match[1] : `http_${err.status}`;
 }
 
 /**
@@ -166,6 +197,8 @@ export async function writePlan(client, projectId, plan, options = {}) {
   }
 
   const result = {
+    /** @type {{ code: string, row: string, detail: string }[]} */
+    errors: [],
     epicsCreated: 0,
     epicsExisting: 0,
     epicsBlocked: 0,
@@ -176,6 +209,28 @@ export async function writePlan(client, projectId, plan, options = {}) {
     comments: 0,
     blockers: 0,
     links: 0,
+  };
+
+  /**
+   * Run one row-scoped write. A 4xx refusal of this row's content is reported and
+   * skipped so a single bad row cannot cost the whole run; anything else still throws.
+   *
+   * @param {string} row @param {string} what @param {() => Promise<unknown>} fn
+   * @returns {Promise<boolean>} false when the row was skipped
+   */
+  const contained = async (row, what, fn) => {
+    try {
+      await fn();
+      return true;
+    } catch (err) {
+      if (!isRowScoped(err)) throw err;
+      result.errors.push({
+        code: rowErrorCode(/** @type {EATError} */ (err)),
+        row,
+        detail: `${what}: ${/** @type {Error} */ (err).message}`,
+      });
+      return false;
+    }
   };
 
   const epics = plan.epics ?? [];
@@ -306,52 +361,71 @@ export async function writePlan(client, projectId, plan, options = {}) {
             if (op.requestor) body.requestor = op.requestor;
             if (op.owners?.length) body.owners = op.owners.map((p) => ({ external: p }));
           }
-          const created = await retrying(() =>
-            client.createStory(projectId, body, `${runId}:story:${op.external_id}`),
-          );
+          /** @type {any} */
+          let created;
+          try {
+            created = await retrying(() =>
+              client.createStory(projectId, body, `${runId}:story:${op.external_id}`),
+            );
+          } catch (err) {
+            if (!isRowScoped(err)) throw err;
+            result.errors.push({
+              code: rowErrorCode(/** @type {EATError} */ (err)),
+              row: op.external_id,
+              detail: `story create: ${/** @type {Error} */ (err).message}`,
+            });
+            // Its tasks/blockers/comments would target a story that does not exist.
+            continue;
+          }
           result.stories += 1;
           for (const [i, task] of op.tasks.entries()) {
-            await retrying(() =>
-              client.createTask(
-                projectId,
-                created.story_id,
-                task,
-                `${runId}:task:${op.external_id}:${i}`,
+            const ok = await contained(op.external_id, `task ${i + 1}`, () =>
+              retrying(() =>
+                client.createTask(
+                  projectId,
+                  created.story_id,
+                  task,
+                  `${runId}:task:${op.external_id}:${i}`,
+                ),
               ),
             );
-            result.tasks += 1;
+            if (ok) result.tasks += 1;
           }
           // Written sequentially, in GitHub's own `blocked_by` order: the public
           // route sets no display order, so insertion order is all the CLI controls.
           for (const [i, blocker] of (op.blockers ?? []).entries()) {
-            await retrying(() =>
-              // Non-null: the guard at the top refused this whole plan if the
-              // method were missing, before a single write.
-              /** @type {NonNullable<WriterClient["createBlocker"]>} */ (client.createBlocker)(
-                projectId,
-                created.story_id,
-                blocker,
-                `${runId}:blocker:${op.external_id}:${i}`,
+            const ok = await contained(op.external_id, `blocker ${i + 1}`, () =>
+              retrying(() =>
+                // Non-null: the guard at the top refused this whole plan if the
+                // method were missing, before a single write.
+                /** @type {NonNullable<WriterClient["createBlocker"]>} */ (client.createBlocker)(
+                  projectId,
+                  created.story_id,
+                  blocker,
+                  `${runId}:blocker:${op.external_id}:${i}`,
+                ),
               ),
             );
-            result.blockers += 1;
+            if (ok) result.blockers += 1;
           }
           for (const [i, comment] of op.comments.entries()) {
             const extras = {
               ...(sendDates ? { createdAt: comment.created_at } : {}),
               ...(sendPeople && comment.author ? { author: comment.author } : {}),
             };
-            await retrying(() =>
-              client.createComment(
-                projectId,
-                created.story_id,
-                comment.text,
-                `${runId}:comment:${op.external_id}:${i}`,
-                // undefined, not {}, when neither rides: the v3 call shape is unchanged.
-                Object.keys(extras).length ? extras : undefined,
+            const ok = await contained(op.external_id, `comment ${i + 1}`, () =>
+              retrying(() =>
+                client.createComment(
+                  projectId,
+                  created.story_id,
+                  comment.text,
+                  `${runId}:comment:${op.external_id}:${i}`,
+                  // undefined, not {}, when neither rides: the v3 call shape is unchanged.
+                  Object.keys(extras).length ? extras : undefined,
+                ),
               ),
             );
-            result.comments += 1;
+            if (ok) result.comments += 1;
           }
           for (const [i, link] of (sendLinks ? (op.links ?? []) : []).entries()) {
             await retrying(() =>

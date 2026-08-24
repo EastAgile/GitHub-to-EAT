@@ -626,7 +626,8 @@ export async function runDirect(client, projectId, owner, repo, options) {
     importedStories: written.stories,
     importedLabels: written.labelsCreated,
     skipped,
-    errors: [],
+    // Row-scoped refusals the writer contained; one bad row must not cost the run.
+    errors: written.errors,
     warnings: [],
     unmatched: {},
     externalMembersCreated: attachedPeople(plan),
