@@ -906,27 +906,44 @@ Three things this listing does that the server's does not, each because this
 engine's mapper needs it:
 
 - **A repo-wide label listing** (`ImportLabels`). The server reads labels off
-  each issue. `src/mapping.js` also takes the repo's own list as its colour
-  authority, and a label that no issue carries has no other source. **The two
-  transports return this listing in different orders**, measured on live GitHub
-  2026-08-24 across a page boundary: `golang/go` (143 labels) and
-  `kubernetes/kubernetes` (214) each returned the same *set* over both transports
-  in a different sequence, diverging at index 0. `GET /labels` sorts by name;
-  `labelsQuery()` passes no `orderBy`, so the connection does not. No imported
-  row differs, and structurally rather than by luck: `src/mapping.js` folds this
-  listing into `repoColors`, a `Map` keyed by the **lowercased** name, and the
-  label creates come from each issue's own `labels` array, never from this
-  listing. The one path by which order could leak is two labels differing only
-  in case, which `new Map()` would resolve last-wins — not observed in 2051
-  labels across four repositories sampled the same day. There is no server
-  spelling to match here, because
-  the server has no repo-wide label listing at all, so the pin is that
-  `labelsQuery()` stays `orderBy`-free
-  (`tests/github-graphql-issues.test.js`), and the local parity tool compares
-  this listing as a **multiset**. Per-issue labels and assignees are the
-  opposite case and stay compared **in order**: measured the same day, label
-  order agreed on 8/8 issues and assignee order on 12/12, across four
-  repositories.
+  each issue. `src/mapping.js` also takes the repo's own list as a colour
+  authority for a label whose issue rows carry no usable colour; the listing
+  itself never creates a label row. There is no server spelling to match,
+  because the server has no repo-wide label listing at all.
+
+  **The two transports return this listing in different orders.** Measured on
+  live GitHub 2026-08-24 across a page boundary: `golang/go` (143 labels) and
+  `kubernetes/kubernetes` (214) each returned the same *set* over both
+  transports in a different sequence, diverging at index 0. `GET /labels`
+  returned them name-sorted that day (GitHub documents no order for it, and
+  `src/github.js` sends no sort parameter) and the connection did not;
+  `labelsQuery()` passes no `orderBy`. The pin is that it stays that way —
+  `tests/github-graphql-issues.test.js`, "the labels connection stays
+  orderBy-free, keeping the measured order divergence".
+
+  **No imported row differs, and structurally rather than by luck.**
+  `src/mapping.js` folds the listing into `repoColors`, a `Map` keyed by the
+  lowercased name. That key is untrimmed, while the lookup trims first. The
+  label creates come from each issue's own `labels` array, never from the
+  listing. Both halves are pinned in `tests/mapping.test.js` ("the repo label
+  listing's order cannot reach the plan"), so the claim fails a build rather
+  than rotting. The one path by which order could leak is two listing entries
+  with the same untrimmed lowercased name, which `new Map()` resolves
+  last-wins; that is pinned too, and whether GitHub can emit such a pair at all
+  is open. Not observed in 2051 labels across the four repositories sampled the
+  same day: `golang/go` (143), `kubernetes/kubernetes` (214),
+  `microsoft/vscode` (721), `rust-lang/rust` (973), which also carried no name
+  with leading or trailing whitespace. Reproduce with
+  `gh api --paginate "repos/<owner>/<repo>/labels" --jq '.[].name'`.
+
+  The local parity tool — `.claude/parity/dual-fetcher-parity.mjs`, local-only
+  and gitignored, not `tests/parity.test.js` — compares this listing as a
+  **multiset**. Per-issue labels and assignees are the opposite case and stay
+  compared **in order**: measured the same day, label order agreed on 8/8
+  issues and assignee order on 12/12, across the same four repositories. That
+  ordered comparison stays fixture-backed, so it is a dated snapshot rather
+  than a standing guarantee, and it could not detect a future order flip any
+  more than the blocker comparison can.
 - **`issue_url` on every comment row.** GraphQL nests comments under their
   issue, where REST listed them repo-wide. The mapper joins on `issue_url`, so
   the listing rebuilds it from the API base, the repo and the issue number.
@@ -1036,14 +1053,14 @@ story it already created — but the order a reader sees differs from a pre-flip
 import of the same repository. The local parity tool cannot catch this: its
 fixture serves one array to both renderings, so it asserts an order equality
 real GitHub violates. Only a fixture backed by live GitHub can. Story #330976
-settled that same fixture-artifact risk for the other two ordered comparisons by
-measuring them rather than reasoning about them: the repo-wide label listing
+settled that same fixture-artifact risk for the other three ordered comparisons
+by measuring them rather than reasoning about them: the repo-wide label listing
 diverges the way blockers do and is now compared as a multiset, while per-issue
 labels and assignees agree over both transports and stay ordered (see the
-`ImportLabels` bullet above for the numbers). **Without the flag the connection
-is not in the query at all**, so a default run pays no extra point and every output row is byte-identical to a
-run before the flag existed; a test pins it, as the `pullRequests` one is
-pinned. The server measured the cost on `directus/directus` (2026-08-14) by
+`ImportLabels` bullet above for the numbers and the caveat). **Without the flag the connection
+is not in the query at all**, so a default run pays no extra point and every
+output row is byte-identical to a run before the flag existed; a test pins it,
+as the `pullRequests` one is pinned. The server measured the cost on `directus/directus` (2026-08-14) by
 reading `rateLimit { cost }`: the page selection costs 4 points without the
 connection and 5 with it, identically at every `first:` from 1 to 100, so
 `first: 100` is chosen because the size is free. Since #57634 switched the engine

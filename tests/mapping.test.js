@@ -183,6 +183,34 @@ test("issue labels land on the story and in the plan's label ops with colors", (
   ]);
 });
 
+test("the repo label listing's order cannot reach the plan", () => {
+  // CONTRACT.md calls the listing order irrelevant. It is only irrelevant while `repoColors`
+  // stays a by-name lookup and `labelOps` is fed from `issue.labels`; this fails if either moves.
+  const labels = [
+    { name: "docs", color: "0075ca" },
+    { name: "bug", color: "d73a4a" },
+    { name: "never-used", color: "00ff00" },
+  ];
+  const args = { issues: [ghIssue({ labels: [{ name: "docs" }, { name: "bug" }] })], comments: [] };
+  assert.deepEqual(
+    mapRepo({ ...args, labels }).labels,
+    mapRepo({ ...args, labels: [...labels].reverse() }).labels,
+  );
+});
+
+test("two repo labels differing only in case collapse last-wins, the one order-sensitive case", () => {
+  const listing = [
+    { name: "Bug", color: "111111" },
+    { name: "bug", color: "222222" },
+  ];
+  const args = { issues: [ghIssue({ labels: [{ name: "bug" }] })], comments: [] };
+  assert.equal(mapRepo({ ...args, labels: listing }).labels[0].background_color_hex, "#222222");
+  assert.equal(
+    mapRepo({ ...args, labels: [...listing].reverse() }).labels[0].background_color_hex,
+    "#111111",
+  );
+});
+
 test("repo label list fills a color the issue payload lacks; unused repo labels are not created", () => {
   const plan = mapRepo({
     issues: [ghIssue({ labels: [{ name: "docs" }] })],
