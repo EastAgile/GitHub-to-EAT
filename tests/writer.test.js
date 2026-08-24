@@ -56,6 +56,7 @@ test("writePlan writes labels, then stories oldest-first with their subresources
     const result = await writePlan(client, 91, samplePlan(), { stream: out });
 
     assert.deepEqual(result, {
+      errors: [],
       epicsCreated: 0,
       epicsExisting: 0,
       epicsBlocked: 0,
@@ -1160,4 +1161,169 @@ test("a plan with no blockers still writes against a client without createBlocke
   } finally {
     await mock.close();
   }
+});
+
+// --- per-row error containment: one rejected child write must not kill the run ---
+
+/** @returns {import("../src/writer.js").WritePlan} */
+function twoStoriesWithComments() {
+  /**
+   * @param {string} id @param {string[]} texts
+   * @returns {import("../src/mapping.js").StoryOp}
+   */
+  const story = (id, texts) => ({
+    external_id: id,
+    name: `issue ${id}`,
+    description: "d",
+    story_type: "feature",
+    current_state: "accepted",
+    labels: [],
+    tasks: [],
+    blockers: [],
+    created_at: null,
+    completed_at: null,
+    comments: texts.map((text) => ({ text, created_at: null, author: null })),
+  });
+  return { labels: [], epics: [], stories: [story("3", ["poison", "fine"]), story("7", ["fine"])] };
+}
+
+test("a comment the server rejects is recorded as a row error, not fatal", async () => {
+  const rejected = new EATError(
+    'request to /projects/91/stories/1/comments failed (400): {"code":"invalid_parameter"}',
+  );
+  rejected.status = 400;
+  /** @type {string[]} */
+  const written = [];
+  const client = {
+    createLabel: async () => ({}),
+    /** @param {number} _p @param {any} story */
+    createStory: async (_p, story) => ({ story_id: Number(story.name.split(" ")[1]) }),
+    createTask: async () => ({}),
+    /** @param {number} _p @param {number} _s @param {string} text */
+    createComment: async (_p, _s, text) => {
+      if (text === "poison") throw rejected;
+      written.push(text);
+      return {};
+    },
+    listEpics: async () => [],
+    createEpic: async () => ({}),
+  };
+
+  const result = await writePlan(client, 91, twoStoriesWithComments(), {
+    stream: capture(),
+    retryDelayMs: 1,
+  });
+
+  // Both stories land, and every comment except the rejected one is written.
+  assert.equal(result.stories, 2);
+  assert.equal(result.comments, 2);
+  assert.deepEqual(written, ["fine", "fine"]);
+  // The rejection survives as a reportable row error naming the source issue.
+  assert.equal(result.errors.length, 1);
+  assert.equal(result.errors[0].row, "3");
+});
+
+test("an auth failure mid-run is still fatal — it is not a row error", async () => {
+  const client = {
+    createLabel: async () => ({}),
+    createStory: async () => ({ story_id: 1 }),
+    createTask: async () => ({}),
+    createComment: async () => {
+      throw new AuthError("bad key");
+    },
+    listEpics: async () => [],
+    createEpic: async () => ({}),
+  };
+  await assert.rejects(
+    writePlan(client, 91, twoStoriesWithComments(), { stream: capture(), retryDelayMs: 1 }),
+    /bad key/,
+  );
+});
+
+test("a rejected task is contained the same way a comment is", async () => {
+  const rejected = new EATError('failed (400): {"code":"invalid_parameter"}');
+  rejected.status = 400;
+  const plan = twoStoriesWithComments();
+  plan.stories[0].tasks = [
+    { description: "poison", complete: false },
+    { description: "fine", complete: false },
+  ];
+  /** @type {string[]} */
+  const written = [];
+  const client = {
+    createLabel: async () => ({}),
+    createStory: async () => ({ story_id: 1 }),
+    /** @param {number} _p @param {number} _s @param {any} task */
+    createTask: async (_p, _s, task) => {
+      if (task.description === "poison") throw rejected;
+      written.push(task.description);
+      return {};
+    },
+    createComment: async () => ({}),
+    listEpics: async () => [],
+    createEpic: async () => ({}),
+  };
+  const result = await writePlan(client, 91, plan, { stream: capture(), retryDelayMs: 1 });
+  assert.equal(result.stories, 2);
+  assert.deepEqual(written, ["fine"]);
+  assert.equal(result.errors.length, 1);
+  assert.equal(result.errors[0].row, "3");
+});
+
+test("a rejected blocker is contained the same way a comment is", async () => {
+  const rejected = new EATError('failed (400): {"code":"invalid_parameter"}');
+  rejected.status = 400;
+  const plan = twoStoriesWithComments();
+  plan.stories[0].blockers = [{ desc: "poison" }, { desc: "fine" }];
+  /** @type {string[]} */
+  const written = [];
+  const client = {
+    createLabel: async () => ({}),
+    createStory: async () => ({ story_id: 1 }),
+    createTask: async () => ({}),
+    createComment: async () => ({}),
+    /** @param {number} _p @param {number} _s @param {{ desc: string }} blocker */
+    createBlocker: async (_p, _s, blocker) => {
+      if (blocker.desc === "poison") throw rejected;
+      written.push(blocker.desc);
+      return {};
+    },
+    listEpics: async () => [],
+    createEpic: async () => ({}),
+  };
+  const result = await writePlan(client, 91, plan, { stream: capture(), retryDelayMs: 1 });
+  assert.equal(result.stories, 2);
+  assert.deepEqual(written, ["fine"]);
+  assert.equal(result.errors.length, 1);
+});
+
+test("a rejected story create skips its children and continues to the next story", async () => {
+  const rejected = new EATError('failed (400): {"code":"invalid_parameter"}');
+  rejected.status = 400;
+  let comments = 0;
+  const client = {
+    createLabel: async () => ({}),
+    /** @param {number} _p @param {any} story */
+    createStory: async (_p, story) => {
+      if (story.name === "issue 3") throw rejected;
+      return { story_id: 7 };
+    },
+    createTask: async () => ({}),
+    createComment: async () => {
+      comments += 1;
+      return {};
+    },
+    listEpics: async () => [],
+    createEpic: async () => ({}),
+  };
+  const result = await writePlan(client, 91, twoStoriesWithComments(), {
+    stream: capture(),
+    retryDelayMs: 1,
+  });
+  // Story 7 still imports; story 3's two comments are never attempted against a story that
+  // does not exist.
+  assert.equal(result.stories, 1);
+  assert.equal(comments, 1);
+  assert.equal(result.errors.length, 1);
+  assert.equal(result.errors[0].row, "3");
 });
