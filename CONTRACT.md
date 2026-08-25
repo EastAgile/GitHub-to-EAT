@@ -99,6 +99,13 @@ The API base is `.../api/v1`. Shapes the CLI parses:
   #31311). The CLI renders one `  - row <row>: <code>` line per entry on stderr
   and still exits 1; a bare string from an older/other source is rendered as-is,
   and every entry is control-character-scrubbed before it reaches the terminal.
+  The **direct engine fills the same shape differently**: `row` is the GitHub
+  external id (`3`, `release-100`), not a 1-based row number — it writes from a
+  plan, not from a numbered source file, and the external id is what a user can
+  open on GitHub. It also adds a third field, `detail`, naming the sub-resource
+  that was lost (`comment 2: …`); the CLI appends it after an em dash and scrubs
+  it on its own 200-character budget, so a long detail cannot cost the row and
+  the code. See "Row-error containment" below.
 
   `warnings` are **coded** non-fatal advisories about an import that otherwise
   succeeded — unlike `errors`, nothing was skipped (server story #32239). Each
@@ -1607,7 +1614,8 @@ mirroring the server importer's `release_to_record` (agile-tracker
   sendable timestamp — → `unstarted`, in the backlog. A readable date, not mere
   presence, is the test on both sides: the server runs the field through
   `parse_source_datetime`, which yields "no date" on anything it cannot read,
-  and forwarding such a value instead would be a `400` that aborts the run.
+  and forwarding such a value instead would be a `400` — contained now, but it
+  would still lose that story and report an error.
   The direct engine is bounded *more* tightly than the importer here, and has to
   be: it does not parse the date, it forwards the string into `POST /stories`,
   whose `created_at` / `completed_at` are `Option<DateTime<Utc>>` and therefore
@@ -1646,7 +1654,7 @@ mirroring the server importer's `release_to_record` (agile-tracker
 - **A release that cannot be written is reported, not dropped in silence.** A
   row whose `id` is not a positive **safe** integer has no usable re-import key,
   and a row with a blank `tag_name` has no story name (a `400 validation_failed`
-  that would abort the whole run rather than lose one row). Both are left out of
+  that costs the row even though nothing about it can be imported). Both are left out of
   the plan and counted in one stderr warning naming both causes. The safe-integer
   bound is what makes the key trustworthy: past 2^53 two distinct GitHub release
   ids round to one JS number — one `external_id` **and** one `Idempotency-Key`,
@@ -1862,13 +1870,61 @@ real server 2026-07-16 and mirrored by `src/mockserver.js`):
   failed responses are keyed too (probed 2026-07-16) — so the writer must
   mint one unique key per logical write, never reuse keys across ops.
 
+### Row-error containment (direct engine)
+
+The server-side importer records a per-row error and keeps going. The direct
+engine now does the same, on a **narrow allowlist** of statuses:
+
+- **Contained: `400`, `413`, `422`.** These say the server refused *this row's
+  content*. The write is skipped, one `{ code, row, detail }` entry is appended
+  to `errors`, and the run continues. The CLI prints every entry and still exits
+  **1**, so a contained run is never reported as a clean success.
+- **Fatal: everything else.** `401`/`403` (bad key), `404` (wrong project or a
+  path this server does not publish), `409` (a replayed Idempotency-Key), `429`
+  (rate limit) and every `5xx` past its retries abort the run. So does any other
+  4xx — `402`, `407`, `423`, `431`, `451` and whatever GitHub or a proxy adds
+  next. The list is an **allowlist for exactly this reason**: a `400 <= s < 500`
+  band would absorb a status that means the run itself is wrong, and skip every
+  remaining row instead of stopping.
+- **`429` is not retried and not contained.** The transport does not wait out a
+  rate limit (see "The transport does not retry a rate limit" above), so it
+  raises a typed error naming the `Retry-After` wait and the run stops. Absorbing
+  it would burn the rest of the plan against a server that is answering nothing.
+- **Consecutive-failure ceiling — 20.** Twenty contained refusals with no
+  successful write in between abort the run. Any success resets the count. A
+  systemic `400` (a server that refuses every comment, a proxy rewriting bodies)
+  is not one bad row, and containment must not turn it into thousands of skipped
+  rows that no later run repairs.
+- **Why the ceiling and the exit code both matter: the loss is durable.** The
+  dedup marker and the provenance pair land on the **story create**, so a story
+  whose comment was skipped is `skipped (already imported)` on every later run.
+  An import never updates an existing story. A contained row is therefore lost
+  permanently, not deferred — which is why containment is scoped to refusals that
+  a re-run could not fix either.
+- **`row` and `code`.** `row` is the GitHub external id (`3`, `release-100`).
+  `code` is the server's own machine code, parsed from the response body where
+  the client still holds it (`invalid_chars`, `invalid_parameter`), falling back
+  to `http_<status>` when the body carried none — never scraped out of the error
+  message, which keeps only the body's first 200 characters. `detail` names the
+  sub-resource (`comment 2: …`), which is the only record of *what* was lost.
+- **Which stages contain.** Story creates (a skipped story skips its own tasks,
+  blockers, comments and links, which would target a story that does not exist),
+  and each task, blocker, comment, link and label create. A refused **label**
+  costs only its colour: `POST /stories` attaches labels by name, get-or-creating
+  them with default colours, so the row keeps its label. A refused **epic** is counted `epicsBlocked` and warned about, the
+  same shape as the `409` where a plain label already holds the name — its
+  stories still carry the label, so they stay grouped.
+- **The listing and prescan stages do not contain.** Everything before the first
+  write — `GET /epics`, the dedup prescan, the feature detects — still fails the
+  run, because a wrong answer there mis-plans every row rather than one.
+
 ### Length limits (direct engine)
 
 The server rejects over-long write values with
 `400 invalid_parameter {"constraint":"too_long","fields":[<field>]}` — a
-typed 4xx the writer correctly never retries, so one giant GitHub comment
-would otherwise abort the whole run (observed 2026-07-17: a 46,411-char
-comment body). The direct engine therefore clamps plan text client-side
+typed 4xx the writer never retries, so one giant GitHub comment would otherwise
+be skipped and reported (observed 2026-07-17: a 46,411-char comment body), and
+before row-error containment it ended the run outright. The direct engine therefore clamps plan text client-side
 before writing:
 
 - **Unit — UTF-8 bytes.** The server validates with Rust's `str::len()`, which
@@ -1903,8 +1959,28 @@ before writing:
 - **Guarantee** — because the clamp measures the server's own unit, a clamped
   plan cannot produce a `too_long` 400; one over-long GitHub issue can never
   abort the run.
-- The mock server mirrors the rejection and, when configured with limits,
-  publishes them as `maxLength` in its `/openapi.json`.
+- **NUL strip, and it is silent.** The same pass first removes every `0x00` from
+  every plan string — story name and description, label name and colours, epic
+  title and description, task, blocker, comment, link, and each imported person's
+  id, username, display name and profile URL. Postgres `text` cannot store a NUL,
+  so the public create refuses the row `400 invalid_parameter
+  {"constraint":"invalid_chars"}`. GitHub's GraphQL API returns literal NULs where
+  REST does not, so the V5 transport flip is what made this reachable
+  (directus/directus#14579 carries 88 in one comment body; `gh api` strips them on
+  the way through, which is why every check made through it read clean).
+  Unlike the clamp, **the strip warns about nothing**, and that silence is
+  deliberate parity: the server importer's `strip_nul_bytes`
+  (`services/import/normalize.rs`) drops them silently too, so a warning here
+  would be a per-engine difference in the stderr of an otherwise identical import.
+  The two also differ in what the user loses. A clamp **destroys** readable text —
+  the notice tells the user where to look for the rest — while a NUL is invisible
+  in every renderer, carries no meaning, and would not have survived the server
+  engine either, so there is nothing to send the user back to.
+  It runs **before** the clamp, so the clamp measures the bytes actually sent; a
+  comment that only overflows once its NULs are counted is not truncated.
+- The mock server mirrors both rejections — `too_long` when configured with
+  limits (which it also publishes as `maxLength` in its `/openapi.json`) and
+  `invalid_chars` on any NUL in a written string.
 
 ### Marker dedup (direct engine)
 

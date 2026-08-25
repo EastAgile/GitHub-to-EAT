@@ -1264,12 +1264,6 @@ function clampBlock(text, limit) {
 }
 
 /**
- * Strip NUL from every string the plan will bind to the database, mirroring the server
- * importer's `strip_nul_bytes` (`services/import/normalize.rs`). Postgres `text` rejects
- * `0x00` and the public create 400s `invalid_chars`, so without this one comment refuses
- * its whole row. Real repos carry them: GitHub's GraphQL API returns literal NULs where
- * REST does not, so the V5 flip made this reachable (directus/directus#14579 carries 88).
- *
  * @param {string} value
  * @returns {string}
  */
@@ -1277,20 +1271,28 @@ function withoutNul(value) {
   return value.includes("\u0000") ? value.replaceAll("\u0000", "") : value;
 }
 
+/** `source` is our own literal, never GitHub text, so no strip can apply to it. */
+const PERSON_TEXT_FIELDS = /** @type {const} */ ([
+  "external_id",
+  "username",
+  "display_name",
+  "html_url",
+]);
+
 /**
  * @param {import("./mapping.js").ExternalPerson | null | undefined} person
  */
 function stripPersonNul(person) {
   if (!person) return;
-  for (const key of ["source", "external_id", "external_username", "display_name", "html_url"]) {
-    const v = /** @type {any} */ (person)[key];
-    if (typeof v === "string") /** @type {any} */ (person)[key] = withoutNul(v);
+  for (const key of PERSON_TEXT_FIELDS) {
+    const v = person[key];
+    if (typeof v === "string") person[key] = withoutNul(v);
   }
 }
 
 /**
- * Strip NUL across a whole plan, in place. Runs before the byte clamp so the clamp
- * measures the bytes that will actually be sent.
+ * Strip NUL across a whole plan, in place, before the byte clamp — GitHub's GraphQL API
+ * returns literal NULs where REST does not (directus/directus#14579 carries 88).
  *
  * @param {{ labels: LabelOp[], stories: StoryOp[], epics?: EpicOp[] }} plan
  */
@@ -1328,8 +1330,9 @@ function stripPlanNul(plan) {
 }
 
 /**
- * Cut every plan text field down to the server's limits so one giant GitHub
- * comment cannot 400 the whole run. Returns a new plan; the input is untouched.
+ * Cut every plan text field down to the server's limits so one giant GitHub comment
+ * is imported truncated rather than refused. Returns a new plan, but not a pure one:
+ * the NUL strip it runs first mutates the input plan's strings in place.
  *
  * @param {{ labels: LabelOp[], stories: StoryOp[], epics?: EpicOp[] }} plan
  * @param {FieldLimits} limits

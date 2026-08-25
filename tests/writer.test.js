@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { AuthError, ConflictError, EATClient, EATError } from "../src/client.js";
+import { AuthError, ConflictError, EATClient, EATError, RateLimitError } from "../src/client.js";
 import { startMockServer } from "../src/mockserver.js";
-import { BlockerWriteUnsupported, writePlan } from "../src/writer.js";
+import {
+  BlockerWriteUnsupported,
+  ROW_ERROR_CEILING,
+  RowErrorCeiling,
+  writePlan,
+} from "../src/writer.js";
 import { capture } from "./helpers.js";
 
 /** @returns {import("../src/writer.js").WritePlan} */
@@ -1214,7 +1219,6 @@ test("a comment the server rejects is recorded as a row error, not fatal", async
     retryDelayMs: 1,
   });
 
-  // Both stories land, and every comment except the rejected one is written.
   assert.equal(result.stories, 2);
   assert.equal(result.comments, 2);
   assert.deepEqual(written, ["fine", "fine"]);
@@ -1320,10 +1324,287 @@ test("a rejected story create skips its children and continues to the next story
     stream: capture(),
     retryDelayMs: 1,
   });
-  // Story 7 still imports; story 3's two comments are never attempted against a story that
-  // does not exist.
+  // A skipped story's comments are never attempted against a story that does not exist.
   assert.equal(result.stories, 1);
   assert.equal(comments, 1);
   assert.equal(result.errors.length, 1);
   assert.equal(result.errors[0].row, "3");
+});
+
+/**
+ * An EATError the server would raise for one row.
+ *
+ * @param {number} status @param {string} [code]
+ * @returns {EATError}
+ */
+function refusal(status, code) {
+  const err = new EATError(`failed (${status})`);
+  err.status = status;
+  err.code = code;
+  return err;
+}
+
+/**
+ * A client whose comment writes throw `err` for the text "poison".
+ *
+ * @param {unknown} err
+ */
+function clientRejectingPoison(err) {
+  return {
+    createLabel: async () => ({}),
+    createStory: async () => ({ story_id: 1 }),
+    createTask: async () => ({}),
+    /** @param {number} _p @param {number} _s @param {string} text */
+    createComment: async (_p, _s, text) => {
+      if (text === "poison") throw err;
+      return {};
+    },
+    listEpics: async () => [],
+    createEpic: async () => ({}),
+  };
+}
+
+for (const status of [400, 413, 422]) {
+  test(`a ${status} refusal of one comment is contained`, async () => {
+    const result = await writePlan(
+      clientRejectingPoison(refusal(status)),
+      91,
+      twoStoriesWithComments(),
+      {
+        stream: capture(),
+        retryDelayMs: 1,
+      },
+    );
+    assert.equal(result.stories, 2);
+    assert.equal(result.errors.length, 1);
+  });
+}
+
+// A blocklist would absorb these: they say the run is wrong (payment, proxy auth, locked
+// resource, legal block), never that one comment's text is unacceptable.
+for (const status of [402, 407, 423, 431, 451]) {
+  test(`a ${status} refusal is fatal, not contained`, async () => {
+    await assert.rejects(
+      writePlan(clientRejectingPoison(refusal(status)), 91, twoStoriesWithComments(), {
+        stream: capture(),
+        retryDelayMs: 1,
+      }),
+      /failed \(\d+\)/,
+    );
+  });
+}
+
+test("a 429 mid-run fails the run and names the wait", async () => {
+  const limit = new RateLimitError("rate limit hit (429); retry after 42s");
+  limit.status = 429;
+  limit.retryAfter = 42;
+  await assert.rejects(
+    writePlan(clientRejectingPoison(limit), 91, twoStoriesWithComments(), {
+      stream: capture(),
+      retryDelayMs: 1,
+    }),
+    /retry after 42s/,
+  );
+});
+
+test("a 429 is not retried — one attempt, then the run stops", async () => {
+  const limit = new RateLimitError("rate limit hit (429)");
+  limit.status = 429;
+  let attempts = 0;
+  const client = {
+    createLabel: async () => ({}),
+    createStory: async () => {
+      attempts += 1;
+      throw limit;
+    },
+    createTask: async () => ({}),
+    createComment: async () => ({}),
+    listEpics: async () => [],
+    createEpic: async () => ({}),
+  };
+  await assert.rejects(
+    writePlan(client, 91, twoStoriesWithComments(), { stream: capture(), retryDelayMs: 1 }),
+    RateLimitError,
+  );
+  assert.equal(attempts, 1);
+});
+
+test("a systemic 400 aborts once the consecutive-failure ceiling is reached", async () => {
+  /** @param {string} id @returns {import("../src/mapping.js").StoryOp} */
+  const story = (id) => ({
+    external_id: id,
+    name: `issue ${id}`,
+    description: "d",
+    story_type: "feature",
+    current_state: "accepted",
+    labels: [],
+    tasks: [],
+    blockers: [],
+    created_at: null,
+    completed_at: null,
+    comments: [],
+  });
+  const plan = {
+    labels: [],
+    epics: [],
+    stories: Array.from({ length: 200 }, (_, i) => story(String(i))),
+  };
+  let attempted = 0;
+  const client = {
+    createLabel: async () => ({}),
+    createStory: async () => {
+      attempted += 1;
+      throw refusal(400, "invalid_parameter");
+    },
+    createTask: async () => ({}),
+    createComment: async () => ({}),
+    listEpics: async () => [],
+    createEpic: async () => ({}),
+  };
+  await assert.rejects(
+    writePlan(client, 91, plan, { stream: capture(), retryDelayMs: 1 }),
+    RowErrorCeiling,
+  );
+  // It gave up near the ceiling rather than burning all 200 rows.
+  assert.ok(attempted <= ROW_ERROR_CEILING, `attempted ${attempted} rows`);
+});
+
+test("a success between refusals resets the ceiling, so a sparse failure never aborts", async () => {
+  /** @param {string} id @returns {import("../src/mapping.js").StoryOp} */
+  const story = (id) => ({
+    external_id: id,
+    name: `issue ${id}`,
+    description: "d",
+    story_type: "feature",
+    current_state: "accepted",
+    labels: [],
+    tasks: [],
+    blockers: [],
+    created_at: null,
+    completed_at: null,
+    comments: [],
+  });
+  const plan = {
+    labels: [],
+    epics: [],
+    stories: Array.from({ length: 200 }, (_, i) => story(String(i))),
+  };
+  let n = 0;
+  const client = {
+    createLabel: async () => ({}),
+    createStory: async () => {
+      n += 1;
+      if (n % 2 === 0) throw refusal(400, "invalid_parameter");
+      return { story_id: n };
+    },
+    createTask: async () => ({}),
+    createComment: async () => ({}),
+    listEpics: async () => [],
+    createEpic: async () => ({}),
+  };
+  const result = await writePlan(client, 91, plan, { stream: capture(), retryDelayMs: 1 });
+  assert.equal(result.stories, 100);
+  assert.equal(result.errors.length, 100);
+});
+
+test("a rejected link is contained like a comment, and is not counted", async () => {
+  const plan = twoStoriesWithComments();
+  plan.stories[0].links = [
+    { url: "https://x/1", link_type: "pull_request" },
+    { url: "https://x/2", link_type: "pull_request" },
+  ];
+  const client = {
+    createLabel: async () => ({}),
+    createStory: async () => ({ story_id: 1 }),
+    createTask: async () => ({}),
+    createComment: async () => ({}),
+    /** @param {number} _p @param {number} _s @param {{ url: string }} link */
+    createLink: async (_p, _s, link) => {
+      if (link.url.endsWith("1")) throw refusal(400, "invalid_parameter");
+      return {};
+    },
+    listEpics: async () => [],
+    createEpic: async () => ({}),
+  };
+  const result = await writePlan(client, 91, plan, {
+    stream: capture(),
+    retryDelayMs: 1,
+    sendLinks: true,
+  });
+  assert.equal(result.stories, 2);
+  assert.equal(result.links, 1);
+  assert.equal(result.errors.length, 1);
+  assert.match(result.errors[0].detail, /link 1/);
+});
+
+test("a rejected label create is contained — the story create remakes the label", async () => {
+  const plan = twoStoriesWithComments();
+  plan.labels = [{ name: "poison" }, { name: "fine" }];
+  const client = {
+    /** @param {number} _p @param {{ name: string }} label */
+    createLabel: async (_p, label) => {
+      if (label.name === "poison") throw refusal(400, "invalid_parameter");
+      return {};
+    },
+    createStory: async () => ({ story_id: 1 }),
+    createTask: async () => ({}),
+    createComment: async () => ({}),
+    listEpics: async () => [],
+    createEpic: async () => ({}),
+  };
+  const result = await writePlan(client, 91, plan, { stream: capture(), retryDelayMs: 1 });
+  assert.equal(result.labelsCreated, 1);
+  assert.equal(result.stories, 2);
+  assert.equal(result.errors.length, 1);
+  assert.equal(result.errors[0].row, "poison");
+});
+
+test("a rejected epic create is contained as blocked, with a warning", async () => {
+  const plan = twoStoriesWithComments();
+  plan.epics = [
+    { title: "poison", description: null },
+    { title: "fine", description: null },
+  ];
+  const out = capture();
+  const client = {
+    createLabel: async () => ({}),
+    createStory: async () => ({ story_id: 1 }),
+    createTask: async () => ({}),
+    createComment: async () => ({}),
+    listEpics: async () => [],
+    /** @param {number} _p @param {{ name: string }} epic */
+    createEpic: async (_p, epic) => {
+      if (epic.name === "poison") throw refusal(400, "invalid_parameter");
+      return {};
+    },
+  };
+  const result = await writePlan(client, 91, plan, { stream: out, retryDelayMs: 1 });
+  assert.equal(result.epicsCreated, 1);
+  assert.equal(result.epicsBlocked, 1);
+  assert.equal(result.stories, 2);
+  assert.match(out.buf, /warning: epic 'poison' was not created/);
+});
+
+test("the reported code comes from the parsed body, not a slice of the message", async () => {
+  // The real client parses `code` off the body; the message keeps only its first 200 chars.
+  const err = refusal(400, "invalid_chars");
+  err.message = `failed (400): ${"x".repeat(400)}`;
+  const result = await writePlan(clientRejectingPoison(err), 91, twoStoriesWithComments(), {
+    stream: capture(),
+    retryDelayMs: 1,
+  });
+  assert.equal(result.errors[0].code, "invalid_chars");
+});
+
+test("a refusal with no machine code falls back to the status", async () => {
+  const result = await writePlan(
+    clientRejectingPoison(refusal(422)),
+    91,
+    twoStoriesWithComments(),
+    {
+      stream: capture(),
+      retryDelayMs: 1,
+    },
+  );
+  assert.equal(result.errors[0].code, "http_422");
 });

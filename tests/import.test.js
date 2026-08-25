@@ -293,6 +293,34 @@ test("the dry-run plan renders structured row errors", async () => {
   assert.ok(!err.includes("[object Object]"), err);
 });
 
+test("a row error's detail is rendered — it names the sub-resource that was lost", async () => {
+  const { code, err } = await runCliWith({
+    imported: { stories: 1, labels: 0 },
+    skipped: 0,
+    errors: [{ code: "invalid_chars", row: "3", detail: "comment 2: failed (400)" }],
+  });
+  assert.equal(code, 1);
+  assert.ok(err.includes("  - row 3: invalid_chars — comment 2: failed (400)\n"), err);
+});
+
+test("a long detail cannot push the row and the code out of the line", async () => {
+  const { err } = await runCliWith({
+    imported: { stories: 1, labels: 0 },
+    skipped: 0,
+    errors: [{ code: "invalid_chars", row: "3", detail: `comment 2: ${"x".repeat(400)}` }],
+  });
+  assert.ok(err.includes("  - row 3: invalid_chars — comment 2: x"), err);
+});
+
+test("a row error's detail cannot write control characters to the terminal", async () => {
+  const { err } = await runCliWith({
+    imported: { stories: 1, labels: 0 },
+    skipped: 0,
+    errors: [{ code: "invalid_chars", row: "3", detail: "comment\u001b[2K\r 2" }],
+  });
+  assert.ok(!err.includes("\u001b"), JSON.stringify(err));
+});
+
 test("a server row error cannot write control characters to the terminal", async () => {
   const { err } = await runCliWith({
     imported: { stories: 1, labels: 0 },
