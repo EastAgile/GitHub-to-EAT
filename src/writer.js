@@ -123,9 +123,8 @@ function isRetryable(err) {
 }
 
 /**
- * The statuses that mean "the server refused THIS row's content": skipping the row and
- * reporting it beats losing the run. An allowlist, not a `4xx` band — a band absorbs
- * 402/407/423/431/451 and every future 4xx, none of which is one row's text.
+ * Statuses that mean the server refused THIS row's content, so skipping it beats losing
+ * the run. An allowlist, not a `4xx` band: a band would absorb 402/407/423/431/451 too.
  */
 const ROW_SCOPED_STATUSES = new Set([400, 413, 422]);
 
@@ -178,11 +177,8 @@ async function withRetry(fn, attempts, delayMs) {
 }
 
 /**
- * Execute the mapped plan. A `400`/`413`/`422` refusal of one row's content is contained:
- * the row is skipped and recorded in `errors`, and `ROW_ERROR_CEILING` consecutive
- * refusals still abort. Everything else fails the run once retries exhaust — auth,
- * `404`, `409` and `429` say the run itself is wrong, not one row's text. A partial run is
- * safe to redo — writes are idempotency-keyed and dedup skips already-imported stories.
+ * Execute the mapped plan. A `400`/`413`/`422` refusal of one row is contained (skipped,
+ * recorded, abort at `ROW_ERROR_CEILING` in a row); a partial run is safe to redo.
  *
  * @param {WriterClient} client
  * @param {number} projectId

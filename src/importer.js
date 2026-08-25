@@ -76,9 +76,8 @@ export async function pollImport(client, projectId, importId, { onProgress, poll
  * @property {number} importedStories
  * @property {number} importedLabels
  * @property {number} skipped
- * @property {unknown[]} errors row errors: `{ code, row }` objects from the server,
- *   `{ code, row, detail }` from the direct engine (a plain string from an
- *   older/other source is tolerated)
+ * @property {unknown[]} errors row errors: `{ code, row }` from the server,
+ *   `{ code, row, detail }` from the direct engine; a bare string is tolerated
  * @property {unknown[]} warnings non-fatal server advisories,
  *   `{ code, count, floor_year }` objects
  * @property {Record<string, unknown>} unmatched always empty on a GitHub

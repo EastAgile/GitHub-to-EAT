@@ -2692,7 +2692,6 @@ test("a comment the server rejects is reported by the direct engine, not fatal",
       github: { fetchAll: async () => fetchedRepo() },
     });
 
-    // The run completes and both stories import; the refusal surfaces as a row error.
     assert.equal(out.importedStories, 2);
     assert.equal(out.errors.length, 1);
     const row = /** @type {{ code: string, row: string }} */ (out.errors[0]);

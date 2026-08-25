@@ -118,9 +118,8 @@ function placeholderOwnersTail(created) {
 }
 
 /**
- * Render one row error. The server sends `{ code, row }` objects (CONTRACT.md); the
- * direct engine adds a `detail` naming the sub-resource it skipped. A bare string
- * from an older/other source still renders.
+ * Render one row error. The server sends `{ code, row }` (CONTRACT.md), the direct
+ * engine adds a `detail`, and a bare string from an older source still renders.
  *
  * @param {unknown} err
  * @returns {string}

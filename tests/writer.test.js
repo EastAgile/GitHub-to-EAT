@@ -1222,7 +1222,6 @@ test("a comment the server rejects is recorded as a row error, not fatal", async
   assert.equal(result.stories, 2);
   assert.equal(result.comments, 2);
   assert.deepEqual(written, ["fine", "fine"]);
-  // The rejection survives as a reportable row error naming the source issue.
   assert.equal(result.errors.length, 1);
   assert.equal(result.errors[0].row, "3");
 });
