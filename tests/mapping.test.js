@@ -2309,3 +2309,75 @@ test("a PR is not folded into an issue this run's filters exclude", () => {
     ["10"],
   );
 });
+
+// --- NUL parity with the server importer (services/import/normalize.rs strip_nul_bytes) ---
+
+test("NUL bytes are stripped from every plan string, as the server importer does", () => {
+  const N = String.fromCharCode(0);
+  /** @type {{ labels: any[], epics: any[], stories: any[] }} */
+  const plan = {
+    labels: [{ name: `bu${N}g`, background_color_hex: "#ff0000", text_color_hex: "#ffffff" }],
+    epics: [{ title: `ep${N}ic`, description: `d${N}esc` }],
+    stories: [
+      {
+        external_id: "1",
+        name: `ti${N}tle`,
+        description: `bo${N}dy`,
+        story_type: /** @type {const} */ ("feature"),
+        current_state: /** @type {const} */ ("accepted"),
+        created_at: null,
+        completed_at: null,
+        labels: [`la${N}bel`],
+        tasks: [{ description: `ta${N}sk`, complete: false }],
+        blockers: [{ desc: `blo${N}cker` }],
+        links: [{ url: `http://x/${N}`, link_type: "pull_request" }],
+        requestor: { source: "github", external_id: "7", external_username: `al${N}ice` },
+        owners: [{ source: "github", external_id: "8", external_username: `b${N}ob` }],
+        comments: [{ text: `he${N}llo`, created_at: null, author: null }],
+      },
+    ],
+  };
+  const out = clampPlan(plan, FALLBACK_LIMITS);
+  const s = out.stories[0];
+  const flat = JSON.stringify(out);
+  assert.equal(flat.includes("\\u0000"), false, "no plan string may still carry a NUL");
+  assert.equal(s.name, "title");
+  assert.equal(s.description, "body");
+  assert.equal(s.comments[0].text, "hello");
+  assert.equal(s.tasks[0].description, "task");
+  assert.equal(s.blockers?.[0].desc, "blocker");
+  assert.deepEqual(s.labels, ["label"]);
+  assert.equal(out.labels[0].name, "bug");
+});
+
+test("NUL is stripped before the byte clamp, so the clamp measures real bytes", () => {
+  const N = String.fromCharCode(0);
+  // 40 NULs in front of a body that fits only once they are gone.
+  const body = N.repeat(40) + "x".repeat(FALLBACK_LIMITS.commentText - 40);
+  /** @type {{ labels: any[], epics: any[], stories: any[] }} */
+  const plan = {
+    labels: [],
+    epics: [],
+    stories: [
+      {
+        external_id: "1",
+        name: "t",
+        description: "d",
+        story_type: /** @type {const} */ ("feature"),
+        current_state: /** @type {const} */ ("accepted"),
+        created_at: null,
+        completed_at: null,
+        labels: [],
+        tasks: [],
+        blockers: [],
+        comments: [{ text: body, created_at: null, author: null }],
+      },
+    ],
+  };
+  /** @type {string[]} */
+  const warns = [];
+  const out = clampPlan(plan, FALLBACK_LIMITS, { warn: (w) => warns.push(w) });
+  // Stripping first leaves it under the limit, so nothing is truncated.
+  assert.equal(out.stories[0].comments[0].text.length, FALLBACK_LIMITS.commentText - 40);
+  assert.deepEqual(warns, []);
+});
