@@ -654,6 +654,39 @@ test("comment_text over the configured maxLength returns 400 too_long", async ()
   }
 });
 
+// The real server refuses a NUL with `invalid_chars` — Postgres `text` cannot store
+// 0x00 — and GitHub's GraphQL API returns real ones, so the mock has to refuse them too.
+test("a NUL in a written string is rejected invalid_chars", async () => {
+  const N = String.fromCharCode(0);
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await assert.rejects(client.createStory(91, { name: `bad${N}name` }, "k-n"), (err) => {
+      assert.equal(/** @type {any} */ (err).status, 400);
+      assert.equal(/** @type {any} */ (err).code, "invalid_parameter");
+      assert.match(String(err), /invalid_chars/);
+      return true;
+    });
+    const story = await client.createStory(91, { name: "clean" }, "k-s");
+    await assert.rejects(
+      client.createStory(91, { name: "d", description: `bad${N}body` }, "k-d"),
+      /invalid_chars/,
+    );
+    await assert.rejects(
+      client.createTask(91, story.story_id, { description: `bad${N}task` }, "k-t"),
+      /invalid_chars/,
+    );
+    await assert.rejects(
+      client.createComment(91, story.story_id, `bad${N}comment`, "k-c"),
+      /invalid_chars/,
+    );
+    await assert.rejects(client.createLabel(91, { name: `bad${N}label` }, "k-l"), /invalid_chars/);
+    await assert.rejects(client.createEpic(91, { name: `bad${N}epic` }, "k-e"), /invalid_chars/);
+  } finally {
+    await mock.close();
+  }
+});
+
 test("story name and task_desc over their maxLength are rejected too_long", async () => {
   const mock = await startMockServer(makeState({ maxLengths: { name: 10, task_desc: 10 } }));
   try {

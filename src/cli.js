@@ -118,16 +118,21 @@ function placeholderOwnersTail(created) {
 }
 
 /**
- * Render one server row error. The server sends `{ code, row }` objects
- * (CONTRACT.md); a bare string from an older/other source still renders.
+ * Render one row error. The server sends `{ code, row }` objects (CONTRACT.md); the
+ * direct engine adds a `detail` naming the sub-resource it skipped. A bare string
+ * from an older/other source still renders.
  *
  * @param {unknown} err
  * @returns {string}
  */
 function rowErrorLine(err) {
   if (err && typeof err === "object" && "code" in err) {
-    const { code, row } = /** @type {{ code: unknown, row?: unknown }} */ (err);
-    return scrubControl(row == null ? String(code) : `row ${row}: ${code}`);
+    const { code, row, detail } = /** @type {{ code: unknown, row?: unknown,
+      detail?: unknown }} */ (err);
+    const head = scrubControl(row == null ? String(code) : `row ${row}: ${code}`);
+    // Scrubbed on its own budget: a long detail must not cost the row and the code,
+    // which are the half a user can act on.
+    return detail == null ? head : `${head} — ${scrubControl(detail)}`;
   }
   return scrubControl(err);
 }

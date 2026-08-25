@@ -2331,9 +2331,15 @@ test("NUL bytes are stripped from every plan string, as the server importer does
         tasks: [{ description: `ta${N}sk`, complete: false }],
         blockers: [{ desc: `blo${N}cker` }],
         links: [{ url: `http://x/${N}`, link_type: "pull_request" }],
-        requestor: { source: "github", external_id: "7", external_username: `al${N}ice` },
-        owners: [{ source: "github", external_id: "8", external_username: `b${N}ob` }],
-        comments: [{ text: `he${N}llo`, created_at: null, author: null }],
+        requestor: { source: "github", external_id: "7", username: `al${N}ice` },
+        owners: [{ source: "github", external_id: "8", username: `b${N}ob` }],
+        comments: [
+          {
+            text: `he${N}llo`,
+            created_at: null,
+            author: { source: "github", external_id: "9", username: `ca${N}rol` },
+          },
+        ],
       },
     ],
   };
@@ -2348,12 +2354,16 @@ test("NUL bytes are stripped from every plan string, as the server importer does
   assert.equal(s.blockers?.[0].desc, "blocker");
   assert.deepEqual(s.labels, ["label"]);
   assert.equal(out.labels[0].name, "bug");
+  assert.equal(s.requestor?.username, "alice");
+  assert.equal(s.owners?.[0].username, "bob");
+  assert.equal(s.comments[0].author?.username, "carol");
 });
 
 test("NUL is stripped before the byte clamp, so the clamp measures real bytes", () => {
   const N = String.fromCharCode(0);
-  // 40 NULs in front of a body that fits only once they are gone.
-  const body = N.repeat(40) + "x".repeat(FALLBACK_LIMITS.commentText - 40);
+  // Over the limit while the NULs are counted, exactly at it once they are gone: only
+  // stripping first leaves this untruncated.
+  const body = N.repeat(40) + "x".repeat(FALLBACK_LIMITS.commentText);
   /** @type {{ labels: any[], epics: any[], stories: any[] }} */
   const plan = {
     labels: [],
@@ -2377,7 +2387,6 @@ test("NUL is stripped before the byte clamp, so the clamp measures real bytes", 
   /** @type {string[]} */
   const warns = [];
   const out = clampPlan(plan, FALLBACK_LIMITS, { warn: (w) => warns.push(w) });
-  // Stripping first leaves it under the limit, so nothing is truncated.
-  assert.equal(out.stories[0].comments[0].text.length, FALLBACK_LIMITS.commentText - 40);
+  assert.equal(out.stories[0].comments[0].text.length, FALLBACK_LIMITS.commentText);
   assert.deepEqual(warns, []);
 });

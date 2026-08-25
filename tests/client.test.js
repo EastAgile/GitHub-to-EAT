@@ -9,6 +9,7 @@ import {
   EATError,
   EATTimeout,
   NotFoundError,
+  RateLimitError,
 } from "../src/client.js";
 import { makeState, startMockServer } from "../src/mockserver.js";
 
@@ -925,4 +926,74 @@ test("a completed_at on a non-done create is refused", async () => {
   } finally {
     await mock.close();
   }
+});
+
+test("a 4xx body's machine code lands on the error, past the message slice", async () => {
+  await withServer(
+    (_req, res) =>
+      json(res, 400, {
+        // The code sits past the 200 characters the message keeps, so only a parsed
+        // body can recover it.
+        error: "x".repeat(400),
+        code: "invalid_chars",
+      }),
+    async (base) => {
+      await assert.rejects(new EATClient(base, "tok").getMeta(), (err) => {
+        assert.ok(err instanceof EATError);
+        assert.equal(err.status, 400);
+        assert.equal(err.code, "invalid_chars");
+        return true;
+      });
+    },
+  );
+});
+
+test("a 4xx body that is not JSON leaves the code unset", async () => {
+  await withServer(
+    (_req, res) => {
+      res.writeHead(400);
+      res.end("<html>gateway said no</html>");
+    },
+    async (base) => {
+      await assert.rejects(new EATClient(base, "tok").getMeta(), (err) => {
+        assert.ok(err instanceof EATError);
+        assert.equal(err.code, undefined);
+        return true;
+      });
+    },
+  );
+});
+
+test("429 maps to RateLimitError and names the advertised wait", async () => {
+  await withServer(
+    (_req, res) => {
+      res.writeHead(429, { "Retry-After": "42" });
+      res.end("slow down");
+    },
+    async (base) => {
+      await assert.rejects(new EATClient(base, "tok").getMeta(), (err) => {
+        assert.ok(err instanceof RateLimitError);
+        assert.ok(err instanceof EATError);
+        assert.equal(err.status, 429);
+        assert.match(err.message, /42s/);
+        return true;
+      });
+    },
+  );
+});
+
+test("429 without Retry-After still raises RateLimitError", async () => {
+  await withServer(
+    (_req, res) => {
+      res.writeHead(429);
+      res.end("slow down");
+    },
+    async (base) => {
+      await assert.rejects(new EATClient(base, "tok").getMeta(), (err) => {
+        assert.ok(err instanceof RateLimitError);
+        assert.doesNotMatch(err.message, /NaN/);
+        return true;
+      });
+    },
+  );
 });

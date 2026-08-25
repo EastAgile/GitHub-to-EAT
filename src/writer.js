@@ -4,7 +4,14 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { AuthError, ConflictError, EATError, EATTimeout, NotFoundError } from "./client.js";
+import {
+  AuthError,
+  ConflictError,
+  EATError,
+  EATTimeout,
+  NotFoundError,
+  RateLimitError,
+} from "./client.js";
 import { DONE_STATES, epicTitleKey, STARTED_STATES, stripControls } from "./mapping.js";
 import { runWithProgress } from "./progress.js";
 
@@ -43,11 +50,18 @@ import { runWithProgress } from "./progress.js";
 /** The plan carries blockers but this client cannot write them (`createBlocker` absent). */
 export class BlockerWriteUnsupported extends EATError {}
 
+/** Too many row writes were refused in a row — the cause is systemic, not one row's text. */
+export class RowErrorCeiling extends EATError {}
+
+/** How many consecutive contained refusals end the run; any successful write resets the count. */
+export const ROW_ERROR_CEILING = 20;
+
 /**
  * @typedef {object} WriteResult
  * @property {number} epicsCreated
  * @property {number} epicsExisting epics the project already had
- * @property {number} epicsBlocked epics a plain label of the same name refused
+ * @property {number} epicsBlocked epics the server would not create — a plain label
+ *   holds the name, or it refused the create outright
  * @property {number} labelsCreated
  * @property {number} labelsExisting labels the project already had (409 conflict)
  * @property {number} stories
@@ -96,7 +110,12 @@ function conflictHolder(detail) {
  */
 function isRetryable(err) {
   if (err instanceof EATTimeout) return true;
-  if (err instanceof AuthError || err instanceof NotFoundError || err instanceof ConflictError) {
+  if (
+    err instanceof AuthError ||
+    err instanceof NotFoundError ||
+    err instanceof ConflictError ||
+    err instanceof RateLimitError
+  ) {
     return false;
   }
   if (err instanceof EATError) return err.status === undefined || err.status >= 500;
@@ -104,20 +123,29 @@ function isRetryable(err) {
 }
 
 /**
- * A row-scoped failure: the server refused THIS row's content, so skipping it and
- * reporting it beats losing the run. Auth/404/409 stay fatal — they say the run
- * itself is wrong (bad key, wrong story, replayed key), not one row's text.
+ * The statuses that mean "the server refused THIS row's content": skipping the row and
+ * reporting it beats losing the run. An allowlist, not a `4xx` band — a band absorbs
+ * 402/407/423/431/451 and every future 4xx, none of which is one row's text.
+ */
+const ROW_SCOPED_STATUSES = new Set([400, 413, 422]);
+
+/**
+ * A row-scoped failure. Auth/404/409/429 stay fatal — they say the run itself is wrong
+ * (bad key, wrong story, replayed key, no budget left), not one row's text.
  *
  * @param {unknown} err
  * @returns {boolean}
  */
 function isRowScoped(err) {
-  if (err instanceof AuthError || err instanceof NotFoundError || err instanceof ConflictError) {
+  if (
+    err instanceof AuthError ||
+    err instanceof NotFoundError ||
+    err instanceof ConflictError ||
+    err instanceof RateLimitError
+  ) {
     return false;
   }
-  return (
-    err instanceof EATError && err.status !== undefined && err.status >= 400 && err.status < 500
-  );
+  return err instanceof EATError && ROW_SCOPED_STATUSES.has(/** @type {number} */ (err.status));
 }
 
 /**
@@ -128,8 +156,7 @@ function isRowScoped(err) {
  * @returns {string}
  */
 function rowErrorCode(err) {
-  const match = /"code"\s*:\s*"([a-z_]+)"/.exec(err.message);
-  return match ? match[1] : `http_${err.status}`;
+  return err.code ?? `http_${err.status}`;
 }
 
 /**
@@ -151,7 +178,10 @@ async function withRetry(fn, attempts, delayMs) {
 }
 
 /**
- * Execute the mapped plan; fails fast once retries exhaust. A partial run is
+ * Execute the mapped plan. A `400`/`413`/`422` refusal of one row's content is contained:
+ * the row is skipped and recorded in `errors`, and `ROW_ERROR_CEILING` consecutive
+ * refusals still abort. Everything else fails the run once retries exhaust — auth,
+ * `404`, `409` and `429` say the run itself is wrong, not one row's text. A partial run is
  * safe to redo — writes are idempotency-keyed and dedup skips already-imported stories.
  *
  * @param {WriterClient} client
@@ -211,8 +241,28 @@ export async function writePlan(client, projectId, plan, options = {}) {
     links: 0,
   };
 
+  let consecutiveRowErrors = 0;
+
   /**
-   * Run one row-scoped write. A 4xx refusal of this row's content is reported and
+   * Record one contained refusal, then abort the run once they stop being isolated:
+   * a refusal every write in a row is a systemic fault, and dedup makes each skip permanent.
+   *
+   * @param {EATError} err @param {string} row @param {string} what
+   */
+  const recordRowError = (err, row, what) => {
+    result.errors.push({ code: rowErrorCode(err), row, detail: `${what}: ${err.message}` });
+    consecutiveRowErrors += 1;
+    if (consecutiveRowErrors >= ROW_ERROR_CEILING) {
+      throw new RowErrorCeiling(
+        `aborting after ${consecutiveRowErrors} consecutive refused writes ` +
+          `(last — ${row}, ${what}: ${err.message}). The server is refusing everything, ` +
+          "not one bad row; nothing further would be written correctly.",
+      );
+    }
+  };
+
+  /**
+   * Run one row-scoped write. A refusal of this row's content is reported and
    * skipped so a single bad row cannot cost the whole run; anything else still throws.
    *
    * @param {string} row @param {string} what @param {() => Promise<unknown>} fn
@@ -221,14 +271,11 @@ export async function writePlan(client, projectId, plan, options = {}) {
   const contained = async (row, what, fn) => {
     try {
       await fn();
+      consecutiveRowErrors = 0;
       return true;
     } catch (err) {
       if (!isRowScoped(err)) throw err;
-      result.errors.push({
-        code: rowErrorCode(/** @type {EATError} */ (err)),
-        row,
-        detail: `${what}: ${/** @type {Error} */ (err).message}`,
-      });
+      recordRowError(/** @type {EATError} */ (err), row, what);
       return false;
     }
   };
@@ -259,7 +306,18 @@ export async function writePlan(client, projectId, plan, options = {}) {
             );
             result.epicsCreated += 1;
           } catch (err) {
-            if (!(err instanceof ConflictError) || err.code !== "conflict") throw err;
+            if (!(err instanceof ConflictError) || err.code !== "conflict") {
+              if (!isRowScoped(err)) throw err;
+              // Same shape as the label-holds-the-name 409 below: the epic row is lost,
+              // the stories keep the label, and the run continues.
+              result.epicsBlocked += 1;
+              stream?.write(
+                `warning: epic '${stripControls(epic.title)}' was not created — the server ` +
+                  `refused it (${rowErrorCode(/** @type {EATError} */ (err))}); its stories ` +
+                  "still carry the label, so they stay grouped, but no epic row was made.\n",
+              );
+              continue;
+            }
             // Another run created it, or a plain label holds the name forever. The 409 body
             // says which; the re-read is the tiebreaker for wording it does not recognise.
             const holder = conflictHolder(err.detail);
@@ -298,16 +356,20 @@ export async function writePlan(client, projectId, plan, options = {}) {
         // Keys carry no user content — header values must be Latin-1 (undici
         // rejects emoji/CJK), so ops are keyed by stable plan position.
         for (const [i, label] of plan.labels.entries()) {
-          try {
-            await retrying(() => client.createLabel(projectId, label, `${runId}:label:${i}`));
-            result.labelsCreated += 1;
-          } catch (err) {
-            if (err instanceof ConflictError && err.code === "conflict") {
-              result.labelsExisting += 1;
-            } else {
+          // A refused label costs only its colour: POST /stories get-or-creates the
+          // name with default colours (CONTRACT.md), so the row keeps its label.
+          await contained(label.name, "label create", async () => {
+            try {
+              await retrying(() => client.createLabel(projectId, label, `${runId}:label:${i}`));
+              result.labelsCreated += 1;
+            } catch (err) {
+              if (err instanceof ConflictError && err.code === "conflict") {
+                result.labelsExisting += 1;
+                return;
+              }
               throw err;
             }
-          }
+          });
         }
       },
       `creating ${plan.labels.length} labels`,
@@ -369,15 +431,12 @@ export async function writePlan(client, projectId, plan, options = {}) {
             );
           } catch (err) {
             if (!isRowScoped(err)) throw err;
-            result.errors.push({
-              code: rowErrorCode(/** @type {EATError} */ (err)),
-              row: op.external_id,
-              detail: `story create: ${/** @type {Error} */ (err).message}`,
-            });
+            recordRowError(/** @type {EATError} */ (err), op.external_id, "story create");
             // Its tasks/blockers/comments would target a story that does not exist.
             continue;
           }
           result.stories += 1;
+          consecutiveRowErrors = 0;
           for (const [i, task] of op.tasks.entries()) {
             const ok = await contained(op.external_id, `task ${i + 1}`, () =>
               retrying(() =>
@@ -428,15 +487,17 @@ export async function writePlan(client, projectId, plan, options = {}) {
             if (ok) result.comments += 1;
           }
           for (const [i, link] of (sendLinks ? (op.links ?? []) : []).entries()) {
-            await retrying(() =>
-              /** @type {NonNullable<WriterClient["createLink"]>} */ (client.createLink)(
-                projectId,
-                created.story_id,
-                link,
-                `${runId}:link:${op.external_id}:${i}`,
+            const ok = await contained(op.external_id, `link ${i + 1}`, () =>
+              retrying(() =>
+                /** @type {NonNullable<WriterClient["createLink"]>} */ (client.createLink)(
+                  projectId,
+                  created.story_id,
+                  link,
+                  `${runId}:link:${op.external_id}:${i}`,
+                ),
               ),
             );
-            result.links += 1;
+            if (ok) result.links += 1;
           }
         }
       },

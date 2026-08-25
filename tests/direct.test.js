@@ -2642,12 +2642,45 @@ test("a story left with half its blockers by an interrupted run warns on the re-
   }
 });
 
+test("a NUL in a fetched comment imports clean — the server never sees one", async () => {
+  const N = String.fromCharCode(0);
+  const repo = fetchedRepo();
+  // GraphQL returns real NULs where REST does not (directus/directus#14579).
+  repo.comments[0].body = `conf${N}irmed`;
+  repo.issues[1].title = `older cl${N}osed issue`;
+  repo.issues[1].body = `st${N}eps`;
+  repo.labels[0].name = `b${N}ug`;
+  repo.issues[1].labels[0].name = `b${N}ug`;
+
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const out = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => repo },
+    });
+
+    assert.deepEqual(out.errors, []);
+    assert.equal(out.importedStories, 2);
+    const rows = mock.state.stories[91];
+    assert.equal(rows[0].title, "older closed issue");
+    assert.equal(rows[0].comments[0].comment_text.includes("confirmed"), true);
+    assert.equal(JSON.stringify(mock.state).includes("\\u0000"), false);
+  } finally {
+    await mock.close();
+  }
+});
+
 test("a comment the server rejects is reported by the direct engine, not fatal", async () => {
   const mock = await startMockServer();
   try {
     const client = new EATClient(mock.baseUrl, "ea_token");
-    const rejected = new EATError('failed (400): {"code":"invalid_parameter"}');
+    const rejected = new EATError("failed (400)");
     rejected.status = 400;
+    // The real client parses `code` off the body; a stub that only spelled it inside
+    // the message would test a scrape the writer no longer does.
+    rejected.code = "invalid_parameter";
     // Shadow just this method on the instance; every other write still goes to the mock.
     client.createComment = async () => {
       throw rejected;

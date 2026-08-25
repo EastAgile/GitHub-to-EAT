@@ -11,6 +11,12 @@ export const DEFAULT_IMPORT_TIMEOUT = 300;
 export class EATError extends Error {
   /** @type {number | undefined} HTTP status when the error came from a response */
   status;
+
+  /**
+   * @type {string | undefined} the server's machine `code` field, parsed here where the
+   * body is in hand: the message keeps only the first 200 characters of it.
+   */
+  code;
 }
 
 /** Authentication or authorization failed (HTTP 401/403). */
@@ -20,13 +26,19 @@ export class AuthError extends EATError {}
 export class NotFoundError extends EATError {}
 
 /**
+ * HTTP 429 — the server refused the request rate. The transport does not wait it out
+ * (CONTRACT.md), so it is neither retryable nor row-scoped: it fails the whole run.
+ */
+export class RateLimitError extends EATError {
+  /** @type {number | undefined} the `Retry-After` seconds, when the server sent a number */
+  retryAfter;
+}
+
+/**
  * HTTP 409 — a domain conflict (`code: "conflict"`, e.g. duplicate label name) or
  * an Idempotency-Key replay (`code: "idempotency_conflict"`); callers branch on `code`.
  */
 export class ConflictError extends EATError {
-  /** @type {string | undefined} the server's error `code` field */
-  code;
-
   /**
    * @type {string | undefined} the server's human `error` field. For epics it names which
    * kind of row holds the title (`Epic '…'` / `Label '…'`) — a discriminator no second
@@ -37,6 +49,29 @@ export class ConflictError extends EATError {
 
 /** The request exceeded its timeout. */
 export class EATTimeout extends EATError {}
+
+/**
+ * An error body parsed as JSON, or null when it is not JSON — a proxy's HTML must not
+ * turn a clean HTTP error into a crash.
+ *
+ * @param {string} text
+ * @returns {any}
+ */
+function errorBody(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * @param {any} body
+ * @returns {string | undefined}
+ */
+function bodyCode(body) {
+  return typeof body?.code === "string" ? body.code : undefined;
+}
 
 /** Thin client for the subset of EAT endpoints this tool uses. */
 export class EATClient {
@@ -97,15 +132,25 @@ export class EATClient {
       error.status = 404;
       throw error;
     }
+    if (response.status === 429) {
+      const header = response.headers.get("retry-after");
+      const seconds = header !== null && Number.isFinite(Number(header)) ? Number(header) : null;
+      const error = new RateLimitError(
+        `East Agile Tracker rate limit hit (429) on ${path}; ` +
+          `${seconds === null ? "retry later" : `retry after ${seconds}s`}. ` +
+          "The run stopped — rerun it once the limit clears; already-imported stories are skipped.",
+      );
+      error.status = 429;
+      if (seconds !== null) error.retryAfter = seconds;
+      throw error;
+    }
     if (response.status === 409) {
       const text = await response.text();
+      const body = errorBody(text);
       const error = new ConflictError(`conflict on ${path}: ${text.slice(0, 200)}`);
       error.status = 409;
-      try {
-        const body = JSON.parse(text);
-        error.code = body?.code;
-        if (typeof body?.error === "string") error.detail = body.error;
-      } catch {}
+      error.code = bodyCode(body);
+      if (typeof body?.error === "string") error.detail = body.error;
       throw error;
     }
     if (response.status >= 400) {
@@ -114,6 +159,7 @@ export class EATClient {
         `request to ${path} failed (${response.status}): ${text.slice(0, 200)}`,
       );
       error.status = response.status;
+      error.code = bodyCode(errorBody(text));
       throw error;
     }
     return response;
