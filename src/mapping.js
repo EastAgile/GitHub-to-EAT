@@ -1330,9 +1330,8 @@ function stripPlanNul(plan) {
 }
 
 /**
- * Cut every plan text field down to the server's limits so one giant GitHub comment
- * is imported truncated rather than refused. Returns a new plan, but not a pure one:
- * the NUL strip it runs first mutates the input plan's strings in place.
+ * Cut every plan text field down to the server's limits so one giant GitHub comment is
+ * imported truncated, not refused. Returns a new plan but mutates the input's strings.
  *
  * @param {{ labels: LabelOp[], stories: StoryOp[], epics?: EpicOp[] }} plan
  * @param {FieldLimits} limits
