@@ -13,7 +13,7 @@ import {
   RateLimitError,
 } from "./client.js";
 import { DONE_STATES, epicTitleKey, STARTED_STATES, stripControls } from "./mapping.js";
-import { runWithProgress } from "./progress.js";
+import { runWithProgress, scrubControl } from "./progress.js";
 
 /**
  * The subset of {@link import("./client.js").EATClient} the writer calls
@@ -51,9 +51,20 @@ import { runWithProgress } from "./progress.js";
 export class BlockerWriteUnsupported extends EATError {}
 
 /** Too many row writes were refused in a row — the cause is systemic, not one row's text. */
-export class RowErrorCeiling extends EATError {}
+export class RowErrorCeiling extends EATError {
+  /**
+   * The rows contained before the abort. Thrown out of `writePlan`, the accumulated
+   * result is lost, so the durable skips ride the error itself.
+   *
+   * @type {{ code: string, row: string, detail: string }[]}
+   */
+  errors = [];
+}
 
-/** How many consecutive contained refusals end the run; any successful write resets the count. */
+/**
+ * How many consecutive contained refusals of ONE write kind end the run. Counted per kind
+ * (epic, label, story, task, blocker, comment, link); only a same-kind success resets it.
+ */
 export const ROW_ERROR_CEILING = 20;
 
 /**
@@ -149,13 +160,14 @@ function isRowScoped(err) {
 
 /**
  * The server's machine code when it sent one, so the report says `invalid_parameter`
- * rather than a status number the user cannot look up.
+ * rather than a status number the user cannot look up. Scrubbed and capped at the
+ * source: the code is server text, and the epic warning writes it straight to a TTY.
  *
  * @param {EATError} err
  * @returns {string}
  */
 function rowErrorCode(err) {
-  return err.code ?? `http_${err.status}`;
+  return scrubControl(err.code || `http_${err.status}`, 100);
 }
 
 /**
@@ -237,23 +249,36 @@ export async function writePlan(client, projectId, plan, options = {}) {
     links: 0,
   };
 
-  let consecutiveRowErrors = 0;
+  /** @type {Map<string, number>} */
+  const consecutiveRowErrors = new Map();
+
+  /**
+   * A story create that succeeds says nothing about the comment endpoint, so one global
+   * counter never fires for a sub-resource the server refuses on every row.
+   *
+   * @param {string} kind
+   */
+  const clearRowErrors = (kind) => consecutiveRowErrors.set(kind, 0);
 
   /**
    * Record one contained refusal, then abort the run once they stop being isolated:
-   * a refusal every write in a row is a systemic fault, and dedup makes each skip permanent.
+   * a refusal on every write of one kind is a systemic fault, and dedup makes each skip permanent.
    *
-   * @param {EATError} err @param {string} row @param {string} what
+   * @param {EATError} err @param {string} row @param {string} what @param {string} kind
    */
-  const recordRowError = (err, row, what) => {
+  const recordRowError = (err, row, what, kind) => {
     result.errors.push({ code: rowErrorCode(err), row, detail: `${what}: ${err.message}` });
-    consecutiveRowErrors += 1;
-    if (consecutiveRowErrors >= ROW_ERROR_CEILING) {
-      throw new RowErrorCeiling(
-        `aborting after ${consecutiveRowErrors} consecutive refused writes ` +
-          `(last — ${row}, ${what}: ${err.message}). The server is refusing everything, ` +
-          "not one bad row; nothing further would be written correctly.",
+    const seen = (consecutiveRowErrors.get(kind) ?? 0) + 1;
+    consecutiveRowErrors.set(kind, seen);
+    if (seen >= ROW_ERROR_CEILING) {
+      const abort = new RowErrorCeiling(
+        `aborting after ${seen} consecutive refused ${kind} writes ` +
+          `(last — ${scrubControl(row, 100)}, ${what}: ${scrubControl(err.message)}). ` +
+          `The server is refusing every ${kind} write, not one bad row; ` +
+          "nothing further would be written correctly.",
       );
+      abort.errors = result.errors;
+      throw abort;
     }
   };
 
@@ -261,17 +286,18 @@ export async function writePlan(client, projectId, plan, options = {}) {
    * Run one row-scoped write. A refusal of this row's content is reported and
    * skipped so a single bad row cannot cost the whole run; anything else still throws.
    *
-   * @param {string} row @param {string} what @param {() => Promise<unknown>} fn
+   * @param {string} kind @param {string} row @param {string} what
+   * @param {() => Promise<unknown>} fn
    * @returns {Promise<boolean>} false when the row was skipped
    */
-  const contained = async (row, what, fn) => {
+  const contained = async (kind, row, what, fn) => {
     try {
       await fn();
-      consecutiveRowErrors = 0;
+      clearRowErrors(kind);
       return true;
     } catch (err) {
       if (!isRowScoped(err)) throw err;
-      recordRowError(/** @type {EATError} */ (err), row, what);
+      recordRowError(/** @type {EATError} */ (err), row, what, kind);
       return false;
     }
   };
@@ -301,6 +327,7 @@ export async function writePlan(client, projectId, plan, options = {}) {
               ),
             );
             result.epicsCreated += 1;
+            clearRowErrors("epic");
           } catch (err) {
             if (!(err instanceof ConflictError) || err.code !== "conflict") {
               if (!isRowScoped(err)) throw err;
@@ -312,6 +339,8 @@ export async function writePlan(client, projectId, plan, options = {}) {
                   `refused it (${rowErrorCode(/** @type {EATError} */ (err))}); its stories ` +
                   "still carry the label, so they stay grouped, but no epic row was made.\n",
               );
+              // The epic row is gone for good — a warning alone would exit 0 on a lost row.
+              recordRowError(/** @type {EATError} */ (err), epic.title, "epic create", "epic");
               continue;
             }
             // Another run created it, or a plain label holds the name forever. The 409 body
@@ -352,9 +381,9 @@ export async function writePlan(client, projectId, plan, options = {}) {
         // Keys carry no user content — header values must be Latin-1 (undici
         // rejects emoji/CJK), so ops are keyed by stable plan position.
         for (const [i, label] of plan.labels.entries()) {
-          // A refused label costs only its colour: POST /stories get-or-creates the
-          // name with default colours (CONTRACT.md), so the row keeps its label.
-          await contained(label.name, "label create", async () => {
+          // A refused label usually costs only its colour: POST /stories get-or-creates
+          // the name with default colours (CONTRACT.md), so the row keeps its label.
+          await contained("label", label.name, "label create", async () => {
             try {
               await retrying(() => client.createLabel(projectId, label, `${runId}:label:${i}`));
               result.labelsCreated += 1;
@@ -427,14 +456,14 @@ export async function writePlan(client, projectId, plan, options = {}) {
             );
           } catch (err) {
             if (!isRowScoped(err)) throw err;
-            recordRowError(/** @type {EATError} */ (err), op.external_id, "story create");
-            // Its tasks/blockers/comments would target a story that does not exist.
+            recordRowError(/** @type {EATError} */ (err), op.external_id, "story create", "story");
+            // Its tasks/blockers/comments/links would target a story that does not exist.
             continue;
           }
           result.stories += 1;
-          consecutiveRowErrors = 0;
+          clearRowErrors("story");
           for (const [i, task] of op.tasks.entries()) {
-            const ok = await contained(op.external_id, `task ${i + 1}`, () =>
+            const ok = await contained("task", op.external_id, `task ${i + 1}`, () =>
               retrying(() =>
                 client.createTask(
                   projectId,
@@ -449,7 +478,7 @@ export async function writePlan(client, projectId, plan, options = {}) {
           // Written sequentially, in GitHub's own `blocked_by` order: the public
           // route sets no display order, so insertion order is all the CLI controls.
           for (const [i, blocker] of (op.blockers ?? []).entries()) {
-            const ok = await contained(op.external_id, `blocker ${i + 1}`, () =>
+            const ok = await contained("blocker", op.external_id, `blocker ${i + 1}`, () =>
               retrying(() =>
                 // Non-null: the guard at the top refused this whole plan if the
                 // method were missing, before a single write.
@@ -468,7 +497,7 @@ export async function writePlan(client, projectId, plan, options = {}) {
               ...(sendDates ? { createdAt: comment.created_at } : {}),
               ...(sendPeople && comment.author ? { author: comment.author } : {}),
             };
-            const ok = await contained(op.external_id, `comment ${i + 1}`, () =>
+            const ok = await contained("comment", op.external_id, `comment ${i + 1}`, () =>
               retrying(() =>
                 client.createComment(
                   projectId,
@@ -483,7 +512,7 @@ export async function writePlan(client, projectId, plan, options = {}) {
             if (ok) result.comments += 1;
           }
           for (const [i, link] of (sendLinks ? (op.links ?? []) : []).entries()) {
-            const ok = await contained(op.external_id, `link ${i + 1}`, () =>
+            const ok = await contained("link", op.external_id, `link ${i + 1}`, () =>
               retrying(() =>
                 /** @type {NonNullable<WriterClient["createLink"]>} */ (client.createLink)(
                   projectId,

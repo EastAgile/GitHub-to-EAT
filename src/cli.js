@@ -21,6 +21,7 @@ import { preflight as defaultPreflight } from "./preflight.js";
 import { makeImportReporter, runWithProgress, scrubControl } from "./progress.js";
 import { VERSION } from "./version.js";
 import { runWizard as defaultRunWizard, WizardAborted } from "./wizard.js";
+import { RowErrorCeiling } from "./writer.js";
 
 const USAGE =
   "usage: github-to-eat [-h] [-V] --project ID --repo OWNER/NAME " +
@@ -129,8 +130,8 @@ function rowErrorLine(err) {
     const { code, row, detail } = /** @type {{ code: unknown, row?: unknown,
       detail?: unknown }} */ (err);
     const head = scrubControl(row == null ? String(code) : `row ${row}: ${code}`);
-    // Scrubbed on its own budget: a long detail must not cost the row and the code,
-    // which are the half a user can act on.
+    // Its own budget: sharing the head's would leave a long row id no room for the
+    // detail, which is the only record of what the row lost.
     return detail == null ? head : `${head} — ${scrubControl(detail)}`;
   }
   return scrubControl(err);
@@ -526,6 +527,11 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
       }
       if (err instanceof EATError || err instanceof GitHubError) {
         stderr.write(`error: ${values["dry-run"] ? "dry run failed: " : ""}${err.message}\n`);
+        // The abort discards the write result, so these durable skips have no other record.
+        if (err instanceof RowErrorCeiling && err.errors.length) {
+          stderr.write(`${err.errors.length} row(s) were skipped before the abort:\n`);
+          for (const rowError of err.errors) stderr.write(`  - ${rowErrorLine(rowError)}\n`);
+        }
         return 1;
       }
       throw err;

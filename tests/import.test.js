@@ -303,13 +303,17 @@ test("a row error's detail is rendered — it names the sub-resource that was lo
   assert.ok(err.includes("  - row 3: invalid_chars — comment 2: failed (400)\n"), err);
 });
 
-test("a long detail cannot push the row and the code out of the line", async () => {
+test("the detail is scrubbed on its own budget, beside the row and the code", async () => {
   const { err } = await runCliWith({
     imported: { stories: 1, labels: 0 },
     skipped: 0,
     errors: [{ code: "invalid_chars", row: "3", detail: `comment 2: ${"x".repeat(400)}` }],
   });
   assert.ok(err.includes("  - row 3: invalid_chars — comment 2: x"), err);
+  // Only the length separates two budgets from one shared 200: a single scrub of
+  // `head — detail` renders exactly 200 characters, this renders the head plus 200.
+  const rendered = (err.split("\n").find((l) => l.startsWith("  - row 3:")) ?? "").slice(4);
+  assert.ok(rendered.length > 200, `rendered ${rendered.length} characters`);
 });
 
 test("a row error's detail cannot write control characters to the terminal", async () => {

@@ -2644,19 +2644,32 @@ test("a story left with half its blockers by an interrupted run warns on the re-
 
 test("a NUL in a fetched comment imports clean — the server never sees one", async () => {
   const N = String.fromCharCode(0);
-  const repo = fetchedRepo();
+  const repo = blockedRepo();
   // GraphQL returns real NULs where REST does not (directus/directus#14579).
   repo.comments[0].body = `conf${N}irmed`;
   repo.issues[1].title = `older cl${N}osed issue`;
   repo.issues[1].body = `st${N}eps`;
   repo.labels[0].name = `b${N}ug`;
   repo.issues[1].labels[0].name = `b${N}ug`;
+  // Every other written surface: the requestor, an owner, a comment author, a blocker.
+  repo.issues[1].user = { id: 11, login: `al${N}ice`, html_url: `https://github.com/al${N}ice` };
+  repo.issues[1].assignees = [{ id: 22, login: `b${N}ob` }];
+  repo.comments[0].user = { id: 11, login: `al${N}ice` };
+  repo.blockedBy = new Map([
+    [
+      "3",
+      [
+        { number: 7, title: "newer open issue" },
+        { number: 90, title: `Upstream f${N}ix` },
+      ],
+    ],
+  ]);
 
   const mock = await startMockServer();
   try {
     const client = new EATClient(mock.baseUrl, "ea_token");
     const out = await runDirect(client, 91, "o", "r", {
-      included: ["issues"],
+      included: ["issues", "deps"],
       stream: capture(),
       github: { fetchAll: async () => repo },
     });
@@ -2666,6 +2679,12 @@ test("a NUL in a fetched comment imports clean — the server never sees one", a
     const rows = mock.state.stories[91];
     assert.equal(rows[0].title, "older closed issue");
     assert.equal(rows[0].comments[0].comment_text.includes("confirmed"), true);
+    assert.equal(rows[0].people.requestor.username, "alice");
+    assert.deepEqual(
+      rows[0].people.owners.map((/** @type {any} */ o) => o.username),
+      ["bob"],
+    );
+    assert.equal(rows[0].blockers[1].blocker_desc, "Blocked by #90 (Upstream fix)");
     assert.equal(JSON.stringify(mock.state).includes("\\u0000"), false);
   } finally {
     await mock.close();

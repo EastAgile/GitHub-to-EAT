@@ -1890,30 +1890,48 @@ engine now does the same, on a **narrow allowlist** of statuses:
   rate limit (see "The transport does not retry a rate limit" above), so it
   raises a typed error naming the `Retry-After` wait and the run stops. Absorbing
   it would burn the rest of the plan against a server that is answering nothing.
-- **Consecutive-failure ceiling — 20.** Twenty contained refusals with no
-  successful write in between abort the run. Any success resets the count. A
-  systemic `400` (a server that refuses every comment, a proxy rewriting bodies)
-  is not one bad row, and containment must not turn it into thousands of skipped
-  rows that no later run repairs.
+- **Consecutive-failure ceiling — 20, counted per write kind.** Each kind (epic,
+  label, story, task, blocker, comment, link) keeps its own count, and only a
+  success of that same kind resets it. Twenty consecutive refusals of one kind
+  abort the run. A systemic `400` (a server that refuses every comment, a proxy
+  rewriting bodies) is not one bad row, and containment must not turn it into
+  thousands of skipped rows that no later run repairs. **One shared count would
+  never fire for a sub-resource**: a story create that succeeds says nothing about
+  the comment endpoint, so 500 stories × 3 refused comments would clear the count
+  500 times and skip 1,500 rows without ever aborting.
+- **The abort still reports what it skipped.** `RowErrorCeiling` carries the rows
+  contained before it fired, and the CLI prints them under the error, so a durable
+  skip is never lost to the abort that followed it.
 - **Why the ceiling and the exit code both matter: the loss is durable.** The
   dedup marker and the provenance pair land on the **story create**, so a story
   whose comment was skipped is `skipped (already imported)` on every later run.
   An import never updates an existing story. A contained row is therefore lost
   permanently, not deferred — which is why containment is scoped to refusals that
   a re-run could not fix either.
-- **`row` and `code`.** `row` is the GitHub external id (`3`, `release-100`).
-  `code` is the server's own machine code, parsed from the response body where
-  the client still holds it (`invalid_chars`, `invalid_parameter`), falling back
-  to `http_<status>` when the body carried none — never scraped out of the error
-  message, which keeps only the body's first 200 characters. `detail` names the
-  sub-resource (`comment 2: …`), which is the only record of *what* was lost.
-- **Which stages contain.** Story creates (a skipped story skips its own tasks,
-  blockers, comments and links, which would target a story that does not exist),
-  and each task, blocker, comment, link and label create. A refused **label**
-  costs only its colour: `POST /stories` attaches labels by name, get-or-creating
-  them with default colours, so the row keeps its label. A refused **epic** is counted `epicsBlocked` and warned about, the
-  same shape as the `409` where a plain label already holds the name — its
-  stories still carry the label, so they stay grouped.
+- **`row` and `code`.** `row` is the GitHub external id (`3`, `release-100`) on
+  every stage but the label one, which has no external id and names the label
+  instead (`bug`). `code` is the server's own machine code, parsed from the
+  response body where the client still holds it (`invalid_chars`,
+  `invalid_parameter`), falling back to `http_<status>` when the body carried none
+  or an empty string — never scraped out of the error message, which keeps only
+  the body's first 200 characters. Both the code and the message are capped and
+  stripped of control characters before any of it reaches the terminal. `detail`
+  names the sub-resource (`comment 2: …`), which is the only record of *what* was
+  lost.
+- **Which stages contain.** Epic creates, story creates (a skipped story skips its
+  own tasks, blockers, comments and links, which would target a story that does
+  not exist), and each task, blocker, comment, link and label create. A refused
+  **label** usually costs only its colour: `POST /stories` attaches labels by
+  name, get-or-creating them with default colours, so the row keeps its label —
+  but the same name rides that story create, so a server that refuses the name
+  itself refuses it on both paths. A refused **epic** is counted `epicsBlocked`,
+  warned about and recorded as a row error: its stories still carry the label, so
+  they stay grouped, but the epic row is permanently lost, so the run must not
+  exit 0. The epic stage counts on its own bucket, so a systemic epic `400` aborts
+  at 20 like any other kind.
+- **A `409` epic is not a row error.** A plain label already holding the name is
+  the expected collision, not a refusal: it counts `epicsBlocked`, warns, and
+  leaves the exit code at 0.
 - **The listing and prescan stages do not contain.** Everything before the first
   write — `GET /epics`, the dedup prescan, the feature detects — still fails the
   run, because a wrong answer there mis-plans every row rather than one.
@@ -1924,8 +1942,8 @@ The server rejects over-long write values with
 `400 invalid_parameter {"constraint":"too_long","fields":[<field>]}` — a
 typed 4xx the writer never retries, so one giant GitHub comment would otherwise
 be skipped and reported (observed 2026-07-17: a 46,411-char comment body), and
-before row-error containment it ended the run outright. The direct engine therefore clamps plan text client-side
-before writing:
+before row-error containment it ended the run outright. The direct engine
+therefore clamps plan text client-side before writing:
 
 - **Unit — UTF-8 bytes.** The server validates with Rust's `str::len()`, which
   counts bytes, so every limit here is a byte budget. The client measures the
@@ -1960,9 +1978,12 @@ before writing:
   plan cannot produce a `too_long` 400; one over-long GitHub issue can never
   abort the run.
 - **NUL strip, and it is silent.** The same pass first removes every `0x00` from
-  every plan string — story name and description, label name and colours, epic
-  title and description, task, blocker, comment, link, and each imported person's
-  id, username, display name and profile URL. Postgres `text` cannot store a NUL,
+  every plan string — story name, description, cross-link block, external id and
+  label names, label name and colours, epic title and description, task, blocker,
+  comment, link url and type, and each imported person's id, username, display
+  name and profile URL. The **external id** is load-bearing beyond the write: it
+  keys the dedup marker and the Idempotency-Key, so a NUL left in it would break
+  the re-run key, not one column. Postgres `text` cannot store a NUL,
   so the public create refuses the row `400 invalid_parameter
   {"constraint":"invalid_chars"}`. GitHub's GraphQL API returns literal NULs where
   REST does not, so the V5 transport flip is what made this reachable
@@ -1980,7 +2001,10 @@ before writing:
   comment that only overflows once its NULs are counted is not truncated.
 - The mock server mirrors both rejections — `too_long` when configured with
   limits (which it also publishes as `maxLength` in its `/openapi.json`) and
-  `invalid_chars` on any NUL in a written string.
+  `invalid_chars` on a NUL in a label create, an epic title or description, a
+  story name, description, label, requestor or owner, a task description, a
+  comment body, or a blocker description. Story **links** are the one written
+  surface it does not check.
 
 ### Marker dedup (direct engine)
 

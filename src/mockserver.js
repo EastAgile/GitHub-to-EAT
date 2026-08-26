@@ -354,6 +354,18 @@ function invalidChars(field, ...values) {
 }
 
 /**
+ * One imported person's text columns, flattened for {@link invalidChars} — `source` is
+ * the caller's own literal, so it is not GitHub text and cannot carry a NUL.
+ *
+ * @param {any} person
+ * @returns {(string | null | undefined)[]}
+ */
+function personText(person) {
+  if (!person) return [];
+  return [person.external_id, person.username, person.display_name, person.html_url];
+}
+
+/**
  * Compute an import result from the fixture and the request body's flags,
  * the way the real server counts: issues always; other types only when the
  * corresponding include_* flag is set. Milestones become epics, which the
@@ -926,7 +938,14 @@ function createStory(state, projectId, body) {
   const badChars =
     invalidChars("name", name) ??
     invalidChars("description", description) ??
-    invalidChars("labels", ...(Array.isArray(body.labels) ? body.labels.map(String) : []));
+    invalidChars("labels", ...(Array.isArray(body.labels) ? body.labels.map(String) : [])) ??
+    invalidChars("requestor", ...personText(body.requestor)) ??
+    invalidChars(
+      "owners",
+      ...(Array.isArray(body.owners) ? body.owners : []).flatMap((/** @type {any} */ o) =>
+        personText(o?.external),
+      ),
+    );
   if (badChars) return badChars;
 
   if (body.labels != null && !Array.isArray(body.labels)) {
@@ -1278,6 +1297,8 @@ function createBlocker(state, projectId, storyId, body) {
   }
   const overLong = tooLong(state, "blocker_desc", desc);
   if (overLong) return overLong;
+  const badChars = invalidChars("blocker_desc", desc);
+  if (badChars) return badChars;
   const blocker = {
     blocker_id: state.nextId++,
     story_id: storyId,

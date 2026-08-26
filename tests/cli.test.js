@@ -12,6 +12,7 @@ import { MAPPINGS } from "../src/mappings.js";
 import { makeState, startMockServer } from "../src/mockserver.js";
 import { preflight as realPreflight } from "../src/preflight.js";
 import { VERSION } from "../src/version.js";
+import { RowErrorCeiling } from "../src/writer.js";
 import { capture, inTempDir, withEnv, withGitHubStub } from "./helpers.js";
 
 /**
@@ -502,6 +503,35 @@ test("the direct engine's placeholder owners render through the shared report pa
       );
       assert.equal(code, 0);
       assert.ok(out.buf.includes("note: 2 placeholder owner(s) created: @alice, @bob"), out.buf);
+    }),
+  );
+});
+
+test("the ceiling abort still reports the rows it skipped, scrubbed", async () => {
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      const err = capture();
+      const code = await main(
+        ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--engine", "direct", "-y"],
+        {
+          stdout: capture(),
+          stderr: err,
+          preflight: async () => preflightResult(),
+          runDirect: async () => {
+            const abort = new RowErrorCeiling("aborting after 20 consecutive refused writes");
+            abort.errors = [
+              { code: "invalid_chars", row: "3", detail: "comment 1: failed (400)" },
+              { code: "invalid_chars", row: "4\u001b[2K\r", detail: "comment 1: failed (400)" },
+            ];
+            throw abort;
+          },
+        },
+      );
+      assert.equal(code, 1);
+      assert.ok(err.buf.includes("  - row 3: invalid_chars — comment 1: failed (400)\n"), err.buf);
+      assert.ok(err.buf.includes("row 4[2K: invalid_chars"), err.buf);
+      assert.ok(!err.buf.includes("\r"), JSON.stringify(err.buf));
+      assert.ok(!err.buf.includes("\u001b"), JSON.stringify(err.buf));
     }),
   );
 });
