@@ -159,9 +159,8 @@ function isRowScoped(err) {
 }
 
 /**
- * The server's machine code when it sent one, so the report says `invalid_parameter`
- * rather than a status number the user cannot look up. Scrubbed and capped at the
- * source: the code is server text, and the epic warning writes it straight to a TTY.
+ * The report says `invalid_parameter`, not a status number the user cannot look up. Scrubbed
+ * and capped here: the code is server text, and the epic warning writes it straight to a TTY.
  *
  * @param {EATError} err
  * @returns {string}
