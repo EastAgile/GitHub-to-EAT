@@ -66,11 +66,14 @@ function errorBody(text) {
 }
 
 /**
+ * Capped like the message body it comes from: `code` is server text that reaches a
+ * warning line, and nothing downstream can shorten what it never bounded.
+ *
  * @param {any} body
  * @returns {string | undefined}
  */
 function bodyCode(body) {
-  return typeof body?.code === "string" ? body.code : undefined;
+  return typeof body?.code === "string" ? body.code.slice(0, 100) : undefined;
 }
 
 /** Thin client for the subset of EAT endpoints this tool uses. */
@@ -134,7 +137,9 @@ export class EATClient {
     }
     if (response.status === 429) {
       const header = response.headers.get("retry-after");
-      const seconds = header !== null && Number.isFinite(Number(header)) ? Number(header) : null;
+      // Digits only: `Number()` turns "" and "  " into 0 and "0x10" into 16, and
+      // `Retry-After` is also legally an HTTP date, which names no wait this can print.
+      const seconds = header !== null && /^\d+$/.test(header) ? Number(header) : null;
       const error = new RateLimitError(
         `East Agile Tracker rate limit hit (429) on ${path}; ` +
           `${seconds === null ? "retry later" : `retry after ${seconds}s`}. ` +

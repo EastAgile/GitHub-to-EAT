@@ -982,6 +982,28 @@ test("429 maps to RateLimitError and names the advertised wait", async () => {
   );
 });
 
+test("a non-numeric Retry-After is discarded, not coerced into a wait", async () => {
+  // `Number()` reads "" and "  " as 0 and "0x10" as 16, and keeps "-5"'s sign; an
+  // HTTP-date Retry-After is legal and is none of those.
+  for (const header of ["", "  ", "-5", "0x10", "Wed, 21 Oct 2026 07:28:00 GMT"]) {
+    await withServer(
+      (_req, res) => {
+        res.writeHead(429, { "Retry-After": header });
+        res.end("slow down");
+      },
+      async (base) => {
+        await assert.rejects(new EATClient(base, "tok").getMeta(), (err) => {
+          assert.ok(err instanceof RateLimitError);
+          assert.equal(err.retryAfter, undefined, `header ${JSON.stringify(header)}`);
+          assert.match(err.message, /retry later/);
+          assert.doesNotMatch(err.message, /retry after/);
+          return true;
+        });
+      },
+    );
+  }
+});
+
 test("429 without Retry-After still raises RateLimitError", async () => {
   await withServer(
     (_req, res) => {
