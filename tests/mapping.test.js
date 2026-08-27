@@ -2316,13 +2316,16 @@ test("NUL bytes are stripped from every plan string, as the server importer does
   const N = String.fromCharCode(0);
   /** @type {{ labels: any[], epics: any[], stories: any[] }} */
   const plan = {
-    labels: [{ name: `bu${N}g`, background_color_hex: "#ff0000", text_color_hex: "#ffffff" }],
+    labels: [
+      { name: `bu${N}g`, background_color_hex: `#ff${N}0000`, text_color_hex: `#ff${N}ffff` },
+    ],
     epics: [{ title: `ep${N}ic`, description: `d${N}esc` }],
     stories: [
       {
-        external_id: "1",
+        external_id: `1${N}`,
         name: `ti${N}tle`,
         description: `bo${N}dy`,
+        crossLinks: `Sub-issu${N}es: #12`,
         story_type: /** @type {const} */ ("feature"),
         current_state: /** @type {const} */ ("accepted"),
         created_at: null,
@@ -2330,7 +2333,7 @@ test("NUL bytes are stripped from every plan string, as the server importer does
         labels: [`la${N}bel`],
         tasks: [{ description: `ta${N}sk`, complete: false }],
         blockers: [{ desc: `blo${N}cker` }],
-        links: [{ url: `http://x/${N}`, link_type: "pull_request" }],
+        links: [{ url: `http://x/${N}`, link_type: `pull${N}_request` }],
         requestor: { source: "github", external_id: "7", username: `al${N}ice` },
         owners: [{ source: "github", external_id: "8", username: `b${N}ob` }],
         comments: [
@@ -2357,6 +2360,45 @@ test("NUL bytes are stripped from every plan string, as the server importer does
   assert.equal(s.requestor?.username, "alice");
   assert.equal(s.owners?.[0].username, "bob");
   assert.equal(s.comments[0].author?.username, "carol");
+  assert.equal(s.external_id, "1");
+  assert.equal(s.crossLinks, "Sub-issues: #12");
+  assert.equal(s.links?.[0].link_type, "pull_request");
+  assert.equal(out.labels[0].background_color_hex, "#ff0000");
+  assert.equal(out.labels[0].text_color_hex, "#ffffff");
+});
+
+test("a NUL in the cross-link block still lets the clamp cut around it", () => {
+  const N = String.fromCharCode(0);
+  const crossLinks = `Sub-issu${N}es: #12, #14`;
+  /** @type {{ labels: any[], epics: any[], stories: any[] }} */
+  const plan = {
+    labels: [],
+    epics: [],
+    stories: [
+      {
+        external_id: "7",
+        name: "t",
+        // Stripped, so it no longer ends with an unstripped `crossLinks` — the clamp
+        // then cuts the block away instead of cutting the body around it.
+        description: `${"x".repeat(FALLBACK_LIMITS.storyDescription)}\n\n${crossLinks}`,
+        crossLinks,
+        story_type: /** @type {const} */ ("feature"),
+        current_state: /** @type {const} */ ("accepted"),
+        created_at: null,
+        completed_at: null,
+        labels: [],
+        tasks: [],
+        blockers: [],
+        comments: [],
+      },
+    ],
+  };
+  const description = String(clampPlan(plan, FALLBACK_LIMITS, {}).stories[0].description);
+  assert.ok(
+    description.endsWith("\n\nSub-issues: #12, #14"),
+    `block survives the clamp, got: ${JSON.stringify(description.slice(-60))}`,
+  );
+  assert.ok(Buffer.byteLength(description, "utf8") <= FALLBACK_LIMITS.storyDescription);
 });
 
 test("NUL is stripped before the byte clamp, so the clamp measures real bytes", () => {

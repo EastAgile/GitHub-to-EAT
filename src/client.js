@@ -66,8 +66,8 @@ function errorBody(text) {
 }
 
 /**
- * Capped like the message body it comes from: `code` is server text that reaches a
- * warning line, and nothing downstream can shorten what it never bounded.
+ * Bounded at the source: both of today's consumers cap it again on their way to a
+ * terminal, but a third would otherwise inherit an unbounded server string.
  *
  * @param {any} body
  * @returns {string | undefined}
@@ -139,7 +139,9 @@ export class EATClient {
       const header = response.headers.get("retry-after");
       // Digits only: `Number()` turns "" and "  " into 0 and "0x10" into 16, and
       // `Retry-After` is also legally an HTTP date, which names no wait this can print.
-      const seconds = header !== null && /^\d+$/.test(header) ? Number(header) : null;
+      // Safe-integer too: 400 digits pass the pattern and read back as Infinity.
+      const parsed = header !== null && /^\d+$/.test(header) ? Number(header) : Number.NaN;
+      const seconds = Number.isSafeInteger(parsed) ? parsed : null;
       const error = new RateLimitError(
         `East Agile Tracker rate limit hit (429) on ${path}; ` +
           `${seconds === null ? "retry later" : `retry after ${seconds}s`}. ` +

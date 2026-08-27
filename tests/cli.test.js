@@ -5,7 +5,7 @@ import { Readable, Writable } from "node:stream";
 import { test } from "node:test";
 
 import { defaultConfirm, main, parseRepo } from "../src/cli.js";
-import { AuthError } from "../src/client.js";
+import { AuthError, EATError } from "../src/client.js";
 import { runDirect as realRunDirect } from "../src/direct.js";
 import { GitHubClient, GitHubError } from "../src/github.js";
 import { MAPPINGS } from "../src/mappings.js";
@@ -532,6 +532,51 @@ test("the ceiling abort still reports the rows it skipped, scrubbed", async () =
       assert.ok(err.buf.includes("row 4[2K: invalid_chars"), err.buf);
       assert.ok(!err.buf.includes("\r"), JSON.stringify(err.buf));
       assert.ok(!err.buf.includes("\u001b"), JSON.stringify(err.buf));
+    }),
+  );
+});
+
+test("a server body in a preflight failure cannot rewrite the terminal either", async () => {
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      const err = capture();
+      const code = await main(["--project", "91", "--repo", "o/r", "-y"], {
+        stdout: capture(),
+        stderr: err,
+        preflight: async () => {
+          throw new EATError(`failed (400): bad\u001b[2K\rbody ${"z".repeat(600)}`);
+        },
+      });
+      assert.equal(code, 1);
+      assert.ok(!err.buf.includes("\u001b"), JSON.stringify(err.buf.slice(0, 120)));
+      assert.ok(!err.buf.includes("\r"), JSON.stringify(err.buf.slice(0, 120)));
+      const line = err.buf.split("\n").find((l) => l.startsWith("error: ")) ?? "";
+      assert.ok(line.length < 500, `error line was ${line.length} characters`);
+    }),
+  );
+});
+
+test("a server body in a fatal error cannot rewrite the terminal", async () => {
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      const err = capture();
+      const code = await main(
+        ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--engine", "direct", "-y"],
+        {
+          stdout: capture(),
+          stderr: err,
+          preflight: async () => preflightResult(),
+          runDirect: async () => {
+            // client.js embeds 200 characters of the body in the message it raises.
+            throw new EATError(`failed (400): bad\u001b[2K\rbody ${"z".repeat(600)}`);
+          },
+        },
+      );
+      assert.equal(code, 1);
+      assert.ok(!err.buf.includes("\u001b"), JSON.stringify(err.buf.slice(0, 120)));
+      assert.ok(!err.buf.includes("\r"), JSON.stringify(err.buf.slice(0, 120)));
+      const line = err.buf.split("\n").find((l) => l.startsWith("error: ")) ?? "";
+      assert.ok(line.length < 500, `error line was ${line.length} characters`);
     }),
   );
 });

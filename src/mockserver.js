@@ -1167,7 +1167,9 @@ function createComment(state, projectId, storyId, body) {
   }
   const overLong = tooLong(state, "comment_text", text);
   if (overLong) return overLong;
-  const badChars = invalidChars("comment_text", text);
+  // The author is stored text like the story's requestor, so it is checked like it.
+  const badChars =
+    invalidChars("comment_text", text) ?? invalidChars("author", ...personText(body.author));
   if (badChars) return badChars;
   // The real server returns the same value for both ids (probed 2026-07-16).
   const id = state.nextId++;

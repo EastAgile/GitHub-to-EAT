@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { AuthError, ConflictError, EATClient, EATError, RateLimitError } from "../src/client.js";
+import {
+  AuthError,
+  ConflictError,
+  EATClient,
+  EATError,
+  NotFoundError,
+  RateLimitError,
+} from "../src/client.js";
 import { startMockServer } from "../src/mockserver.js";
 import {
   BlockerWriteUnsupported,
@@ -62,6 +69,7 @@ test("writePlan writes labels, then stories oldest-first with their subresources
 
     assert.deepEqual(result, {
       errors: [],
+      writtenStoryIds: ["3", "7"],
       epicsCreated: 0,
       epicsExisting: 0,
       epicsBlocked: 0,
@@ -1269,6 +1277,7 @@ test("a rejected task is contained the same way a comment is", async () => {
   const result = await writePlan(client, 91, plan, { stream: capture(), retryDelayMs: 1 });
   assert.equal(result.stories, 2);
   assert.deepEqual(written, ["fine"]);
+  assert.equal(result.tasks, 1);
   assert.equal(result.errors.length, 1);
   assert.equal(result.errors[0].row, "3");
 });
@@ -1297,6 +1306,7 @@ test("a rejected blocker is contained the same way a comment is", async () => {
   const result = await writePlan(client, 91, plan, { stream: capture(), retryDelayMs: 1 });
   assert.equal(result.stories, 2);
   assert.deepEqual(written, ["fine"]);
+  assert.equal(result.blockers, 1);
   assert.equal(result.errors.length, 1);
 });
 
@@ -1635,7 +1645,7 @@ test("a refused epic is recorded, so the run cannot exit 0 on a lost epic row", 
   assert.equal(result.errors[0].row, "milestone one");
 });
 
-test("a systemic epic 400 aborts — the epic stage counts on its own", async () => {
+test("a systemic epic 400 aborts the run", async () => {
   const plan = {
     labels: [],
     stories: [],
@@ -1753,13 +1763,20 @@ test("a rejected link is contained like a comment, and is not counted", async ()
 test("a rejected label create is contained — the story create remakes the label", async () => {
   const plan = twoStoriesWithComments();
   plan.labels = [{ name: "poison" }, { name: "fine" }];
+  plan.stories[0].labels = ["poison", "fine"];
+  /** @type {string[][]} */
+  const attached = [];
   const client = {
     /** @param {number} _p @param {{ name: string }} label */
     createLabel: async (_p, label) => {
       if (label.name === "poison") throw refusal(400, "invalid_parameter");
       return {};
     },
-    createStory: async () => ({ story_id: 1 }),
+    /** @param {number} _p @param {any} story */
+    createStory: async (_p, story) => {
+      attached.push(story.labels);
+      return { story_id: 1 };
+    },
     createTask: async () => ({}),
     createComment: async () => ({}),
     listEpics: async () => [],
@@ -1770,6 +1787,8 @@ test("a rejected label create is contained — the story create remakes the labe
   assert.equal(result.stories, 2);
   assert.equal(result.errors.length, 1);
   assert.equal(result.errors[0].row, "poison");
+  // The refusal cost the colour, not the label: the story create get-or-creates the name.
+  assert.deepEqual(attached[0], ["poison", "fine"]);
 });
 
 test("a rejected epic create is contained as blocked, with a warning", async () => {
@@ -1820,4 +1839,212 @@ test("a refusal with no machine code falls back to the status", async () => {
     },
   );
   assert.equal(result.errors[0].code, "http_422");
+});
+
+// --- the epic ceiling counts refusals, so every "the server already has it" path clears ---
+
+/**
+ * 500 epics, one story. Every 20th epic is refused for good; the other 475 take
+ * whichever "the server already holds this name" path the client's stub defines.
+ * 25 refusals accumulate past the ceiling unless that path clears the count.
+ *
+ * @returns {import("../src/writer.js").WritePlan}
+ */
+function epicRerunPlan() {
+  return {
+    labels: [],
+    epics: Array.from({ length: 500 }, (_, i) => ({ title: `milestone ${i}`, description: null })),
+    stories: [bareStory("3")],
+  };
+}
+
+/** @param {number} i */
+const epicIsRefused = (i) => i % 20 === 19;
+
+/** @param {{ name: string }} epic */
+const epicIndex = (epic) => Number(epic.name.split(" ")[1]);
+
+/** @param {string} detail @returns {ConflictError} */
+function epicConflict(detail) {
+  const err = new ConflictError("conflict on /projects/91/epics");
+  err.status = 409;
+  err.code = "conflict";
+  err.detail = detail;
+  return err;
+}
+
+/**
+ * @param {Partial<import("../src/writer.js").WriterClient>} overrides
+ * @returns {import("../src/writer.js").WriterClient}
+ */
+function epicClient(overrides) {
+  return {
+    createLabel: async () => ({}),
+    createStory: async () => ({ story_id: 1 }),
+    createTask: async () => ({}),
+    createComment: async () => ({}),
+    listEpics: async () => [],
+    createEpic: async () => ({}),
+    ...overrides,
+  };
+}
+
+test("epics the listing already holds reset the ceiling — a re-run still writes", async () => {
+  const plan = epicRerunPlan();
+  const held = (plan.epics ?? [])
+    .filter((_, i) => !epicIsRefused(i))
+    .map((epic) => ({ epic_title: epic.title }));
+  const client = epicClient({
+    listEpics: async () => held,
+    createEpic: async () => {
+      throw refusal(400, "invalid_parameter");
+    },
+  });
+
+  const result = await writePlan(client, 91, plan, { stream: capture(), retryDelayMs: 1 });
+
+  assert.equal(result.epicsExisting, 475);
+  assert.equal(result.epicsBlocked, 25);
+  assert.equal(result.errors.length, 25);
+  assert.equal(result.stories, 1);
+});
+
+test("a 409 naming an epic resets the ceiling", async () => {
+  const plan = epicRerunPlan();
+  const client = epicClient({
+    /** @param {number} _p @param {{ name: string }} epic */
+    createEpic: async (_p, epic) => {
+      if (epicIsRefused(epicIndex(epic))) throw refusal(400, "invalid_parameter");
+      throw epicConflict(`Epic '${epic.name}' already exists in this project`);
+    },
+  });
+
+  const result = await writePlan(client, 91, plan, { stream: capture(), retryDelayMs: 1 });
+
+  assert.equal(result.epicsExisting, 475);
+  assert.equal(result.errors.length, 25);
+  assert.equal(result.stories, 1);
+});
+
+test("a 409 the re-scan resolves to an epic resets the ceiling", async () => {
+  const plan = epicRerunPlan();
+  /** @type {string | null} */
+  let pending = null;
+  const client = epicClient({
+    // Only the epic whose create just 409d, so the tiebreak path is the one under test.
+    listEpics: async () => (pending === null ? [] : [{ epic_title: pending }]),
+    /** @param {number} _p @param {{ name: string }} epic */
+    createEpic: async (_p, epic) => {
+      if (epicIsRefused(epicIndex(epic))) throw refusal(400, "invalid_parameter");
+      pending = epic.name;
+      throw epicConflict("that name is taken");
+    },
+  });
+
+  const result = await writePlan(client, 91, plan, { stream: capture(), retryDelayMs: 1 });
+
+  assert.equal(result.epicsExisting, 475);
+  assert.equal(result.errors.length, 25);
+  assert.equal(result.stories, 1);
+});
+
+test("a 409 a plain label holds resets the ceiling", async () => {
+  const plan = epicRerunPlan();
+  const client = epicClient({
+    /** @param {number} _p @param {{ name: string }} epic */
+    createEpic: async (_p, epic) => {
+      if (epicIsRefused(epicIndex(epic))) throw refusal(400, "invalid_parameter");
+      throw epicConflict(`Label '${epic.name}' already exists in this project`);
+    },
+  });
+
+  const result = await writePlan(client, 91, plan, { stream: capture(), retryDelayMs: 1 });
+
+  assert.equal(result.epicsBlocked, 500);
+  assert.equal(result.errors.length, 25);
+  assert.equal(result.stories, 1);
+});
+
+test("a written sub-resource resets its own count — alternating refusals never abort", async () => {
+  // 25 refused comments, each followed by one the server takes. Without the reset on a
+  // written comment they are 25 in a row, and the 20th ends a run that should finish.
+  const plan = {
+    labels: [],
+    epics: [],
+    stories: Array.from({ length: 25 }, (_, i) => ({
+      ...bareStory(String(i)),
+      comments: [
+        { text: "poison", created_at: null, author: null },
+        { text: "fine", created_at: null, author: null },
+      ],
+    })),
+  };
+  let written = 0;
+  const client = {
+    createLabel: async () => ({}),
+    createStory: async () => ({ story_id: 1 }),
+    createTask: async () => ({}),
+    /** @param {number} _p @param {number} _s @param {string} text */
+    createComment: async (_p, _s, text) => {
+      if (text === "poison") throw refusal(400, "invalid_parameter");
+      written += 1;
+      return {};
+    },
+    listEpics: async () => [],
+    createEpic: async () => ({}),
+  };
+
+  const result = await writePlan(client, 91, plan, { stream: capture(), retryDelayMs: 1 });
+
+  assert.equal(result.stories, 25);
+  assert.equal(result.comments, 25);
+  assert.equal(written, 25);
+  assert.equal(result.errors.length, 25);
+});
+
+test("a NotFoundError is fatal even when it carries a row-scoped status", async () => {
+  // The type decides, not the number: a 404 body wearing a 400 still means this run is
+  // pointed at something that is not there, so containing it would skip every row.
+  const missing = new NotFoundError("not found: /projects/91/stories/1/comments");
+  missing.status = 400;
+  await assert.rejects(
+    writePlan(clientRejectingPoison(missing), 91, twoStoriesWithComments(), {
+      stream: capture(),
+      retryDelayMs: 1,
+    }),
+    /not found/,
+  );
+
+  const plain = new NotFoundError("not found: /projects/91/stories/1/comments");
+  plain.status = 404;
+  await assert.rejects(
+    writePlan(clientRejectingPoison(plain), 91, twoStoriesWithComments(), {
+      stream: capture(),
+      retryDelayMs: 1,
+    }),
+    /not found/,
+  );
+});
+
+test("the epic and story counts are partitioned — 15 refusals of each never abort", async () => {
+  const plan = {
+    labels: [],
+    epics: Array.from({ length: 15 }, (_, i) => ({ title: `milestone ${i}`, description: null })),
+    stories: Array.from({ length: 15 }, (_, i) => bareStory(String(i))),
+  };
+  const client = epicClient({
+    createStory: async () => {
+      throw refusal(400, "invalid_parameter");
+    },
+    createEpic: async () => {
+      throw refusal(400, "invalid_parameter");
+    },
+  });
+
+  const result = await writePlan(client, 91, plan, { stream: capture(), retryDelayMs: 1 });
+
+  // 30 refusals, no abort: one shared count would have fired at the 20th.
+  assert.equal(result.errors.length, 30);
+  assert.equal(result.epicsBlocked, 15);
+  assert.equal(result.stories, 0);
 });

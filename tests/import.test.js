@@ -316,6 +316,33 @@ test("the detail is scrubbed on its own budget, beside the row and the code", as
   assert.ok(rendered.length > 200, `rendered ${rendered.length} characters`);
 });
 
+test("a long row never pushes the code off the line", async () => {
+  // An epic title reaches 255 bytes and `row` carries it, so this is the routine shape
+  // of a refused epic — not an edge case.
+  const { err } = await runCliWith({
+    imported: { stories: 1, labels: 0 },
+    skipped: 0,
+    errors: [{ code: "too_long", row: "e".repeat(250), detail: "epic create: failed (400)" }],
+  });
+  const line = err.split("\n").find((l) => l.startsWith("  - row ")) ?? "";
+  assert.ok(line.includes("too_long"), `code survived, got: ${JSON.stringify(line.slice(0, 160))}`);
+  assert.ok(line.includes("epic create: failed (400)"), line.slice(0, 160));
+});
+
+test("a flood of row errors renders the first 50 and counts the rest", async () => {
+  const { code, err, out } = await runCliWith({
+    imported: { stories: 1, labels: 0 },
+    skipped: 0,
+    errors: Array.from({ length: 137 }, (_, i) => ({ code: "invalid_parameter", row: String(i) })),
+  });
+  assert.equal(code, 1);
+  const rendered = err.split("\n").filter((l) => l.startsWith("  - "));
+  assert.equal(rendered.length, 50);
+  assert.ok(err.includes("  \u2026 and 87 more\n"), err.slice(-200));
+  // The exact count still rides the summary, so the cap hides nothing.
+  assert.ok(out.includes("137 error(s)"), out);
+});
+
 test("a row error's detail cannot write control characters to the terminal", async () => {
   const { err } = await runCliWith({
     imported: { stories: 1, labels: 0 },

@@ -511,6 +511,34 @@ test("the direct engine reports the placeholder owners it attached, deduped and 
   }
 });
 
+test("a refused story keeps its people out of the placeholder-owner note", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const create = client.createStory.bind(client);
+    // Only issue #3 carries people (alice, bob), so refusing it must empty the note.
+    /** @param {number} projectId @param {any} body @param {string} key */
+    client.createStory = async (projectId, body, key) => {
+      if (body.name === "older closed issue") {
+        const err = new EATError('failed (400): {"code":"invalid_parameter"}');
+        err.status = 400;
+        throw err;
+      }
+      return create(projectId, body, key);
+    };
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    });
+    assert.equal(result.importedStories, 1);
+    assert.equal(result.errors.length, 1);
+    assert.deepEqual(result.externalMembersCreated, []);
+  } finally {
+    await mock.close();
+  }
+});
+
 test("the direct dry run previews the same placeholder-owner roster", async () => {
   const mock = await startMockServer();
   try {
@@ -2636,7 +2664,8 @@ test("a story left with half its blockers by an interrupted run warns on the re-
     });
     assert.equal(rerun.skipped, 2, "the half-written story stays skipped");
     assert.match(out.buf, /warning: issue #7 .*blockers 1\/2/);
-    assert.match(out.buf, /delete that story in EAT and re-run/);
+    assert.match(out.buf, /Deleting the story in EAT and re-running repairs the first two/);
+    assert.match(out.buf, /the server may have refused those rows/);
   } finally {
     await mock.close();
   }

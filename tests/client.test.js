@@ -1004,6 +1004,26 @@ test("a non-numeric Retry-After is discarded, not coerced into a wait", async ()
   }
 });
 
+test("an all-digit Retry-After too large to be a number is discarded", async () => {
+  // `/^\\d+$/` passes it and `Number()` reads it as Infinity — "retry after Infinitys"
+  // is not a wait anyone can act on.
+  await withServer(
+    (_req, res) => {
+      res.writeHead(429, { "Retry-After": "9".repeat(400) });
+      res.end("slow down");
+    },
+    async (base) => {
+      await assert.rejects(new EATClient(base, "tok").getMeta(), (err) => {
+        assert.ok(err instanceof RateLimitError);
+        assert.equal(err.retryAfter, undefined);
+        assert.match(err.message, /retry later/);
+        assert.doesNotMatch(err.message, /Infinity/);
+        return true;
+      });
+    },
+  );
+});
+
 test("429 without Retry-After still raises RateLimitError", async () => {
   await withServer(
     (_req, res) => {
