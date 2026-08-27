@@ -588,8 +588,10 @@ export async function runDirect(client, projectId, owner, repo, options) {
         `warning: ${describeOp(op.external_id)} has fewer tasks/blockers/comments in EAT than on ` +
           `GitHub (tasks ${tasksCount}/${op.tasks.length}, blockers ${blockerCount}/${blockers.length}, ` +
           `comments ${commentCount}/${op.comments.length}) — ` +
-          "an earlier run may have been interrupted, or the issue changed since import; " +
-          "it stays skipped — delete that story in EAT and re-run to repair.\n",
+          "an earlier run may have been interrupted, the issue may have changed since " +
+          "import, or the server may have refused those rows outright. It stays skipped. " +
+          "Deleting the story in EAT and re-running repairs the first two causes; a refusal " +
+          "repeats, and the run that hit it listed the row on stderr.\n",
       );
     }
   }
@@ -622,6 +624,7 @@ export async function runDirect(client, projectId, owner, repo, options) {
     sendPeople,
     sendLinks,
   });
+  const wroteStory = new Set(written.writtenStoryIds);
   return {
     importedStories: written.stories,
     importedLabels: written.labelsCreated,
@@ -630,7 +633,10 @@ export async function runDirect(client, projectId, owner, repo, options) {
     errors: written.errors,
     warnings: [],
     unmatched: {},
-    externalMembersCreated: attachedPeople(plan),
+    // Only the stories that reached the server: a contained row created nobody.
+    externalMembersCreated: attachedPeople({
+      stories: plan.stories.filter((op) => wroteStory.has(op.external_id)),
+    }),
     dryRun: false,
   };
 }

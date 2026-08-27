@@ -63,7 +63,8 @@ export class RowErrorCeiling extends EATError {
 
 /**
  * How many consecutive contained refusals of ONE write kind end the run. Counted per kind
- * (epic, label, story, task, blocker, comment, link); only a same-kind success resets it.
+ * (epic, label, story, task, blocker, comment, link). Any same-kind write the server did
+ * not refuse resets it — a create, or proof the row is already there (a listing, a 409).
  */
 export const ROW_ERROR_CEILING = 20;
 
@@ -82,6 +83,8 @@ export const ROW_ERROR_CEILING = 20;
  * @property {number} links
  * @property {{ code: string, row: string, detail: string }[]} errors row-scoped
  *   refusals the run contained and skipped, in write order
+ * @property {string[]} writtenStoryIds external ids of the story rows created — a
+ *   contained story never reached the server, so nothing it carried was written
  */
 
 /**
@@ -236,6 +239,8 @@ export async function writePlan(client, projectId, plan, options = {}) {
   const result = {
     /** @type {{ code: string, row: string, detail: string }[]} */
     errors: [],
+    /** @type {string[]} */
+    writtenStoryIds: [],
     epicsCreated: 0,
     epicsExisting: 0,
     epicsBlocked: 0,
@@ -312,60 +317,67 @@ export async function writePlan(client, projectId, plan, options = {}) {
         // get half, and the 409 below is the concurrent-writer safety net.
         let existing = await scan(projectId);
         for (const [i, epic] of epics.entries()) {
-          const key = epicTitleKey(epic.title);
-          if (existing.has(key)) {
-            result.epicsExisting += 1;
-            continue;
-          }
+          // Only a refusal continues a run of refusals: an epic the server already holds
+          // disproves "it refuses every epic write". Driven off the one path that records.
+          let refused = false;
           try {
-            await retrying(() =>
-              client.createEpic(
-                projectId,
-                { name: epic.title, description: epic.description },
-                `${runId}:epic:${i}`,
-              ),
-            );
-            result.epicsCreated += 1;
-            clearRowErrors("epic");
-          } catch (err) {
-            if (!(err instanceof ConflictError) || err.code !== "conflict") {
-              if (!isRowScoped(err)) throw err;
-              // Same shape as the label-holds-the-name 409 below: the epic row is lost,
-              // the stories keep the label, and the run continues.
-              result.epicsBlocked += 1;
-              stream?.write(
-                `warning: epic '${stripControls(epic.title)}' was not created — the server ` +
-                  `refused it (${rowErrorCode(/** @type {EATError} */ (err))}); its stories ` +
-                  "still carry the label, so they stay grouped, but no epic row was made.\n",
-              );
-              // The epic row is gone for good — a warning alone would exit 0 on a lost row.
-              recordRowError(/** @type {EATError} */ (err), epic.title, "epic create", "epic");
-              continue;
-            }
-            // Another run created it, or a plain label holds the name forever. The 409 body
-            // says which; the re-read is the tiebreaker for wording it does not recognise.
-            const holder = conflictHolder(err.detail);
-            if (holder === "epic") {
+            const key = epicTitleKey(epic.title);
+            if (existing.has(key)) {
               result.epicsExisting += 1;
               continue;
             }
-            if (holder === null) {
-              existing = await scan(projectId);
-              if (existing.has(key)) {
+            try {
+              await retrying(() =>
+                client.createEpic(
+                  projectId,
+                  { name: epic.title, description: epic.description },
+                  `${runId}:epic:${i}`,
+                ),
+              );
+              result.epicsCreated += 1;
+            } catch (err) {
+              if (!(err instanceof ConflictError) || err.code !== "conflict") {
+                if (!isRowScoped(err)) throw err;
+                // Same shape as the label-holds-the-name 409 below: the epic row is lost,
+                // the stories keep the label, and the run continues.
+                result.epicsBlocked += 1;
+                stream?.write(
+                  `warning: epic '${stripControls(epic.title)}' was not created — the server ` +
+                    `refused it (${rowErrorCode(/** @type {EATError} */ (err))}); its stories ` +
+                    "still carry the label, so they stay grouped, but no epic row was made.\n",
+                );
+                refused = true;
+                // The epic row is gone for good — a warning alone would exit 0 on a lost row.
+                recordRowError(/** @type {EATError} */ (err), epic.title, "epic create", "epic");
+                continue;
+              }
+              // Another run created it, or a plain label holds the name forever. The 409 body
+              // says which; the re-read is the tiebreaker for wording it does not recognise.
+              const holder = conflictHolder(err.detail);
+              if (holder === "epic") {
                 result.epicsExisting += 1;
                 continue;
               }
+              if (holder === null) {
+                existing = await scan(projectId);
+                if (existing.has(key)) {
+                  result.epicsExisting += 1;
+                  continue;
+                }
+              }
+              result.epicsBlocked += 1;
+              stream?.write(
+                `warning: epic '${stripControls(epic.title)}' was not created — ${
+                  holder === "label"
+                    ? "a label of that name already exists in this project"
+                    : "the server refused the name as taken and no epic of that name is in the " +
+                      "project, so a plain label most likely holds it"
+                }; its stories still carry the label, so they stay grouped, but no epic row ` +
+                  "was made.\n",
+              );
             }
-            result.epicsBlocked += 1;
-            stream?.write(
-              `warning: epic '${stripControls(epic.title)}' was not created — ${
-                holder === "label"
-                  ? "a label of that name already exists in this project"
-                  : "the server refused the name as taken and no epic of that name is in the " +
-                    "project, so a plain label most likely holds it"
-              }; its stories still carry the label, so they stay grouped, but no epic row ` +
-                "was made.\n",
-            );
+          } finally {
+            if (!refused) clearRowErrors("epic");
           }
         }
       },
@@ -460,6 +472,7 @@ export async function writePlan(client, projectId, plan, options = {}) {
             continue;
           }
           result.stories += 1;
+          result.writtenStoryIds.push(op.external_id);
           clearRowErrors("story");
           for (const [i, task] of op.tasks.entries()) {
             const ok = await contained("task", op.external_id, `task ${i + 1}`, () =>

@@ -102,8 +102,11 @@ The API base is `.../api/v1`. Shapes the CLI parses:
   The **direct engine fills the same shape differently**: `row` is the GitHub
   external id (`3`, `release-100`), not a 1-based row number — it writes from a
   plan, not from a numbered source file, and the external id is what a user can
-  open on GitHub. It also adds a third field, `detail`, naming the sub-resource
-  that was lost (`comment 2: …`); the CLI appends it after an em dash and scrubs
+  open on GitHub. Two stages have no external id and name their own text instead:
+  a refused **label** sends the label name (`bug`) and a refused **epic** sends
+  the epic title (`Sprint 4`). It also adds a third field, `detail`, naming the
+  sub-resource that was lost (`comment 2: …`); the CLI appends it after an em
+  dash and scrubs
   it on its own 200-character budget, so a long detail cannot cost the row and
   the code. See "Row-error containment" below.
 
@@ -1891,8 +1894,12 @@ engine now does the same, on a **narrow allowlist** of statuses:
   raises a typed error naming the `Retry-After` wait and the run stops. Absorbing
   it would burn the rest of the plan against a server that is answering nothing.
 - **Consecutive-failure ceiling — 20, counted per write kind.** Each kind (epic,
-  label, story, task, blocker, comment, link) keeps its own count, and only a
-  success of that same kind resets it. Twenty consecutive refusals of one kind
+  label, story, task, blocker, comment, link) keeps its own count, and any
+  same-kind write the server did **not** refuse resets it. That is a create, or
+  proof that the row is already there: an epic the listing returns, an epic or
+  label `409` on the name, a label `409`. Only proof of a refusal keeps the count
+  climbing — a re-run whose rows are all already present must not abort on the
+  handful the server still refuses. Twenty consecutive refusals of one kind
   abort the run. A systemic `400` (a server that refuses every comment, a proxy
   rewriting bodies) is not one bad row, and containment must not turn it into
   thousands of skipped rows that no later run repairs. **One shared count would
@@ -1905,19 +1912,26 @@ engine now does the same, on a **narrow allowlist** of statuses:
 - **Why the ceiling and the exit code both matter: the loss is durable.** The
   dedup marker and the provenance pair land on the **story create**, so a story
   whose comment was skipped is `skipped (already imported)` on every later run.
-  An import never updates an existing story. A contained row is therefore lost
-  permanently, not deferred — which is why containment is scoped to refusals that
-  a re-run could not fix either.
+  An import never updates an existing story. Which rows that strands depends on
+  the stage: a contained **epic**, and any sub-resource of a story that *was*
+  created, are lost permanently. A contained **story create** writes neither the
+  marker nor the provenance pair, so nothing marks it imported and the next run
+  writes it — the loss there is the run's, not the row's. Containment is still
+  scoped to refusals a re-run could not fix either.
 - **`row` and `code`.** `row` is the GitHub external id (`3`, `release-100`) on
-  every stage but the label one, which has no external id and names the label
-  instead (`bug`). `code` is the server's own machine code, parsed from the
-  response body where the client still holds it (`invalid_chars`,
-  `invalid_parameter`), falling back to `http_<status>` when the body carried none
-  or an empty string — never scraped out of the error message, which keeps only
-  the body's first 200 characters. Both the code and the message are capped and
-  stripped of control characters before any of it reaches the terminal. `detail`
-  names the sub-resource (`comment 2: …`), which is the only record of *what* was
-  lost.
+  the story stage and on every sub-resource under it. Two stages have no external
+  id and name their own text instead: the **label** stage sends the label name
+  (`bug`), and the **epic** stage sends the epic title (`Sprint 4`). `code` is the
+  server's own machine code, parsed from the response body where the client still
+  holds it — in practice `invalid_parameter`, which is what both the real server
+  and the mock send for a refused row. It falls back to `http_<status>` when the
+  body carried none or an empty string, and is never scraped out of the error
+  message, which keeps only the body's first 200 characters. The *reason* rides
+  one level down, in `details.constraint` (`invalid_chars`, `too_long`,
+  `required`, `invalid`), which the CLI does not read. Both the code and the
+  message are capped and stripped of control characters before any of it reaches
+  the terminal. `detail` names the sub-resource (`comment 2: …`), which is the
+  only record of *what* was lost.
 - **Which stages contain.** Epic creates, story creates (a skipped story skips its
   own tasks, blockers, comments and links, which would target a story that does
   not exist), and each task, blocker, comment, link and label create. A refused
@@ -2003,8 +2017,13 @@ therefore clamps plan text client-side before writing:
   limits (which it also publishes as `maxLength` in its `/openapi.json`) and
   `invalid_chars` on a NUL in a label create, an epic title or description, a
   story name, description, label, requestor or owner, a task description, a
-  comment body, or a blocker description. Story **links** are the one written
-  surface it does not check.
+  comment body, a comment author, or a blocker description. Story **links** are
+  checked too, but under their own wording: `constraint: "invalid"`, not
+  `invalid_chars`, on a NUL in the `url` or the `title`. Four written fields it
+  does **not** check for a NUL: the two label colours, the provenance pair
+  (`import_source` / `import_external_id`) and a link's `link_type`. Nothing in
+  the mock proves those four are NUL-free, so the strip in `clampPlan` is their
+  only guard and its own tests have to carry a NUL through each of them.
 
 ### Marker dedup (direct engine)
 
@@ -2109,10 +2128,13 @@ and both are prescanned, in union.
   blockers and comments. A run interrupted in that window leaves an incomplete
   story that stays skipped on re-runs; when a skipped story has fewer
   tasks/blockers/comments than the current GitHub issue, the next run warns
-  (`tasks X/Y, blockers X/Y, comments X/Y`) naming both possible causes — an
-  interrupted run, or the issue changing since import — with the repair path:
-  delete that story in EAT and re-run. All three counts are read in the prescan's
-  `fields=` allowlist; blockers are written *between* tasks and comments, so
+  (`tasks X/Y, blockers X/Y, comments X/Y`) naming all three possible causes — an
+  interrupted run, the issue changing since import, or the server refusing those
+  rows (see "Row-error containment"). Deleting the story in EAT and re-running
+  repairs the first two. A refusal repeats, so the warning says so rather than
+  sending the user round a loop; the run that contained it named the row on
+  stderr. All three counts are read in the prescan's `fields=` allowlist;
+  blockers are written *between* tasks and comments, so
   without `blocker_count` a run killed mid-blockers on a comment-less issue would
   trip no counter at all. Adding `--include deps` to an already-imported project
   warns for the same reason, and correctly: those stories can never gain blockers.

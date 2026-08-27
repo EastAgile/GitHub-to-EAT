@@ -129,12 +129,39 @@ function rowErrorLine(err) {
   if (err && typeof err === "object" && "code" in err) {
     const { code, row, detail } = /** @type {{ code: unknown, row?: unknown,
       detail?: unknown }} */ (err);
-    const head = scrubControl(row == null ? String(code) : `row ${row}: ${code}`);
-    // Its own budget: sharing the head's would leave a long row id no room for the
-    // detail, which is the only record of what the row lost.
+    // One budget each: an epic title reaches 255 bytes and rides `row`, and a shared
+    // 200 would push the code — the only machine-readable half — off the line.
+    const shown = scrubControl(String(code), 100);
+    const head = row == null ? shown : `row ${scrubControl(row, 100)}: ${shown}`;
+    // Its own budget too: the detail is the only record of what the row lost.
     return detail == null ? head : `${head} — ${scrubControl(detail)}`;
   }
   return scrubControl(err);
+}
+
+/**
+ * One fatal error's text, ready for a terminal. `message` can embed 200 characters of
+ * the server's own body (client.js), which is never trusted to be printable.
+ *
+ * @param {{ message: string }} err
+ * @returns {string}
+ */
+const errorText = (err) => scrubControl(err.message, 400);
+
+/** How many row errors reach the terminal; the rest are counted, not printed. */
+const ROW_ERRORS_SHOWN = 50;
+
+/**
+ * Write the row errors, capped. A systemic refusal produces thousands, and scrolling
+ * the summary line — which carries the exact count — off the screen helps nobody.
+ *
+ * @param {import("./progress.js").OutStream} stream
+ * @param {unknown[]} errors
+ */
+function writeRowErrors(stream, errors) {
+  for (const err of errors.slice(0, ROW_ERRORS_SHOWN)) stream.write(`  - ${rowErrorLine(err)}\n`);
+  const hidden = errors.length - ROW_ERRORS_SHOWN;
+  if (hidden > 0) stream.write(`  … and ${hidden} more\n`);
 }
 
 /**
@@ -190,9 +217,7 @@ function reportImport(outcome, { stdout, stderr, project, appBase }) {
     );
   }
   stdout.write(`Board: ${appBase}/projects/${project}\n`);
-  for (const err of outcome.errors) {
-    stderr.write(`  - ${rowErrorLine(err)}\n`);
-  }
+  writeRowErrors(stderr, outcome.errors);
   return outcome.errors.length ? 1 : 0;
 }
 
@@ -218,9 +243,7 @@ function reportDryRunPlan(plan, { stdout, stderr, owner, repo, project, projectT
         : "") +
       "No changes made.\n",
   );
-  for (const err of plan.errors) {
-    stderr.write(`  - ${rowErrorLine(err)}\n`);
-  }
+  writeRowErrors(stderr, plan.errors);
   return 0;
 }
 
@@ -412,7 +435,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     config = loadConfig();
   } catch (err) {
     if (err instanceof ConfigError) {
-      stderr.write(`error: ${err.message}\n`);
+      stderr.write(`error: ${errorText(err)}\n`);
       return 1;
     }
     throw err;
@@ -424,7 +447,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     result = await preflight(client, project);
   } catch (err) {
     if (err instanceof EATError) {
-      stderr.write(`error: ${err.message}\n`);
+      stderr.write(`error: ${errorText(err)}\n`);
       return 1;
     }
     throw err;
@@ -526,11 +549,11 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
         return 1;
       }
       if (err instanceof EATError || err instanceof GitHubError) {
-        stderr.write(`error: ${values["dry-run"] ? "dry run failed: " : ""}${err.message}\n`);
+        stderr.write(`error: ${values["dry-run"] ? "dry run failed: " : ""}${errorText(err)}\n`);
         // The abort discards the write result, so these durable skips have no other record.
         if (err instanceof RowErrorCeiling && err.errors.length) {
           stderr.write(`${err.errors.length} row(s) were skipped before the abort:\n`);
-          for (const rowError of err.errors) stderr.write(`  - ${rowErrorLine(rowError)}\n`);
+          writeRowErrors(stderr, err.errors);
         }
         return 1;
       }
@@ -571,7 +594,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
       } catch (err) {
         reporter.close(); // close the live line before any error text
         if (err instanceof EATTimeout) {
-          stderr.write(`error: ${err.message}\n`);
+          stderr.write(`error: ${errorText(err)}\n`);
           stderr.write(
             "The server may still be finishing the import — check the board in a " +
               "moment, or re-run.\n",
@@ -579,7 +602,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
           return 1;
         }
         if (err instanceof EATError) {
-          stderr.write(`error: dry run failed: ${err.message}\n`);
+          stderr.write(`error: dry run failed: ${errorText(err)}\n`);
           return 1;
         }
         throw err;
@@ -625,7 +648,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
   } catch (err) {
     reporter.close(); // close the live line before any error text
     if (err instanceof EATTimeout) {
-      stderr.write(`error: ${err.message}\n`);
+      stderr.write(`error: ${errorText(err)}\n`);
       stderr.write(
         "The server may still be finishing the import — check the board in a " +
           "moment, or re-run.\n",
@@ -633,7 +656,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
       return 1;
     }
     if (err instanceof EATError) {
-      stderr.write(`error: import failed: ${err.message}\n`);
+      stderr.write(`error: import failed: ${errorText(err)}\n`);
       if (!token) {
         stderr.write(
           "  hint: private repo, or the server has no platform PAT? " +

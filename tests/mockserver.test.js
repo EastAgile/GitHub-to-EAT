@@ -682,6 +682,18 @@ test("a NUL in a written string is rejected invalid_chars", async () => {
     );
     await assert.rejects(client.createLabel(91, { name: `bad${N}label` }, "k-l"), /invalid_chars/);
     await assert.rejects(client.createEpic(91, { name: `bad${N}epic` }, "k-e"), /invalid_chars/);
+    // The author rides every `--include people` comment, so a NUL in it refuses the row.
+    await assert.rejects(
+      client.createComment(91, story.story_id, "clean", "k-ca", {
+        author: {
+          source: "github",
+          external_id: "1",
+          username: `bad${N}login`,
+          display_name: `bad${N}login`,
+        },
+      }),
+      /invalid_chars/,
+    );
   } finally {
     await mock.close();
   }
