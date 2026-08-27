@@ -69,7 +69,7 @@ test("writePlan writes labels, then stories oldest-first with their subresources
 
     assert.deepEqual(result, {
       errors: [],
-      writtenStoryIds: ["3", "7"],
+      peopleWritten: [],
       epicsCreated: 0,
       epicsExisting: 0,
       epicsBlocked: 0,
@@ -2046,4 +2046,139 @@ test("the epic and story counts are partitioned — 15 refusals of each never ab
   assert.equal(result.errors.length, 30);
   assert.equal(result.epicsBlocked, 15);
   assert.equal(result.stories, 0);
+});
+
+test("a fatal error after contained rows carries those rows out of the writer", async () => {
+  const fatal = new AuthError("unauthorized (401)");
+  fatal.status = 401;
+  const client = {
+    createLabel: async () => ({}),
+    /** @param {number} _p @param {any} story */
+    createStory: async (_p, story) => {
+      if (story.name === "issue 7") throw fatal;
+      return { story_id: 1 };
+    },
+    createTask: async () => ({}),
+    /** @param {number} _p @param {number} _s @param {string} text */
+    createComment: async (_p, _s, text) => {
+      if (text === "poison") throw refusal(400, "invalid_parameter");
+      return {};
+    },
+    listEpics: async () => [],
+    createEpic: async () => ({}),
+  };
+
+  await assert.rejects(
+    writePlan(client, 91, twoStoriesWithComments(), { stream: capture(), retryDelayMs: 1 }),
+    (/** @type {any} */ err) => {
+      // Read before the narrowing: the writer attaches `errors`, AuthError declares none.
+      const carried = /** @type {any} */ (err).errors;
+      assert.ok(err instanceof AuthError, `got ${err?.constructor?.name}`);
+      assert.deepEqual(carried, [
+        { code: "invalid_parameter", row: "3", detail: "comment 1: failed (400)" },
+      ]);
+      return true;
+    },
+  );
+});
+
+test("a BlockerWriteUnsupported thrown before the first write is not masked", async () => {
+  await assert.rejects(
+    writePlan(
+      { ...clientRejectingPoison(refusal(400)), createBlocker: undefined },
+      91,
+      {
+        labels: [],
+        epics: [],
+        stories: [{ ...bareStory("3"), blockers: [{ desc: "Blocked by #4" }] }],
+      },
+      { stream: capture(), retryDelayMs: 1 },
+    ),
+    BlockerWriteUnsupported,
+  );
+});
+
+test("a RateLimitError carrying a row-scoped status is still fatal, not contained", async () => {
+  // The type decides, not the number: a 429 body that says 400 must not skip the row.
+  const limit = new RateLimitError("rate limit hit; retry later");
+  limit.status = 400;
+  await assert.rejects(
+    writePlan(clientRejectingPoison(limit), 91, twoStoriesWithComments(), {
+      stream: capture(),
+      retryDelayMs: 1,
+    }),
+    RateLimitError,
+  );
+});
+
+test("a RateLimitError with no status is not retried either", async () => {
+  // No status reads as a transport failure everywhere else, which retries three times.
+  const limit = new RateLimitError("rate limit hit; retry later");
+  let attempts = 0;
+  const client = {
+    createLabel: async () => ({}),
+    createStory: async () => {
+      attempts += 1;
+      throw limit;
+    },
+    createTask: async () => ({}),
+    createComment: async () => ({}),
+    listEpics: async () => [],
+    createEpic: async () => ({}),
+  };
+  await assert.rejects(
+    writePlan(client, 91, twoStoriesWithComments(), { stream: capture(), retryDelayMs: 1 }),
+    RateLimitError,
+  );
+  assert.equal(attempts, 1);
+});
+
+test("a refused epic listing fails the run — the listing stage never contains", async () => {
+  const refused = refusal(400, "invalid_parameter");
+  const client = {
+    ...clientRejectingPoison(refused),
+    listEpics: async () => {
+      throw refused;
+    },
+  };
+  await assert.rejects(
+    writePlan(
+      client,
+      91,
+      { labels: [], epics: [{ title: "Sprint 4", description: null }], stories: [] },
+      { stream: capture(), retryDelayMs: 1 },
+    ),
+    /failed \(400\)/,
+  );
+});
+
+test("every contained refusal is retained — nothing truncates result.errors", async () => {
+  /** @param {string} id */
+  const story = (id) => ({
+    ...bareStory(id),
+    comments: [
+      { text: "poison", created_at: null, author: null },
+      { text: "fine", created_at: null, author: null },
+    ],
+  });
+  const plan = {
+    labels: [],
+    epics: [],
+    stories: Array.from({ length: 60 }, (_, i) => story(String(i))),
+  };
+
+  const result = await writePlan(
+    clientRejectingPoison(refusal(400, "invalid_parameter")),
+    91,
+    plan,
+    {
+      stream: capture(),
+      retryDelayMs: 1,
+    },
+  );
+
+  // One refusal then one success per story, so the ceiling never fires and 60 survive
+  // past the CLI's 50-line print cap: the count is what the summary line reports.
+  assert.equal(result.errors.length, 60);
+  assert.equal(result.comments, 60);
 });

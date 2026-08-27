@@ -141,10 +141,11 @@ export class EATClient {
       // is also legally an HTTP date; safe-integer too, since 400 digits read back as Infinity.
       const parsed = header !== null && /^\d+$/.test(header) ? Number(header) : Number.NaN;
       const seconds = Number.isSafeInteger(parsed) ? parsed : null;
+      // The wait only: `pollImport` shares this path, and there the server keeps
+      // importing, so what to do next is the calling engine's to say.
       const error = new RateLimitError(
         `East Agile Tracker rate limit hit (429) on ${path}; ` +
-          `${seconds === null ? "retry later" : `retry after ${seconds}s`}. ` +
-          "The run stopped — rerun it once the limit clears; already-imported stories are skipped.",
+          `${seconds === null ? "retry later" : `retry after ${seconds}s`}.`,
       );
       error.status = 429;
       if (seconds !== null) error.retryAfter = seconds;
