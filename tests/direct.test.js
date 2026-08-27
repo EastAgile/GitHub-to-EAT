@@ -2729,7 +2729,6 @@ test("a comment the server rejects is reported by the direct engine, not fatal",
     // The real client parses `code` off the body; a stub that only spelled it inside
     // the message would test a scrape the writer no longer does.
     rejected.code = "invalid_parameter";
-    // Shadow just this method on the instance; every other write still goes to the mock.
     client.createComment = async () => {
       throw rejected;
     };
