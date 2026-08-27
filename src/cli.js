@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 import readline from "node:readline/promises";
 import { parseArgs } from "node:util";
 
-import { EATClient, EATError, EATTimeout } from "./client.js";
+import { EATClient, EATError, EATTimeout, RateLimitError } from "./client.js";
 import { ConfigError, loadConfig, loadDotenv } from "./config.js";
 import { runDirect as defaultRunDirect } from "./direct.js";
 import { DEFAULT_ENGINE, ENGINES, parseEngine } from "./engine.js";
@@ -21,7 +21,6 @@ import { preflight as defaultPreflight } from "./preflight.js";
 import { makeImportReporter, runWithProgress, scrubControl } from "./progress.js";
 import { VERSION } from "./version.js";
 import { runWizard as defaultRunWizard, WizardAborted } from "./wizard.js";
-import { RowErrorCeiling } from "./writer.js";
 
 const USAGE =
   "usage: github-to-eat [-h] [-V] --project ID --repo OWNER/NAME " +
@@ -132,9 +131,13 @@ function rowErrorLine(err) {
     // One budget each: an epic title reaches 255 bytes and rides `row`, and a shared
     // 200 would push the code — the only machine-readable half — off the line.
     const shown = scrubControl(String(code), 100);
-    const head = row == null ? shown : `row ${scrubControl(row, 100)}: ${shown}`;
+    // Both guards read the scrubbed value: a control-only row or detail survives the
+    // null check and renders an empty `row :` head or a dangling dash.
+    const cleanRow = scrubControl(row, 100);
+    const head = cleanRow ? `row ${cleanRow}: ${shown}` : shown;
     // Its own budget too: the detail is the only record of what the row lost.
-    return detail == null ? head : `${head} — ${scrubControl(detail)}`;
+    const cleanDetail = scrubControl(detail);
+    return cleanDetail ? `${head} — ${cleanDetail}` : head;
   }
   return scrubControl(err);
 }
@@ -550,10 +553,19 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
       }
       if (err instanceof EATError || err instanceof GitHubError) {
         stderr.write(`error: ${values["dry-run"] ? "dry run failed: " : ""}${errorText(err)}\n`);
-        // The abort discards the write result, so these durable skips have no other record.
-        if (err instanceof RowErrorCeiling && err.errors.length) {
-          stderr.write(`${err.errors.length} row(s) were skipped before the abort:\n`);
-          writeRowErrors(stderr, err.errors);
+        // Only this engine can say it: the server engine keeps importing past a 429.
+        if (err instanceof RateLimitError) {
+          stderr.write(
+            "The run stopped — rerun it once the limit clears; already-imported " +
+              "stories are skipped.\n",
+          );
+        }
+        // Any throw out of the writer discards its result, so these durable skips
+        // have no other record — not just the ceiling abort that first carried them.
+        const skipped = /** @type {{ errors?: unknown }} */ (err).errors;
+        if (Array.isArray(skipped) && skipped.length) {
+          stderr.write(`${skipped.length} row(s) were skipped before the abort:\n`);
+          writeRowErrors(stderr, skipped);
         }
         return 1;
       }

@@ -2378,8 +2378,8 @@ test("a NUL in the cross-link block still lets the clamp cut around it", () => {
       {
         external_id: "7",
         name: "t",
-        // Stripped, so it no longer ends with an unstripped `crossLinks` — the clamp
-        // then cuts the block away instead of cutting the body around it.
+        // The description ends with the NUL-bearing block, so the strip has to run first
+        // for the clamp to still recognise it and cut the body around it, not the block away.
         description: `${"x".repeat(FALLBACK_LIMITS.storyDescription)}\n\n${crossLinks}`,
         crossLinks,
         story_type: /** @type {const} */ ("feature"),

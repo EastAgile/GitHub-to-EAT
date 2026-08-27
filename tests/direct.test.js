@@ -2749,3 +2749,100 @@ test("a comment the server rejects is reported by the direct engine, not fatal",
     await mock.close();
   }
 });
+
+test("a contained comment keeps its author out of the placeholder-owner note", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const fetched = fetchedRepo();
+    // carol writes only a comment, so she is reported only if a written comment carried her.
+    fetched.comments.push({
+      issue_url: "https://api.github.com/repos/o/r/issues/3",
+      user: { id: 33, login: "carol" },
+      created_at: "2020-01-06T00:00:00Z",
+      body: "me too",
+    });
+    client.createComment = async () => {
+      const err = new EATError('failed (400): {"code":"invalid_parameter"}');
+      err.status = 400;
+      throw err;
+    };
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetched },
+    });
+    assert.equal(result.errors.length, 2);
+    assert.equal(mock.state.stories[91].flatMap((/** @type {any} */ r) => r.comments).length, 0);
+    assert.deepEqual(result.externalMembersCreated, ["alice", "bob"]);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a refusal in the middle of a story's comments credits only the written authors", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const fetched = fetchedRepo();
+    // Refusing #2 and writing #3 makes the refusals a gap, not a suffix: a count would
+    // credit dave (comment 1) and drop frank (comment 3).
+    /** @type {[number, string, string][]} */
+    const extra = [
+      [44, "dave", "first"],
+      [55, "erin", "second"],
+      [66, "frank", "third"],
+    ];
+    for (const [id, login, body] of extra) {
+      fetched.comments.push({
+        issue_url: "https://api.github.com/repos/o/r/issues/7",
+        user: { id, login },
+        created_at: "2024-05-02T00:00:00Z",
+        body,
+      });
+    }
+    const create = client.createComment.bind(client);
+    /** @param {number} p @param {number} s @param {string} text @param {string} k @param {any} o */
+    client.createComment = async (p, s, text, k, o) => {
+      if (text.includes("second")) {
+        const err = new EATError('failed (400): {"code":"invalid_parameter"}');
+        err.status = 400;
+        throw err;
+      }
+      return create(p, s, text, k, o);
+    };
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetched },
+    });
+    assert.equal(result.errors.length, 1);
+    assert.deepEqual(result.externalMembersCreated, ["alice", "bob", "dave", "frank"]);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a refused dedup prescan fails the run — a wrong answer there mis-plans every row", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    // A row-scoped status: the prescan is before the first write, so containment never applies.
+    client.listStoryPage = async () => {
+      const err = new EATError('failed (400): {"code":"invalid_parameter"}');
+      err.status = 400;
+      throw err;
+    };
+    await assert.rejects(
+      runDirect(client, 91, "o", "r", {
+        included: ["issues"],
+        stream: capture(),
+        github: { fetchAll: async () => fetchedRepo() },
+      }),
+      /failed \(400\)/,
+    );
+    assert.equal(mock.state.stories[91], undefined);
+  } finally {
+    await mock.close();
+  }
+});

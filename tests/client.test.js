@@ -829,6 +829,25 @@ test("the mock accepts every allowlisted link_type and refuses one that is not",
       );
       assert.equal(row.link_type, link_type);
     }
+    // A NUL rides in on the allowlist check, not the NUL check: the refusal is
+    // `invalid`, the wording `url` and `title` use, never `invalid_chars`.
+    await assert.rejects(
+      client.createLink(
+        91,
+        story.story_id,
+        {
+          url: "https://github.com/o/r/pull/10",
+          link_type: `pull_reques${String.fromCharCode(0)}t`,
+        },
+        "bad-nul",
+      ),
+      (err) => {
+        assert.equal(/** @type {any} */ (err).status, 400);
+        assert.match(String(err), /invalid/);
+        assert.doesNotMatch(String(err), /invalid_chars/);
+        return true;
+      },
+    );
     for (const bad of ["pull-request", "PULL_REQUEST", "commit", ""]) {
       await assert.rejects(
         client.createLink(
@@ -976,6 +995,9 @@ test("429 maps to RateLimitError and names the advertised wait", async () => {
         assert.ok(err instanceof EATError);
         assert.equal(err.status, 429);
         assert.match(err.message, /42s/);
+        // pollImport shares this path and the server keeps importing past a 429, so the
+        // transport states the wait only; the caller that knows the engine advises.
+        assert.doesNotMatch(err.message, /rerun it|The run stopped/);
         return true;
       });
     },

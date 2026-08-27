@@ -82,8 +82,8 @@ export const ROW_ERROR_CEILING = 20;
  * @property {number} links
  * @property {{ code: string, row: string, detail: string }[]} errors row-scoped
  *   refusals the run contained and skipped, in write order
- * @property {string[]} writtenStoryIds external ids of the story rows created — a
- *   contained story never reached the server, so nothing it carried was written
+ * @property {string[]} peopleWritten logins the writer actually sent — the requestor and
+ *   owners of each created story, and the author of each created comment
  */
 
 /**
@@ -239,7 +239,7 @@ export async function writePlan(client, projectId, plan, options = {}) {
     /** @type {{ code: string, row: string, detail: string }[]} */
     errors: [],
     /** @type {string[]} */
-    writtenStoryIds: [],
+    peopleWritten: [],
     epicsCreated: 0,
     epicsExisting: 0,
     epicsBlocked: 0,
@@ -251,6 +251,14 @@ export async function writePlan(client, projectId, plan, options = {}) {
     blockers: 0,
     links: 0,
   };
+
+  /**
+   * Logins the server actually received. A refusal is a gap, not a suffix — the loop
+   * continues past one — so only the writes that landed may credit a person.
+   *
+   * @type {Set<string>}
+   */
+  const peopleSent = new Set();
 
   /** @type {Map<string, number>} */
   const consecutiveRowErrors = new Map();
@@ -274,11 +282,13 @@ export async function writePlan(client, projectId, plan, options = {}) {
     const seen = (consecutiveRowErrors.get(kind) ?? 0) + 1;
     consecutiveRowErrors.set(kind, seen);
     if (seen >= ROW_ERROR_CEILING) {
+      // Row and message go last: the CLI caps the line at 400 characters, and a long
+      // row or body would otherwise push the advice — the actionable half — off it.
       const abort = new RowErrorCeiling(
-        `aborting after ${seen} consecutive refused ${kind} writes ` +
-          `(last — ${scrubControl(row, 100)}, ${what}: ${scrubControl(err.message)}). ` +
+        `aborting after ${seen} consecutive refused ${kind} writes. ` +
           `The server is refusing every ${kind} write, not one bad row; ` +
-          "nothing further would be written correctly.",
+          "nothing further would be written correctly. Last refusal — " +
+          `${scrubControl(row, 100)}, ${what}: ${scrubControl(err.message)}`,
       );
       abort.errors = result.errors;
       throw abort;
@@ -305,9 +315,21 @@ export async function writePlan(client, projectId, plan, options = {}) {
     }
   };
 
+  /**
+   * A contained row is a durable loss, so a fatal error out of any stage has to carry the
+   * rows with it: `writePlan`'s result is discarded, and it is their only other record.
+   *
+   * @template T @param {Promise<T>} p @returns {Promise<T>}
+   */
+  const carrying = (p) =>
+    p.catch((err) => {
+      if (err instanceof EATError) /** @type {any} */ (err).errors ??= result.errors;
+      throw err;
+    });
+
   const epics = plan.epics ?? [];
   if (epics.length) {
-    await runWithProgress(
+    const stage = runWithProgress(
       async () => {
         /** @param {number} id */
         const scan = async (id) =>
@@ -383,10 +405,11 @@ export async function writePlan(client, projectId, plan, options = {}) {
       `creating ${epics.length} epics`,
       { stream },
     );
+    await carrying(stage);
   }
 
   if (plan.labels.length) {
-    await runWithProgress(
+    const stage = runWithProgress(
       async () => {
         // Keys carry no user content — header values must be Latin-1 (undici
         // rejects emoji/CJK), so ops are keyed by stable plan position.
@@ -410,6 +433,7 @@ export async function writePlan(client, projectId, plan, options = {}) {
       `creating ${plan.labels.length} labels`,
       { stream },
     );
+    await carrying(stage);
   }
 
   const ordered = [...plan.stories].sort((a, b) => {
@@ -418,7 +442,7 @@ export async function writePlan(client, projectId, plan, options = {}) {
     return ka < kb ? -1 : ka > kb ? 1 : 0;
   });
   if (ordered.length) {
-    await runWithProgress(
+    const stage = runWithProgress(
       async () => {
         for (const op of ordered) {
           // Built from one object so no path can emit half the pair (EAT #31427
@@ -452,11 +476,19 @@ export async function writePlan(client, projectId, plan, options = {}) {
               body.completed_at = op.completed_at;
             }
           }
+          /** @type {import("./mapping.js").ExternalPerson[]} */
+          const storyPeople = [];
           if (sendPeople) {
             // Omitted rather than null for a ghost: the server then falls back to
             // the calling agent, which is exactly the server importer's behaviour.
-            if (op.requestor) body.requestor = op.requestor;
-            if (op.owners?.length) body.owners = op.owners.map((p) => ({ external: p }));
+            if (op.requestor) {
+              body.requestor = op.requestor;
+              storyPeople.push(op.requestor);
+            }
+            if (op.owners?.length) {
+              body.owners = op.owners.map((p) => ({ external: p }));
+              storyPeople.push(...op.owners);
+            }
           }
           /** @type {any} */
           let created;
@@ -471,7 +503,9 @@ export async function writePlan(client, projectId, plan, options = {}) {
             continue;
           }
           result.stories += 1;
-          result.writtenStoryIds.push(op.external_id);
+          for (const person of storyPeople) {
+            if (person.username) peopleSent.add(person.username);
+          }
           clearRowErrors("story");
           for (const [i, task] of op.tasks.entries()) {
             const ok = await contained("task", op.external_id, `task ${i + 1}`, () =>
@@ -520,7 +554,9 @@ export async function writePlan(client, projectId, plan, options = {}) {
                 ),
               ),
             );
-            if (ok) result.comments += 1;
+            if (!ok) continue;
+            result.comments += 1;
+            if (extras.author?.username) peopleSent.add(extras.author.username);
           }
           for (const [i, link] of (sendLinks ? (op.links ?? []) : []).entries()) {
             const ok = await contained("link", op.external_id, `link ${i + 1}`, () =>
@@ -540,7 +576,9 @@ export async function writePlan(client, projectId, plan, options = {}) {
       `creating ${ordered.length} stories`,
       { stream },
     );
+    await carrying(stage);
   }
 
+  result.peopleWritten = [...peopleSent];
   return result;
 }

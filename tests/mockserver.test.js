@@ -694,6 +694,33 @@ test("a NUL in a written string is rejected invalid_chars", async () => {
       }),
       /invalid_chars/,
     );
+    // Every story create carries labels; requestor and owners ride `--include people`.
+    await assert.rejects(
+      client.createStory(91, { name: "n", labels: ["clean", `bad${N}label`] }, "k-sl"),
+      /invalid_chars/,
+    );
+    await assert.rejects(
+      client.createStory(
+        91,
+        { name: "n", requestor: { source: "github", external_id: "1", username: `bad${N}login` } },
+        "k-sr",
+      ),
+      /invalid_chars/,
+    );
+    await assert.rejects(
+      client.createStory(
+        91,
+        {
+          name: "n",
+          owners: [
+            { external: { source: "github", external_id: "1", username: "clean" } },
+            { external: { source: "github", external_id: "2", display_name: `bad${N}name` } },
+          ],
+        },
+        "k-so",
+      ),
+      /invalid_chars/,
+    );
   } finally {
     await mock.close();
   }

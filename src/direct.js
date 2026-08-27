@@ -591,7 +591,7 @@ export async function runDirect(client, projectId, owner, repo, options) {
           "an earlier run may have been interrupted, the issue may have changed since " +
           "import, or the server may have refused those rows outright. It stays skipped. " +
           "Deleting the story in EAT and re-running repairs the first two causes; a refusal " +
-          "repeats, and the run that hit it listed the row on stderr.\n",
+          "repeats, and the run that hit it usually listed the row on stderr.\n",
       );
     }
   }
@@ -624,7 +624,6 @@ export async function runDirect(client, projectId, owner, repo, options) {
     sendPeople,
     sendLinks,
   });
-  const wroteStory = new Set(written.writtenStoryIds);
   return {
     importedStories: written.stories,
     importedLabels: written.labelsCreated,
@@ -633,10 +632,11 @@ export async function runDirect(client, projectId, owner, repo, options) {
     errors: written.errors,
     warnings: [],
     unmatched: {},
-    // Only the stories that reached the server: a contained row created nobody.
-    externalMembersCreated: attachedPeople({
-      stories: plan.stories.filter((op) => wroteStory.has(op.external_id)),
-    }),
+    // Only what the writer actually sent: a contained row — a comment among written
+    // ones included — created nobody, and the plan cannot tell which rows landed.
+    externalMembersCreated: written.peopleWritten
+      .filter((login) => GITHUB_LOGIN.test(login))
+      .sort(),
     dryRun: false,
   };
 }
