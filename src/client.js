@@ -137,9 +137,8 @@ export class EATClient {
     }
     if (response.status === 429) {
       const header = response.headers.get("retry-after");
-      // Digits only: `Number()` turns "" and "  " into 0 and "0x10" into 16, and
-      // `Retry-After` is also legally an HTTP date, which names no wait this can print.
-      // Safe-integer too: 400 digits pass the pattern and read back as Infinity.
+      // Digits only, because `Number()` reads "", "  " and "0x10" as numbers and `Retry-After`
+      // is also legally an HTTP date; safe-integer too, since 400 digits read back as Infinity.
       const parsed = header !== null && /^\d+$/.test(header) ? Number(header) : Number.NaN;
       const seconds = Number.isSafeInteger(parsed) ? parsed : null;
       const error = new RateLimitError(

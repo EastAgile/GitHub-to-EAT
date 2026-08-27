@@ -1844,9 +1844,8 @@ test("a refusal with no machine code falls back to the status", async () => {
 // --- the epic ceiling counts refusals, so every "the server already has it" path clears ---
 
 /**
- * 500 epics, one story. Every 20th epic is refused for good; the other 475 take
- * whichever "the server already holds this name" path the client's stub defines.
- * 25 refusals accumulate past the ceiling unless that path clears the count.
+ * 500 epics, one story. Every 20th epic is refused for good; the other 475 take whichever
+ * "already holds this name" path the stub defines — 25 refusals pass the ceiling unless it clears.
  *
  * @returns {import("../src/writer.js").WritePlan}
  */

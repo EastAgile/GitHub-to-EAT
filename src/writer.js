@@ -62,9 +62,8 @@ export class RowErrorCeiling extends EATError {
 }
 
 /**
- * How many consecutive contained refusals of ONE write kind end the run. Counted per kind
- * (epic, label, story, task, blocker, comment, link). Any same-kind write the server did
- * not refuse resets it — a create, or proof the row is already there (a listing, a 409).
+ * How many consecutive contained refusals of ONE write kind end the run. Counted per kind;
+ * any same-kind write the server did not refuse resets it — a create, a listing, or a 409.
  */
 export const ROW_ERROR_CEILING = 20;
 
