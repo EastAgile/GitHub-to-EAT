@@ -77,9 +77,8 @@ function bodyCode(body) {
 }
 
 /**
- * Read a successful response's JSON, or fail typed. A proxy answering 200 text/html
- * would otherwise raise a bare `SyntaxError`, which the writer neither contains nor
- * carries, so the run dies with no report of the rows it already skipped.
+ * Read a successful response's JSON, or fail typed. Left bare, a proxy's 200 text/html raises
+ * a `SyntaxError` the writer cannot contain, so the run dies with no report of skipped rows.
  *
  * @param {Response} response
  * @param {string} what the method + path, for the message
