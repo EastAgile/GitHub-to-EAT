@@ -59,9 +59,8 @@ export async function runWithProgress(func, message, { stream, intervalMs = 500 
 const CONTROL = /[\p{Cc}\p{Cf}]/gu;
 
 /**
- * Strip terminal control characters (C0/C1/DEL and Unicode `Cf`) and cap length.
- * Server-supplied text is rendered raw to the terminal, and the `\r`-drawn
- * progress line would otherwise let a hostile status/error rewrite the line.
+ * Strip terminal control characters (C0/C1/DEL and Unicode `Cf`) and cap length. This text is
+ * rendered raw, so without it a hostile status or error could rewrite the `\r`-drawn line.
  *
  * @param {unknown} value
  * @param {number} [max]
