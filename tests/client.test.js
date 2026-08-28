@@ -9,6 +9,7 @@ import {
   EATError,
   EATTimeout,
   NotFoundError,
+  RateLimitError,
 } from "../src/client.js";
 import { makeState, startMockServer } from "../src/mockserver.js";
 
@@ -828,6 +829,25 @@ test("the mock accepts every allowlisted link_type and refuses one that is not",
       );
       assert.equal(row.link_type, link_type);
     }
+    // A NUL rides in on the allowlist check, not the NUL check: the refusal is
+    // `invalid`, the wording `url` and `title` use, never `invalid_chars`.
+    await assert.rejects(
+      client.createLink(
+        91,
+        story.story_id,
+        {
+          url: "https://github.com/o/r/pull/10",
+          link_type: `pull_reques${String.fromCharCode(0)}t`,
+        },
+        "bad-nul",
+      ),
+      (err) => {
+        assert.equal(/** @type {any} */ (err).status, 400);
+        assert.match(String(err), /invalid/);
+        assert.doesNotMatch(String(err), /invalid_chars/);
+        return true;
+      },
+    );
     for (const bad of ["pull-request", "PULL_REQUEST", "commit", ""]) {
       await assert.rejects(
         client.createLink(
@@ -925,4 +945,192 @@ test("a completed_at on a non-done create is refused", async () => {
   } finally {
     await mock.close();
   }
+});
+
+test("a 4xx body's machine code lands on the error, past the message slice", async () => {
+  await withServer(
+    (_req, res) =>
+      json(res, 400, {
+        // The code sits past the 200 characters the message keeps, so only a parsed
+        // body can recover it.
+        error: "x".repeat(400),
+        code: "invalid_chars",
+      }),
+    async (base) => {
+      await assert.rejects(new EATClient(base, "tok").getMeta(), (err) => {
+        assert.ok(err instanceof EATError);
+        assert.equal(err.status, 400);
+        assert.equal(err.code, "invalid_chars");
+        return true;
+      });
+    },
+  );
+});
+
+test("a 4xx body that is not JSON leaves the code unset", async () => {
+  await withServer(
+    (_req, res) => {
+      res.writeHead(400);
+      res.end("<html>gateway said no</html>");
+    },
+    async (base) => {
+      await assert.rejects(new EATClient(base, "tok").getMeta(), (err) => {
+        assert.ok(err instanceof EATError);
+        assert.equal(err.code, undefined);
+        return true;
+      });
+    },
+  );
+});
+
+test("429 maps to RateLimitError and names the advertised wait", async () => {
+  await withServer(
+    (_req, res) => {
+      res.writeHead(429, { "Retry-After": "42" });
+      res.end("slow down");
+    },
+    async (base) => {
+      await assert.rejects(new EATClient(base, "tok").getMeta(), (err) => {
+        assert.ok(err instanceof RateLimitError);
+        assert.ok(err instanceof EATError);
+        assert.equal(err.status, 429);
+        assert.match(err.message, /42s/);
+        // pollImport shares this path and the server keeps importing past a 429, so the
+        // transport states the wait only; the caller that knows the engine advises.
+        assert.doesNotMatch(err.message, /rerun it|The run stopped/);
+        return true;
+      });
+    },
+  );
+});
+
+test("a non-numeric Retry-After is discarded, not coerced into a wait", async () => {
+  // `Number()` reads "" and "  " as 0 and "0x10" as 16, and keeps "-5"'s sign; an
+  // HTTP-date Retry-After is legal and is none of those.
+  for (const header of ["", "  ", "-5", "0x10", "Wed, 21 Oct 2026 07:28:00 GMT"]) {
+    await withServer(
+      (_req, res) => {
+        res.writeHead(429, { "Retry-After": header });
+        res.end("slow down");
+      },
+      async (base) => {
+        await assert.rejects(new EATClient(base, "tok").getMeta(), (err) => {
+          assert.ok(err instanceof RateLimitError);
+          assert.equal(err.retryAfter, undefined, `header ${JSON.stringify(header)}`);
+          assert.match(err.message, /retry later/);
+          assert.doesNotMatch(err.message, /retry after/);
+          return true;
+        });
+      },
+    );
+  }
+});
+
+test("an all-digit Retry-After too large to be a number is discarded", async () => {
+  // `/^\\d+$/` passes it and `Number()` reads it as Infinity — "retry after Infinitys"
+  // is not a wait anyone can act on.
+  await withServer(
+    (_req, res) => {
+      res.writeHead(429, { "Retry-After": "9".repeat(400) });
+      res.end("slow down");
+    },
+    async (base) => {
+      await assert.rejects(new EATClient(base, "tok").getMeta(), (err) => {
+        assert.ok(err instanceof RateLimitError);
+        assert.equal(err.retryAfter, undefined);
+        assert.match(err.message, /retry later/);
+        assert.doesNotMatch(err.message, /Infinity/);
+        return true;
+      });
+    },
+  );
+});
+
+test("429 without Retry-After still raises RateLimitError", async () => {
+  await withServer(
+    (_req, res) => {
+      res.writeHead(429);
+      res.end("slow down");
+    },
+    async (base) => {
+      await assert.rejects(new EATClient(base, "tok").getMeta(), (err) => {
+        assert.ok(err instanceof RateLimitError);
+        assert.doesNotMatch(err.message, /NaN/);
+        return true;
+      });
+    },
+  );
+});
+
+test("a 200 whose body is not JSON fails every write as a terminal EATError, not a SyntaxError", async () => {
+  // A proxy answering 200 text/html: `response.json()` throws a bare SyntaxError, which
+  // the writer neither contains nor reports — the run dies with a raw Node stack.
+  await withServer(
+    (_req, res) => {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end("<html>gateway</html>");
+    },
+    async (base) => {
+      const client = new EATClient(base, "tok");
+      /** @type {[string, () => Promise<unknown>][]} */
+      const calls = [
+        ["listStoryPage", () => client.listStoryPage(91)],
+        ["createLabel", () => client.createLabel(91, { name: "bug" }, "k")],
+        ["createEpic", () => client.createEpic(91, { name: "Sprint 4" }, "k")],
+        ["createStory", () => client.createStory(91, { name: "issue" }, "k")],
+        ["createTask", () => client.createTask(91, 1, { description: "t" }, "k")],
+        ["createComment", () => client.createComment(91, 1, "hi", "k")],
+        ["createBlocker", () => client.createBlocker(91, 1, { desc: "b" }, "k")],
+        ["createLink", () => client.createLink(91, 1, { url: "https://x/1" }, "k")],
+      ];
+      for (const [name, call] of calls) {
+        await assert.rejects(call(), (err) => {
+          assert.ok(err instanceof EATError, `${name}: ${err}`);
+          assert.ok(!(err instanceof SyntaxError), `${name} leaked a SyntaxError`);
+          // Terminal on both writer rules: outside the >= 500 retry band and outside
+          // ROW_SCOPED_STATUSES, so it is neither replayed nor skipped as one bad row.
+          assert.equal(err.status, 200, `${name} status`);
+          return true;
+        });
+      }
+    },
+  );
+});
+
+test("an over-long machine code is capped at the source, on the error itself", async () => {
+  // Both of today's consumers cap it again, so only the error can pin the source bound.
+  await withServer(
+    (_req, res) => {
+      json(res, 400, { code: "c".repeat(500), error: "nope" });
+    },
+    async (base) => {
+      await assert.rejects(
+        new EATClient(base, "tok").createStory(91, { name: "n" }, "k"),
+        (err) => {
+          assert.equal(/** @type {any} */ (err).code.length, 100);
+          return true;
+        },
+      );
+    },
+  );
+});
+
+test("a Retry-After past 2^53 is discarded — isFinite alone would accept it", async () => {
+  // 9007199254740993 parses to a finite double, but not the integer the header sent:
+  // `Number.isFinite` passes it, and the CLI would advertise a wait that is off by one.
+  await withServer(
+    (_req, res) => {
+      res.writeHead(429, { "Retry-After": "9007199254740993" });
+      res.end("slow down");
+    },
+    async (base) => {
+      await assert.rejects(new EATClient(base, "tok").getMeta(), (err) => {
+        assert.ok(err instanceof RateLimitError);
+        assert.equal(err.retryAfter, undefined);
+        assert.match(err.message, /retry later/);
+        assert.doesNotMatch(err.message, /9007199254740992/);
+        return true;
+      });
+    },
+  );
 });

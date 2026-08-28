@@ -334,6 +334,38 @@ function tooLong(state, field, value) {
 }
 
 /**
+ * The real server's `invalid_chars` rejection: Postgres `text` cannot store 0x00, so a
+ * NUL anywhere in a written string refuses the row. Returns null when the values are clean.
+ *
+ * @param {string} field
+ * @param {...(string | null | undefined)} values
+ * @returns {MockResponse | null}
+ */
+function invalidChars(field, ...values) {
+  if (!values.some((v) => typeof v === "string" && v.includes("\u0000"))) return null;
+  return {
+    status: 400,
+    payload: {
+      code: "invalid_parameter",
+      details: { constraint: "invalid_chars", fields: [field] },
+      error: "This value contains characters that are not permitted.",
+    },
+  };
+}
+
+/**
+ * One imported person's text columns, flattened for {@link invalidChars} — `source` is
+ * the caller's own literal, so it is not GitHub text and cannot carry a NUL.
+ *
+ * @param {any} person
+ * @returns {(string | null | undefined)[]}
+ */
+function personText(person) {
+  if (!person) return [];
+  return [person.external_id, person.username, person.display_name, person.html_url];
+}
+
+/**
  * Compute an import result from the fixture and the request body's flags,
  * the way the real server counts: issues always; other types only when the
  * corresponding include_* flag is set. Milestones become epics, which the
@@ -780,6 +812,8 @@ function createLabel(state, projectId, body) {
       },
     };
   }
+  const badChars = invalidChars("label_name", name);
+  if (badChars) return badChars;
   state.labels[projectId] ??= [];
   const duplicate = state.labels[projectId].some(
     (l) => l.label_name.toLowerCase() === name.toLowerCase(),
@@ -832,6 +866,9 @@ function createEpic(state, projectId, body) {
   const overLong =
     tooLong(state, "name", title) ?? tooLong(state, "description", String(body.description ?? ""));
   if (overLong) return overLong;
+  const badChars =
+    invalidChars("name", title) ?? invalidChars("description", body.description ?? null);
+  if (badChars) return badChars;
   state.epics[projectId] ??= [];
   state.labels[projectId] ??= [];
   const key = title.toLowerCase();
@@ -895,9 +932,21 @@ function createStory(state, projectId, body) {
       },
     };
   }
-  const overLong =
-    tooLong(state, "name", name) ?? tooLong(state, "description", String(body.description ?? ""));
+  const description = String(body.description ?? "");
+  const overLong = tooLong(state, "name", name) ?? tooLong(state, "description", description);
   if (overLong) return overLong;
+  const badChars =
+    invalidChars("name", name) ??
+    invalidChars("description", description) ??
+    invalidChars("labels", ...(Array.isArray(body.labels) ? body.labels.map(String) : [])) ??
+    invalidChars("requestor", ...personText(body.requestor)) ??
+    invalidChars(
+      "owners",
+      ...(Array.isArray(body.owners) ? body.owners : []).flatMap((/** @type {any} */ o) =>
+        personText(o?.external),
+      ),
+    );
+  if (badChars) return badChars;
 
   if (body.labels != null && !Array.isArray(body.labels)) {
     return {
@@ -1083,6 +1132,8 @@ function createTask(state, projectId, storyId, body) {
   }
   const overLong = tooLong(state, "task_desc", description);
   if (overLong) return overLong;
+  const badChars = invalidChars("task_desc", description);
+  if (badChars) return badChars;
   const task = {
     task_id: state.nextId++,
     story_id: storyId,
@@ -1116,6 +1167,10 @@ function createComment(state, projectId, storyId, body) {
   }
   const overLong = tooLong(state, "comment_text", text);
   if (overLong) return overLong;
+  // The author is stored text like the story's requestor, so it is checked like it.
+  const badChars =
+    invalidChars("comment_text", text) ?? invalidChars("author", ...personText(body.author));
+  if (badChars) return badChars;
   // The real server returns the same value for both ids (probed 2026-07-16).
   const id = state.nextId++;
   /** @type {Record<string, any>} */
@@ -1244,6 +1299,8 @@ function createBlocker(state, projectId, storyId, body) {
   }
   const overLong = tooLong(state, "blocker_desc", desc);
   if (overLong) return overLong;
+  const badChars = invalidChars("blocker_desc", desc);
+  if (badChars) return badChars;
   const blocker = {
     blocker_id: state.nextId++,
     story_id: storyId,

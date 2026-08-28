@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { AuthError, EATClient } from "../src/client.js";
+import { AuthError, EATClient, EATError } from "../src/client.js";
 import { markerFor } from "../src/dedup.js";
 import { runDirect } from "../src/direct.js";
 import { DEFAULT_CUSTOMIZATION, FALLBACK_LIMITS } from "../src/mapping.js";
@@ -506,6 +506,60 @@ test("the direct engine reports the placeholder owners it attached, deduped and 
     });
     // alice is both the issue author and the comment author — reported once.
     assert.deepEqual(result.externalMembersCreated, ["alice", "bob"]);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a refused story keeps its people out of the placeholder-owner note", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const create = client.createStory.bind(client);
+    // Only issue #3 carries people (alice, bob), so refusing it must empty the note.
+    /** @param {number} projectId @param {any} body @param {string} key */
+    client.createStory = async (projectId, body, key) => {
+      if (body.name === "older closed issue") {
+        const err = new EATError('failed (400): {"code":"invalid_parameter"}');
+        err.status = 400;
+        throw err;
+      }
+      return create(projectId, body, key);
+    };
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    });
+    assert.equal(result.importedStories, 1);
+    assert.equal(result.errors.length, 1);
+    assert.deepEqual(result.externalMembersCreated, []);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a control-bearing login never reaches the placeholder-owner note", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const fetched = fetchedRepo();
+    // A login GitHub could not issue, but a compromised or spoofed source could send:
+    // an ESC sequence rewrites the \r-drawn line, a bidi override reorders the note.
+    fetched.issues[1].user = { id: 11, login: "al\u001b[2Kice", html_url: "https://github.com/x" };
+    fetched.issues[1].assignees = [{ id: 22, login: "b\u202eob" }];
+    fetched.comments[0].user = { id: 33, login: "car\u0000ol" };
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetched },
+    });
+    // The ESC and the bidi override fail GITHUB_LOGIN and are dropped; a NUL is stripped
+    // out of the username first (stripPlanNul), so that one login survives, clean.
+    assert.deepEqual(result.externalMembersCreated, ["carol"]);
+    for (const login of result.externalMembersCreated) {
+      assert.doesNotMatch(login, /[\p{Cc}\p{Cf}]/u, JSON.stringify(login));
+    }
   } finally {
     await mock.close();
   }
@@ -2636,7 +2690,290 @@ test("a story left with half its blockers by an interrupted run warns on the re-
     });
     assert.equal(rerun.skipped, 2, "the half-written story stays skipped");
     assert.match(out.buf, /warning: issue #7 .*blockers 1\/2/);
-    assert.match(out.buf, /delete that story in EAT and re-run/);
+    assert.match(out.buf, /Deleting the story in EAT and re-running repairs the first two/);
+    assert.match(out.buf, /the server may have refused those rows/);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a NUL in a fetched comment imports clean — the server never sees one", async () => {
+  const N = String.fromCharCode(0);
+  const repo = blockedRepo();
+  // GraphQL returns real NULs where REST does not (directus/directus#14579).
+  repo.comments[0].body = `conf${N}irmed`;
+  repo.issues[1].title = `older cl${N}osed issue`;
+  repo.issues[1].body = `st${N}eps`;
+  repo.labels[0].name = `b${N}ug`;
+  repo.issues[1].labels[0].name = `b${N}ug`;
+  // Every other written surface: the requestor, an owner, a comment author, a blocker.
+  repo.issues[1].user = { id: 11, login: `al${N}ice`, html_url: `https://github.com/al${N}ice` };
+  repo.issues[1].assignees = [{ id: 22, login: `b${N}ob` }];
+  repo.comments[0].user = { id: 11, login: `al${N}ice` };
+  repo.blockedBy = new Map([
+    [
+      "3",
+      [
+        { number: 7, title: "newer open issue" },
+        { number: 90, title: `Upstream f${N}ix` },
+      ],
+    ],
+  ]);
+
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const out = await runDirect(client, 91, "o", "r", {
+      included: ["issues", "deps"],
+      stream: capture(),
+      github: { fetchAll: async () => repo },
+    });
+
+    assert.deepEqual(out.errors, []);
+    assert.equal(out.importedStories, 2);
+    const rows = mock.state.stories[91];
+    assert.equal(rows[0].title, "older closed issue");
+    assert.equal(rows[0].comments[0].comment_text.includes("confirmed"), true);
+    assert.equal(rows[0].people.requestor.username, "alice");
+    assert.deepEqual(
+      rows[0].people.owners.map((/** @type {any} */ o) => o.username),
+      ["bob"],
+    );
+    assert.equal(rows[0].blockers[1].blocker_desc, "Blocked by #90 (Upstream fix)");
+    assert.equal(JSON.stringify(mock.state).includes("\\u0000"), false);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a comment the server rejects is reported by the direct engine, not fatal", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const rejected = new EATError("failed (400)");
+    rejected.status = 400;
+    // The real client parses `code` off the body; a stub that only spelled it inside
+    // the message would test a scrape the writer no longer does.
+    rejected.code = "invalid_parameter";
+    client.createComment = async () => {
+      throw rejected;
+    };
+
+    const out = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    });
+
+    assert.equal(out.importedStories, 2);
+    assert.equal(out.errors.length, 1);
+    const row = /** @type {{ code: string, row: string }} */ (out.errors[0]);
+    assert.equal(row.row, "3");
+    assert.equal(row.code, "invalid_parameter");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a contained comment keeps its author out of the placeholder-owner note", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const fetched = fetchedRepo();
+    // carol writes only a comment, so she is reported only if a written comment carried her.
+    fetched.comments.push({
+      issue_url: "https://api.github.com/repos/o/r/issues/3",
+      user: { id: 33, login: "carol" },
+      created_at: "2020-01-06T00:00:00Z",
+      body: "me too",
+    });
+    client.createComment = async () => {
+      const err = new EATError('failed (400): {"code":"invalid_parameter"}');
+      err.status = 400;
+      throw err;
+    };
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetched },
+    });
+    assert.equal(result.errors.length, 2);
+    assert.equal(mock.state.stories[91].flatMap((/** @type {any} */ r) => r.comments).length, 0);
+    assert.deepEqual(result.externalMembersCreated, ["alice", "bob"]);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a refusal in the middle of a story's comments credits only the written authors", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const fetched = fetchedRepo();
+    // Refusing #2 and writing #3 makes the refusals a gap, not a suffix: a count would
+    // credit dave (comment 1) and drop frank (comment 3).
+    /** @type {[number, string, string][]} */
+    const extra = [
+      [44, "dave", "first"],
+      [55, "erin", "second"],
+      [66, "frank", "third"],
+    ];
+    for (const [id, login, body] of extra) {
+      fetched.comments.push({
+        issue_url: "https://api.github.com/repos/o/r/issues/7",
+        user: { id, login },
+        created_at: "2024-05-02T00:00:00Z",
+        body,
+      });
+    }
+    const create = client.createComment.bind(client);
+    /** @param {number} p @param {number} s @param {string} text @param {string} k @param {any} o */
+    client.createComment = async (p, s, text, k, o) => {
+      if (text.includes("second")) {
+        const err = new EATError('failed (400): {"code":"invalid_parameter"}');
+        err.status = 400;
+        throw err;
+      }
+      return create(p, s, text, k, o);
+    };
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetched },
+    });
+    assert.equal(result.errors.length, 1);
+    assert.deepEqual(result.externalMembersCreated, ["alice", "bob", "dave", "frank"]);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a refused dedup prescan fails the run — a wrong answer there mis-plans every row", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    // A row-scoped status: the prescan is before the first write, so containment never applies.
+    client.listStoryPage = async () => {
+      const err = new EATError('failed (400): {"code":"invalid_parameter"}');
+      err.status = 400;
+      throw err;
+    };
+    await assert.rejects(
+      runDirect(client, 91, "o", "r", {
+        included: ["issues"],
+        stream: capture(),
+        github: { fetchAll: async () => fetchedRepo() },
+      }),
+      /failed \(400\)/,
+    );
+    assert.equal(mock.state.stories[91], undefined);
+  } finally {
+    await mock.close();
+  }
+});
+
+// --- the dry-run roster and the written roster answer different questions ---
+
+test("the dry-run roster lists people the written roster drops, and cannot do otherwise", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const options = {
+      included: /** @type {any} */ (["issues"]),
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    };
+    // The dry run reads the plan: it cannot know which rows the server will refuse.
+    const preview = await runDirect(client, 91, "o", "r", { ...options, dryRun: true });
+    assert.deepEqual(preview.externalMembersCreated, ["alice", "bob"]);
+
+    const create = client.createStory.bind(client);
+    /** @param {number} projectId @param {any} body @param {string} key */
+    client.createStory = async (projectId, body, key) => {
+      if (body.name === "older closed issue") {
+        const err = new EATError('failed (400): {"code":"invalid_parameter"}');
+        err.status = 400;
+        throw err;
+      }
+      return create(projectId, body, key);
+    };
+    const run = await runDirect(client, 91, "o", "r", options);
+    // The written roster credits only landed writes, so the same repo answers differently.
+    assert.deepEqual(run.externalMembersCreated, []);
+    assert.equal(run.errors.length, 1);
+  } finally {
+    await mock.close();
+  }
+});
+
+// --- which contained rows a later run repairs, and which it does not ---
+
+test("a refused story create is not marked imported, so the next run writes it", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const options = {
+      included: /** @type {any} */ (["issues"]),
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    };
+    const create = client.createStory.bind(client);
+    let refuse = true;
+    /** @param {number} projectId @param {any} body @param {string} key */
+    client.createStory = async (projectId, body, key) => {
+      if (refuse && body.name === "older closed issue") {
+        const err = new EATError('failed (400): {"code":"invalid_parameter"}');
+        err.status = 400;
+        throw err;
+      }
+      return create(projectId, body, key);
+    };
+    const first = await runDirect(client, 91, "o", "r", options);
+    assert.equal(first.importedStories, 1);
+    assert.equal(first.errors.length, 1);
+
+    // Neither the marker nor the provenance pair was written, so the loss is the run's.
+    refuse = false;
+    const second = await runDirect(client, 91, "o", "r", options);
+    assert.equal(second.importedStories, 1);
+    assert.equal(second.skipped, 1);
+    assert.equal(mock.state.stories[91].length, 2);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a refused comment leaves its story marked imported, so the next run skips it", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const options = {
+      included: /** @type {any} */ (["issues"]),
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    };
+    const comment = client.createComment.bind(client);
+    let refuse = true;
+    /** @param {any[]} args */
+    client.createComment = async (...args) => {
+      if (refuse) {
+        const err = new EATError('failed (400): {"code":"invalid_parameter"}');
+        err.status = 400;
+        throw err;
+      }
+      return comment(.../** @type {[any, any, any, any, any?]} */ (args));
+    };
+    const first = await runDirect(client, 91, "o", "r", options);
+    assert.equal(first.importedStories, 2);
+    assert.equal(first.errors.length, 1);
+    assert.equal(mock.state.stories[91][0].comments.length, 0);
+
+    // The marker landed at story create, so the comment is lost for good.
+    refuse = false;
+    const second = await runDirect(client, 91, "o", "r", options);
+    assert.equal(second.importedStories, 0);
+    assert.equal(second.skipped, 2);
+    assert.equal(mock.state.stories[91][0].comments.length, 0);
   } finally {
     await mock.close();
   }

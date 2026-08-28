@@ -9,11 +9,11 @@ import { randomUUID } from "node:crypto";
 import readline from "node:readline/promises";
 import { parseArgs } from "node:util";
 
-import { EATClient, EATError, EATTimeout } from "./client.js";
+import { EATClient, EATError, EATTimeout, RateLimitError } from "./client.js";
 import { ConfigError, loadConfig, loadDotenv } from "./config.js";
 import { runDirect as defaultRunDirect } from "./direct.js";
 import { DEFAULT_ENGINE, ENGINES, parseEngine } from "./engine.js";
-import { GitHubError } from "./github.js";
+import { GitHubError, RateLimitError as GitHubRateLimitError } from "./github.js";
 import { runImport as defaultRunImport } from "./importer.js";
 import { customizationFlagsGiven, parseCustomization } from "./mapping.js";
 import { MAPPINGS, parseInclude, renderLegend, requestFlags } from "./mappings.js";
@@ -112,24 +112,61 @@ export function parseRepo(value) {
  */
 function placeholderOwnersTail(created) {
   return (
-    `${created.map((login) => `@${login}`).join(", ")} — external members outside ` +
-    "the project roster; auto-linked when the matching GitHub account signs in.\n"
+    // Scrubbed behind GITHUB_LOGIN as well: this is a terminal line, and an ESC or a
+    // bidi override in a login would rewrite or reorder what the user reads.
+    `${created.map((login) => `@${scrubControl(login, 40)}`).join(", ")} — external members ` +
+    "outside the project roster; auto-linked when the matching GitHub account signs in.\n"
   );
 }
 
 /**
- * Render one server row error. The server sends `{ code, row }` objects
- * (CONTRACT.md); a bare string from an older/other source still renders.
+ * Render one row error. The server sends `{ code, row }` (CONTRACT.md), the direct
+ * engine adds a `detail`, and a bare string from an older source still renders.
  *
  * @param {unknown} err
  * @returns {string}
  */
 function rowErrorLine(err) {
   if (err && typeof err === "object" && "code" in err) {
-    const { code, row } = /** @type {{ code: unknown, row?: unknown }} */ (err);
-    return scrubControl(row == null ? String(code) : `row ${row}: ${code}`);
+    const { code, row, detail } = /** @type {{ code: unknown, row?: unknown,
+      detail?: unknown }} */ (err);
+    // One budget each: an epic title reaches 255 bytes and rides `row`, and a shared
+    // 200 would push the code — the only machine-readable half — off the line.
+    const shown = scrubControl(String(code), 100);
+    // Both guards read the scrubbed value: a control-only row or detail survives the
+    // null check and renders an empty `row :` head or a dangling dash.
+    const cleanRow = scrubControl(row, 100);
+    const head = cleanRow ? `row ${cleanRow}: ${shown}` : shown;
+    // Its own budget too: the detail is the only record of what the row lost.
+    const cleanDetail = scrubControl(detail);
+    return cleanDetail ? `${head} — ${cleanDetail}` : head;
   }
   return scrubControl(err);
+}
+
+/**
+ * One fatal error's text, ready for a terminal. `message` can embed 200 characters of
+ * the server's own body (client.js), which is never trusted to be printable.
+ *
+ * @param {{ message: string }} err
+ * @returns {string}
+ */
+const errorText = (err) => scrubControl(err.message, 400);
+
+/** How many row errors reach the terminal; the rest are counted, not printed. */
+const ROW_ERRORS_SHOWN = 50;
+
+/**
+ * Write the row errors, capped. A systemic refusal produces thousands, and scrolling
+ * the summary line — which carries the exact count — off the screen helps nobody.
+ *
+ * @param {import("./progress.js").OutStream} stream
+ * @param {unknown[]} errors
+ */
+function writeRowErrors(stream, errors) {
+  for (const err of errors.slice(0, ROW_ERRORS_SHOWN)) stream.write(`  - ${rowErrorLine(err)}\n`);
+  const hidden = errors.length - ROW_ERRORS_SHOWN;
+  if (hidden > 0) stream.write(`  … and ${hidden} more\n`);
 }
 
 /**
@@ -185,9 +222,7 @@ function reportImport(outcome, { stdout, stderr, project, appBase }) {
     );
   }
   stdout.write(`Board: ${appBase}/projects/${project}\n`);
-  for (const err of outcome.errors) {
-    stderr.write(`  - ${rowErrorLine(err)}\n`);
-  }
+  writeRowErrors(stderr, outcome.errors);
   return outcome.errors.length ? 1 : 0;
 }
 
@@ -213,9 +248,7 @@ function reportDryRunPlan(plan, { stdout, stderr, owner, repo, project, projectT
         : "") +
       "No changes made.\n",
   );
-  for (const err of plan.errors) {
-    stderr.write(`  - ${rowErrorLine(err)}\n`);
-  }
+  writeRowErrors(stderr, plan.errors);
   return 0;
 }
 
@@ -407,7 +440,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     config = loadConfig();
   } catch (err) {
     if (err instanceof ConfigError) {
-      stderr.write(`error: ${err.message}\n`);
+      stderr.write(`error: ${errorText(err)}\n`);
       return 1;
     }
     throw err;
@@ -419,7 +452,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     result = await preflight(client, project);
   } catch (err) {
     if (err instanceof EATError) {
-      stderr.write(`error: ${err.message}\n`);
+      stderr.write(`error: ${errorText(err)}\n`);
       return 1;
     }
     throw err;
@@ -520,8 +553,23 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
         stderr.write("Aborted — nothing imported.\n");
         return 1;
       }
+      // Above the typed branches: any throw out of the writer discards its result, so
+      // these durable skips have no other record — a programming bug's included.
+      const skipped = /** @type {{ errors?: unknown } | null} */ (err)?.errors;
+      if (Array.isArray(skipped) && skipped.length) {
+        stderr.write(`${skipped.length} row(s) were skipped before the abort:\n`);
+        writeRowErrors(stderr, skipped);
+      }
       if (err instanceof EATError || err instanceof GitHubError) {
-        stderr.write(`error: ${values["dry-run"] ? "dry run failed: " : ""}${err.message}\n`);
+        stderr.write(`error: ${values["dry-run"] ? "dry run failed: " : ""}${errorText(err)}\n`);
+        // Both classes: a GitHub limit is the commoner direct failure, and this advice is
+        // where it helps most. Only this engine can say it — the server keeps importing.
+        if (err instanceof RateLimitError || err instanceof GitHubRateLimitError) {
+          stderr.write(
+            "The run stopped — rerun it once the limit clears; already-imported " +
+              "stories are skipped.\n",
+          );
+        }
         return 1;
       }
       throw err;
@@ -561,7 +609,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
       } catch (err) {
         reporter.close(); // close the live line before any error text
         if (err instanceof EATTimeout) {
-          stderr.write(`error: ${err.message}\n`);
+          stderr.write(`error: ${errorText(err)}\n`);
           stderr.write(
             "The server may still be finishing the import — check the board in a " +
               "moment, or re-run.\n",
@@ -569,7 +617,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
           return 1;
         }
         if (err instanceof EATError) {
-          stderr.write(`error: dry run failed: ${err.message}\n`);
+          stderr.write(`error: dry run failed: ${errorText(err)}\n`);
           return 1;
         }
         throw err;
@@ -614,8 +662,10 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     });
   } catch (err) {
     reporter.close(); // close the live line before any error text
-    if (err instanceof EATTimeout) {
-      stderr.write(`error: ${err.message}\n`);
+    // A 429 sits beside the timeout, not in the generic branch: the server keeps
+    // importing past a rate-limited poll, so "import failed" is the one thing it is not.
+    if (err instanceof EATTimeout || err instanceof RateLimitError) {
+      stderr.write(`error: ${errorText(err)}\n`);
       stderr.write(
         "The server may still be finishing the import — check the board in a " +
           "moment, or re-run.\n",
@@ -623,7 +673,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
       return 1;
     }
     if (err instanceof EATError) {
-      stderr.write(`error: import failed: ${err.message}\n`);
+      stderr.write(`error: import failed: ${errorText(err)}\n`);
       if (!token) {
         stderr.write(
           "  hint: private repo, or the server has no platform PAT? " +
