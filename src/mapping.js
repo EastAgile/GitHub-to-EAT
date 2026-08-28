@@ -1264,8 +1264,74 @@ function clampBlock(text, limit) {
 }
 
 /**
- * Cut every plan text field down to the server's limits so one giant GitHub
- * comment cannot 400 the whole run. Returns a new plan; the input is untouched.
+ * @param {string} value
+ * @returns {string}
+ */
+function withoutNul(value) {
+  return value.includes("\u0000") ? value.replaceAll("\u0000", "") : value;
+}
+
+/** `source` is our own literal, never GitHub text, so no strip can apply to it. */
+const PERSON_TEXT_FIELDS = /** @type {const} */ ([
+  "external_id",
+  "username",
+  "display_name",
+  "html_url",
+]);
+
+/**
+ * @param {import("./mapping.js").ExternalPerson | null | undefined} person
+ */
+function stripPersonNul(person) {
+  if (!person) return;
+  for (const key of PERSON_TEXT_FIELDS) {
+    const v = person[key];
+    if (typeof v === "string") person[key] = withoutNul(v);
+  }
+}
+
+/**
+ * Strip NUL across a whole plan, in place, before the byte clamp — GitHub's GraphQL API
+ * returns literal NULs where REST does not (directus/directus#14579 carries 88).
+ *
+ * @param {{ labels: LabelOp[], stories: StoryOp[], epics?: EpicOp[] }} plan
+ */
+function stripPlanNul(plan) {
+  for (const label of plan.labels) {
+    label.name = withoutNul(label.name);
+    for (const key of ["background_color_hex", "text_color_hex"]) {
+      const v = /** @type {any} */ (label)[key];
+      if (typeof v === "string") /** @type {any} */ (label)[key] = withoutNul(v);
+    }
+  }
+  for (const epic of plan.epics ?? []) {
+    epic.title = withoutNul(epic.title);
+    if (typeof epic.description === "string") epic.description = withoutNul(epic.description);
+  }
+  for (const op of plan.stories) {
+    op.external_id = withoutNul(op.external_id);
+    op.name = withoutNul(op.name);
+    if (typeof op.description === "string") op.description = withoutNul(op.description);
+    if (typeof op.crossLinks === "string") op.crossLinks = withoutNul(op.crossLinks);
+    op.labels = op.labels.map(withoutNul);
+    for (const task of op.tasks) task.description = withoutNul(task.description);
+    for (const blocker of op.blockers ?? []) blocker.desc = withoutNul(blocker.desc);
+    for (const link of op.links ?? []) {
+      link.url = withoutNul(link.url);
+      link.link_type = withoutNul(link.link_type);
+    }
+    stripPersonNul(op.requestor);
+    for (const owner of op.owners ?? []) stripPersonNul(owner);
+    for (const comment of op.comments) {
+      comment.text = withoutNul(comment.text);
+      stripPersonNul(comment.author);
+    }
+  }
+}
+
+/**
+ * Cut every plan text field down to the server's limits so one giant GitHub comment is
+ * imported truncated, not refused. Returns a new plan but mutates the input's strings.
  *
  * @param {{ labels: LabelOp[], stories: StoryOp[], epics?: EpicOp[] }} plan
  * @param {FieldLimits} limits
@@ -1275,6 +1341,7 @@ function clampBlock(text, limit) {
  * @returns {{ labels: LabelOp[], stories: StoryOp[], epics: EpicOp[] }}
  */
 export function clampPlan(plan, limits, { reserveDescription = () => 0, warn = () => {} } = {}) {
+  stripPlanNul(plan);
   const stories = plan.stories.map((op) => {
     const out = { ...op };
     /** @param {string} field @param {number} limit */

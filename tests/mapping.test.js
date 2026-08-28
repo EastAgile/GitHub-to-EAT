@@ -2309,3 +2309,137 @@ test("a PR is not folded into an issue this run's filters exclude", () => {
     ["10"],
   );
 });
+
+// --- NUL parity with the server importer (services/import/normalize.rs strip_nul_bytes) ---
+
+test("NUL bytes are stripped from every plan string, as the server importer does", () => {
+  const N = String.fromCharCode(0);
+  /** @type {{ labels: any[], epics: any[], stories: any[] }} */
+  const plan = {
+    labels: [
+      { name: `bu${N}g`, background_color_hex: `#ff${N}0000`, text_color_hex: `#ff${N}ffff` },
+    ],
+    epics: [{ title: `ep${N}ic`, description: `d${N}esc` }],
+    stories: [
+      {
+        external_id: `1${N}`,
+        name: `ti${N}tle`,
+        description: `bo${N}dy`,
+        crossLinks: `Sub-issu${N}es: #12`,
+        story_type: /** @type {const} */ ("feature"),
+        current_state: /** @type {const} */ ("accepted"),
+        created_at: null,
+        completed_at: null,
+        labels: [`la${N}bel`],
+        tasks: [{ description: `ta${N}sk`, complete: false }],
+        blockers: [{ desc: `blo${N}cker` }],
+        links: [{ url: `http://x/${N}`, link_type: `pull${N}_request` }],
+        requestor: { source: "github", external_id: `7${N}`, username: `al${N}ice` },
+        owners: [{ source: "github", external_id: `8${N}`, username: `b${N}ob` }],
+        comments: [
+          {
+            text: `he${N}llo`,
+            created_at: null,
+            author: {
+              source: "github",
+              external_id: `9${N}`,
+              username: `ca${N}rol`,
+              html_url: `https://github.com/ca${N}rol`,
+            },
+          },
+        ],
+      },
+    ],
+  };
+  const out = clampPlan(plan, FALLBACK_LIMITS);
+  const s = out.stories[0];
+  const flat = JSON.stringify(out);
+  assert.equal(flat.includes("\\u0000"), false, "no plan string may still carry a NUL");
+  assert.equal(s.name, "title");
+  assert.equal(s.description, "body");
+  assert.equal(s.comments[0].text, "hello");
+  assert.equal(s.tasks[0].description, "task");
+  assert.equal(s.blockers?.[0].desc, "blocker");
+  assert.deepEqual(s.labels, ["label"]);
+  assert.equal(out.labels[0].name, "bug");
+  assert.equal(s.requestor?.username, "alice");
+  assert.equal(s.owners?.[0].username, "bob");
+  assert.equal(s.comments[0].author?.username, "carol");
+  // A person's external_id keys the `external_member` row: a NUL left in it would
+  // resolve to a different person than the same login on another row.
+  assert.equal(s.requestor?.external_id, "7");
+  assert.equal(s.owners?.[0].external_id, "8");
+  assert.equal(s.comments[0].author?.external_id, "9");
+  assert.equal(s.comments[0].author?.html_url, "https://github.com/carol");
+  assert.equal(s.external_id, "1");
+  assert.equal(s.crossLinks, "Sub-issues: #12");
+  assert.equal(s.links?.[0].link_type, "pull_request");
+  assert.equal(out.labels[0].background_color_hex, "#ff0000");
+  assert.equal(out.labels[0].text_color_hex, "#ffffff");
+});
+
+test("a NUL in the cross-link block still lets the clamp cut around it", () => {
+  const N = String.fromCharCode(0);
+  const crossLinks = `Sub-issu${N}es: #12, #14`;
+  /** @type {{ labels: any[], epics: any[], stories: any[] }} */
+  const plan = {
+    labels: [],
+    epics: [],
+    stories: [
+      {
+        external_id: "7",
+        name: "t",
+        // The description ends with the NUL-bearing block, so the strip has to run first
+        // for the clamp to still recognise it and cut the body around it, not the block away.
+        description: `${"x".repeat(FALLBACK_LIMITS.storyDescription)}\n\n${crossLinks}`,
+        crossLinks,
+        story_type: /** @type {const} */ ("feature"),
+        current_state: /** @type {const} */ ("accepted"),
+        created_at: null,
+        completed_at: null,
+        labels: [],
+        tasks: [],
+        blockers: [],
+        comments: [],
+      },
+    ],
+  };
+  const description = String(clampPlan(plan, FALLBACK_LIMITS, {}).stories[0].description);
+  assert.ok(
+    description.endsWith("\n\nSub-issues: #12, #14"),
+    `block survives the clamp, got: ${JSON.stringify(description.slice(-60))}`,
+  );
+  assert.ok(Buffer.byteLength(description, "utf8") <= FALLBACK_LIMITS.storyDescription);
+});
+
+test("NUL is stripped before the byte clamp, so the clamp measures real bytes", () => {
+  const N = String.fromCharCode(0);
+  // Over the limit while the NULs are counted, exactly at it once they are gone: only
+  // stripping first leaves this untruncated.
+  const body = N.repeat(40) + "x".repeat(FALLBACK_LIMITS.commentText);
+  /** @type {{ labels: any[], epics: any[], stories: any[] }} */
+  const plan = {
+    labels: [],
+    epics: [],
+    stories: [
+      {
+        external_id: "1",
+        name: "t",
+        description: "d",
+        story_type: /** @type {const} */ ("feature"),
+        current_state: /** @type {const} */ ("accepted"),
+        created_at: null,
+        completed_at: null,
+        labels: [],
+        tasks: [],
+        blockers: [],
+        comments: [{ text: body, created_at: null, author: null }],
+      },
+    ],
+  };
+  /** @type {string[]} */
+  const warns = [];
+  const out = clampPlan(plan, FALLBACK_LIMITS, { warn: (w) => warns.push(w) });
+  assert.equal(out.stories[0].comments[0].text.length, FALLBACK_LIMITS.commentText);
+  assert.deepEqual(warns, []);
+});

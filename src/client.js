@@ -11,6 +11,12 @@ export const DEFAULT_IMPORT_TIMEOUT = 300;
 export class EATError extends Error {
   /** @type {number | undefined} HTTP status when the error came from a response */
   status;
+
+  /**
+   * @type {string | undefined} the server's machine `code` field, parsed here where the
+   * body is in hand: the message keeps only the first 200 characters of it.
+   */
+  code;
 }
 
 /** Authentication or authorization failed (HTTP 401/403). */
@@ -20,13 +26,19 @@ export class AuthError extends EATError {}
 export class NotFoundError extends EATError {}
 
 /**
+ * HTTP 429 — the server refused the request rate. The transport does not wait it out
+ * (CONTRACT.md), so it is neither retryable nor row-scoped: it fails the whole run.
+ */
+export class RateLimitError extends EATError {
+  /** @type {number | undefined} the `Retry-After` seconds, when the server sent a number */
+  retryAfter;
+}
+
+/**
  * HTTP 409 — a domain conflict (`code: "conflict"`, e.g. duplicate label name) or
  * an Idempotency-Key replay (`code: "idempotency_conflict"`); callers branch on `code`.
  */
 export class ConflictError extends EATError {
-  /** @type {string | undefined} the server's error `code` field */
-  code;
-
   /**
    * @type {string | undefined} the server's human `error` field. For epics it names which
    * kind of row holds the title (`Epic '…'` / `Label '…'`) — a discriminator no second
@@ -37,6 +49,56 @@ export class ConflictError extends EATError {
 
 /** The request exceeded its timeout. */
 export class EATTimeout extends EATError {}
+
+/**
+ * An error body parsed as JSON, or null when it is not JSON — a proxy's HTML must not
+ * turn a clean HTTP error into a crash.
+ *
+ * @param {string} text
+ * @returns {any}
+ */
+function errorBody(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Bounded at the source: both of today's consumers cap it again on their way to a
+ * terminal, but a third would otherwise inherit an unbounded server string.
+ *
+ * @param {any} body
+ * @returns {string | undefined}
+ */
+function bodyCode(body) {
+  return typeof body?.code === "string" ? body.code.slice(0, 100) : undefined;
+}
+
+/**
+ * Read a successful response's JSON, or fail typed. Left bare, a proxy's 200 text/html raises
+ * a `SyntaxError` the writer cannot contain, so the run dies with no report of skipped rows.
+ *
+ * @param {Response} response
+ * @param {string} what the method + path, for the message
+ * @returns {Promise<any>}
+ */
+async function parsedBody(response, what) {
+  try {
+    return await response.json();
+  } catch (err) {
+    const error = new EATError(
+      `${what} answered ${response.status} with a body that is not JSON — ` +
+        "refusing to read that as a completed write.",
+      { cause: err },
+    );
+    // The real 200, so the writer treats it as terminal: outside the retry band and
+    // outside the row-scoped statuses, a replay would just repeat the same body.
+    error.status = 200;
+    throw error;
+  }
+}
 
 /** Thin client for the subset of EAT endpoints this tool uses. */
 export class EATClient {
@@ -97,15 +159,29 @@ export class EATClient {
       error.status = 404;
       throw error;
     }
+    if (response.status === 429) {
+      const header = response.headers.get("retry-after");
+      // Digits only, because `Number()` reads "", "  " and "0x10" as numbers and `Retry-After`
+      // is also legally an HTTP date; safe-integer too, since 400 digits read back as Infinity.
+      const parsed = header !== null && /^\d+$/.test(header) ? Number(header) : Number.NaN;
+      const seconds = Number.isSafeInteger(parsed) ? parsed : null;
+      // The wait only: `pollImport` shares this path, and there the server keeps
+      // importing, so what to do next is the calling engine's to say.
+      const error = new RateLimitError(
+        `East Agile Tracker rate limit hit (429) on ${path}; ` +
+          `${seconds === null ? "retry later" : `retry after ${seconds}s`}.`,
+      );
+      error.status = 429;
+      if (seconds !== null) error.retryAfter = seconds;
+      throw error;
+    }
     if (response.status === 409) {
       const text = await response.text();
+      const body = errorBody(text);
       const error = new ConflictError(`conflict on ${path}: ${text.slice(0, 200)}`);
       error.status = 409;
-      try {
-        const body = JSON.parse(text);
-        error.code = body?.code;
-        if (typeof body?.error === "string") error.detail = body.error;
-      } catch {}
+      error.code = bodyCode(body);
+      if (typeof body?.error === "string") error.detail = body.error;
       throw error;
     }
     if (response.status >= 400) {
@@ -114,6 +190,7 @@ export class EATClient {
         `request to ${path} failed (${response.status}): ${text.slice(0, 200)}`,
       );
       error.status = response.status;
+      error.code = bodyCode(errorBody(text));
       throw error;
     }
     return response;
@@ -397,7 +474,7 @@ export class EATClient {
     if (importSource !== undefined) params.set("import_source", importSource);
     if (importExternalId !== undefined) params.set("import_external_id", importExternalId);
     const response = await this.#request("GET", `/projects/${projectId}/stories?${params}`);
-    return response.json();
+    return parsedBody(response, `GET /projects/${projectId}/stories`);
   }
 
   /**
@@ -414,7 +491,7 @@ export class EATClient {
       json: label,
       headers: { "Idempotency-Key": idempotencyKey },
     });
-    return response.json();
+    return parsedBody(response, `POST /projects/${projectId}/labels`);
   }
 
   /**
@@ -455,7 +532,7 @@ export class EATClient {
       json: description == null ? { name } : { name, description },
       headers: { "Idempotency-Key": idempotencyKey },
     });
-    return response.json();
+    return parsedBody(response, `POST /projects/${projectId}/epics`);
   }
 
   /**
@@ -472,7 +549,7 @@ export class EATClient {
       json: story,
       headers: { "Idempotency-Key": idempotencyKey },
     });
-    return response.json();
+    return parsedBody(response, `POST /projects/${projectId}/stories`);
   }
 
   /**
@@ -493,7 +570,7 @@ export class EATClient {
         headers: { "Idempotency-Key": idempotencyKey },
       },
     );
-    return response.json();
+    return parsedBody(response, `POST /projects/${projectId}/stories/${storyId}/tasks`);
   }
 
   /**
@@ -519,7 +596,7 @@ export class EATClient {
       `/projects/${projectId}/stories/${storyId}/comments`,
       { json, headers: { "Idempotency-Key": idempotencyKey } },
     );
-    return response.json();
+    return parsedBody(response, `POST /projects/${projectId}/stories/${storyId}/comments`);
   }
 
   /**
@@ -541,7 +618,7 @@ export class EATClient {
         headers: { "Idempotency-Key": idempotencyKey },
       },
     );
-    return response.json();
+    return parsedBody(response, `POST /projects/${projectId}/stories/${storyId}/blockers`);
   }
 
   /**
@@ -567,7 +644,7 @@ export class EATClient {
       `/projects/${projectId}/stories/${storyId}/links`,
       { json, headers: { "Idempotency-Key": idempotencyKey } },
     );
-    return response.json();
+    return parsedBody(response, `POST /projects/${projectId}/stories/${storyId}/links`);
   }
 
   /**
