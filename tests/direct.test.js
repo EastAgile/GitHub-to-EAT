@@ -539,6 +539,32 @@ test("a refused story keeps its people out of the placeholder-owner note", async
   }
 });
 
+test("a control-bearing login never reaches the placeholder-owner note", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const fetched = fetchedRepo();
+    // A login GitHub could not issue, but a compromised or spoofed source could send:
+    // an ESC sequence rewrites the \r-drawn line, a bidi override reorders the note.
+    fetched.issues[1].user = { id: 11, login: "al\u001b[2Kice", html_url: "https://github.com/x" };
+    fetched.issues[1].assignees = [{ id: 22, login: "b\u202eob" }];
+    fetched.comments[0].user = { id: 33, login: "car\u0000ol" };
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetched },
+    });
+    // The ESC and the bidi override fail GITHUB_LOGIN and are dropped; a NUL is stripped
+    // out of the username first (stripPlanNul), so that one login survives, clean.
+    assert.deepEqual(result.externalMembersCreated, ["carol"]);
+    for (const login of result.externalMembersCreated) {
+      assert.doesNotMatch(login, /[\p{Cc}\p{Cf}]/u, JSON.stringify(login));
+    }
+  } finally {
+    await mock.close();
+  }
+});
+
 test("the direct dry run previews the same placeholder-owner roster", async () => {
   const mock = await startMockServer();
   try {
@@ -2841,6 +2867,113 @@ test("a refused dedup prescan fails the run — a wrong answer there mis-plans e
       /failed \(400\)/,
     );
     assert.equal(mock.state.stories[91], undefined);
+  } finally {
+    await mock.close();
+  }
+});
+
+// --- the dry-run roster and the written roster answer different questions ---
+
+test("the dry-run roster lists people the written roster drops, and cannot do otherwise", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const options = {
+      included: /** @type {any} */ (["issues"]),
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    };
+    // The dry run reads the plan: it cannot know which rows the server will refuse.
+    const preview = await runDirect(client, 91, "o", "r", { ...options, dryRun: true });
+    assert.deepEqual(preview.externalMembersCreated, ["alice", "bob"]);
+
+    const create = client.createStory.bind(client);
+    /** @param {number} projectId @param {any} body @param {string} key */
+    client.createStory = async (projectId, body, key) => {
+      if (body.name === "older closed issue") {
+        const err = new EATError('failed (400): {"code":"invalid_parameter"}');
+        err.status = 400;
+        throw err;
+      }
+      return create(projectId, body, key);
+    };
+    const run = await runDirect(client, 91, "o", "r", options);
+    // The written roster credits only landed writes, so the same repo answers differently.
+    assert.deepEqual(run.externalMembersCreated, []);
+    assert.equal(run.errors.length, 1);
+  } finally {
+    await mock.close();
+  }
+});
+
+// --- which contained rows a later run repairs, and which it does not ---
+
+test("a refused story create is not marked imported, so the next run writes it", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const options = {
+      included: /** @type {any} */ (["issues"]),
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    };
+    const create = client.createStory.bind(client);
+    let refuse = true;
+    /** @param {number} projectId @param {any} body @param {string} key */
+    client.createStory = async (projectId, body, key) => {
+      if (refuse && body.name === "older closed issue") {
+        const err = new EATError('failed (400): {"code":"invalid_parameter"}');
+        err.status = 400;
+        throw err;
+      }
+      return create(projectId, body, key);
+    };
+    const first = await runDirect(client, 91, "o", "r", options);
+    assert.equal(first.importedStories, 1);
+    assert.equal(first.errors.length, 1);
+
+    // Neither the marker nor the provenance pair was written, so the loss is the run's.
+    refuse = false;
+    const second = await runDirect(client, 91, "o", "r", options);
+    assert.equal(second.importedStories, 1);
+    assert.equal(second.skipped, 1);
+    assert.equal(mock.state.stories[91].length, 2);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a refused comment leaves its story marked imported, so the next run skips it", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const options = {
+      included: /** @type {any} */ (["issues"]),
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    };
+    const comment = client.createComment.bind(client);
+    let refuse = true;
+    /** @param {any[]} args */
+    client.createComment = async (...args) => {
+      if (refuse) {
+        const err = new EATError('failed (400): {"code":"invalid_parameter"}');
+        err.status = 400;
+        throw err;
+      }
+      return comment(.../** @type {[any, any, any, any, any?]} */ (args));
+    };
+    const first = await runDirect(client, 91, "o", "r", options);
+    assert.equal(first.importedStories, 2);
+    assert.equal(first.errors.length, 1);
+    assert.equal(mock.state.stories[91][0].comments.length, 0);
+
+    // The marker landed at story create, so the comment is lost for good.
+    refuse = false;
+    const second = await runDirect(client, 91, "o", "r", options);
+    assert.equal(second.importedStories, 0);
+    assert.equal(second.skipped, 2);
+    assert.equal(mock.state.stories[91][0].comments.length, 0);
   } finally {
     await mock.close();
   }

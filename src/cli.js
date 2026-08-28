@@ -13,7 +13,7 @@ import { EATClient, EATError, EATTimeout, RateLimitError } from "./client.js";
 import { ConfigError, loadConfig, loadDotenv } from "./config.js";
 import { runDirect as defaultRunDirect } from "./direct.js";
 import { DEFAULT_ENGINE, ENGINES, parseEngine } from "./engine.js";
-import { GitHubError } from "./github.js";
+import { GitHubError, RateLimitError as GitHubRateLimitError } from "./github.js";
 import { runImport as defaultRunImport } from "./importer.js";
 import { customizationFlagsGiven, parseCustomization } from "./mapping.js";
 import { MAPPINGS, parseInclude, renderLegend, requestFlags } from "./mappings.js";
@@ -112,8 +112,10 @@ export function parseRepo(value) {
  */
 function placeholderOwnersTail(created) {
   return (
-    `${created.map((login) => `@${login}`).join(", ")} — external members outside ` +
-    "the project roster; auto-linked when the matching GitHub account signs in.\n"
+    // Scrubbed behind GITHUB_LOGIN as well: this is a terminal line, and an ESC or a
+    // bidi override in a login would rewrite or reorder what the user reads.
+    `${created.map((login) => `@${scrubControl(login, 40)}`).join(", ")} — external members ` +
+    "outside the project roster; auto-linked when the matching GitHub account signs in.\n"
   );
 }
 
@@ -551,21 +553,22 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
         stderr.write("Aborted — nothing imported.\n");
         return 1;
       }
+      // Above the typed branches: any throw out of the writer discards its result, so
+      // these durable skips have no other record — a programming bug's included.
+      const skipped = /** @type {{ errors?: unknown } | null} */ (err)?.errors;
+      if (Array.isArray(skipped) && skipped.length) {
+        stderr.write(`${skipped.length} row(s) were skipped before the abort:\n`);
+        writeRowErrors(stderr, skipped);
+      }
       if (err instanceof EATError || err instanceof GitHubError) {
         stderr.write(`error: ${values["dry-run"] ? "dry run failed: " : ""}${errorText(err)}\n`);
-        // Only this engine can say it: the server engine keeps importing past a 429.
-        if (err instanceof RateLimitError) {
+        // Both classes: a GitHub limit is the commoner direct failure, and this advice is
+        // where it helps most. Only this engine can say it — the server keeps importing.
+        if (err instanceof RateLimitError || err instanceof GitHubRateLimitError) {
           stderr.write(
             "The run stopped — rerun it once the limit clears; already-imported " +
               "stories are skipped.\n",
           );
-        }
-        // Any throw out of the writer discards its result, so these durable skips
-        // have no other record — not just the ceiling abort that first carried them.
-        const skipped = /** @type {{ errors?: unknown }} */ (err).errors;
-        if (Array.isArray(skipped) && skipped.length) {
-          stderr.write(`${skipped.length} row(s) were skipped before the abort:\n`);
-          writeRowErrors(stderr, skipped);
         }
         return 1;
       }
@@ -659,7 +662,9 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     });
   } catch (err) {
     reporter.close(); // close the live line before any error text
-    if (err instanceof EATTimeout) {
+    // A 429 sits beside the timeout, not in the generic branch: the server keeps
+    // importing past a rate-limited poll, so "import failed" is the one thing it is not.
+    if (err instanceof EATTimeout || err instanceof RateLimitError) {
       stderr.write(`error: ${errorText(err)}\n`);
       stderr.write(
         "The server may still be finishing the import — check the board in a " +

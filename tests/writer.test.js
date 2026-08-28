@@ -2182,3 +2182,350 @@ test("every contained refusal is retained — nothing truncates result.errors", 
   assert.equal(result.errors.length, 60);
   assert.equal(result.comments, 60);
 });
+
+// --- a fatal that is not an EATError still has to carry the contained rows ---
+
+test("a non-EATError fatal carries the rows already skipped", async () => {
+  // A 2xx `null` body: `created.story_id` raises a TypeError, which no `instanceof
+  // EATError` branch would have caught, so the skipped comments had no other record.
+  const plan = {
+    labels: [],
+    epics: [],
+    stories: [
+      { ...bareStory("3"), comments: [{ text: "a", created_at: null }] },
+      { ...bareStory("7"), tasks: [{ description: "t", complete: false }] },
+    ],
+  };
+  let stories = 0;
+  const client = {
+    createLabel: async () => ({}),
+    createStory: async () => {
+      stories += 1;
+      return stories === 1 ? { story_id: 1 } : null;
+    },
+    createTask: async () => ({}),
+    createComment: async () => {
+      throw refusal(400, "invalid_parameter");
+    },
+    listEpics: async () => [],
+    createEpic: async () => ({}),
+  };
+  await assert.rejects(
+    writePlan(client, 91, plan, { stream: capture(), retryDelayMs: 1 }),
+    (err) => {
+      assert.ok(err instanceof TypeError, String(err));
+      const carried = /** @type {any} */ (err).errors;
+      assert.equal(carried.length, 1);
+      assert.equal(carried[0].row, "3");
+      assert.equal(carried[0].code, "invalid_parameter");
+      return true;
+    },
+  );
+});
+
+test("a frozen fatal error survives the row attachment instead of being replaced", async () => {
+  // ESM is strict mode: assigning to a non-extensible object throws a TypeError that
+  // would replace the real error, hiding both the cause and the rows.
+  const plan = {
+    labels: [],
+    epics: [],
+    stories: [{ ...bareStory("3"), comments: [{ text: "a", created_at: null }] }, bareStory("7")],
+  };
+  const frozen = Object.freeze(new Error("frozen boom"));
+  let stories = 0;
+  const client = {
+    createLabel: async () => ({}),
+    createStory: async () => {
+      stories += 1;
+      if (stories === 1) return { story_id: 1 };
+      throw frozen;
+    },
+    createTask: async () => ({}),
+    createComment: async () => {
+      throw refusal(400, "invalid_parameter");
+    },
+    listEpics: async () => [],
+    createEpic: async () => ({}),
+  };
+  await assert.rejects(
+    writePlan(client, 91, plan, { stream: capture(), retryDelayMs: 1 }),
+    (err) => {
+      assert.equal(err, frozen);
+      assert.equal(err.message, "frozen boom");
+      return true;
+    },
+  );
+});
+
+test("an AggregateError's own errors are not clobbered by the row attachment", async () => {
+  const plan = {
+    labels: [],
+    epics: [],
+    stories: [{ ...bareStory("3"), comments: [{ text: "a", created_at: null }] }, bareStory("7")],
+  };
+  const aggregate = new AggregateError([new Error("inner")], "all writes failed");
+  let stories = 0;
+  const client = {
+    createLabel: async () => ({}),
+    createStory: async () => {
+      stories += 1;
+      if (stories === 1) return { story_id: 1 };
+      throw aggregate;
+    },
+    createTask: async () => ({}),
+    createComment: async () => {
+      throw refusal(400, "invalid_parameter");
+    },
+    listEpics: async () => [],
+    createEpic: async () => ({}),
+  };
+  await assert.rejects(
+    writePlan(client, 91, plan, { stream: capture(), retryDelayMs: 1 }),
+    (err) => {
+      assert.equal(err, aggregate);
+      assert.equal(err.errors.length, 1);
+      assert.equal(err.errors[0].message, "inner");
+      return true;
+    },
+  );
+});
+
+test("a 200 that will not parse is neither retried nor contained", async () => {
+  // Without a status the writer reads it as retryable and re-POSTs a story the server
+  // already created; a replayed Idempotency-Key then answers a misleading 409.
+  const plan = { labels: [], epics: [], stories: [bareStory("3")] };
+  let attempts = 0;
+  const unparsable = new EATError(
+    "POST /projects/91/stories answered 200 with a body that is not JSON",
+  );
+  unparsable.status = 200;
+  const client = {
+    createLabel: async () => ({}),
+    createStory: async () => {
+      attempts += 1;
+      throw unparsable;
+    },
+    createTask: async () => ({}),
+    createComment: async () => ({}),
+    listEpics: async () => [],
+    createEpic: async () => ({}),
+  };
+  await assert.rejects(
+    writePlan(client, 91, plan, { stream: capture(), retryDelayMs: 1 }),
+    (err) => {
+      assert.equal(err, unparsable);
+      return true;
+    },
+  );
+  assert.equal(attempts, 1);
+});
+
+// --- each contained kind's own ceiling reset, one test per kind ---
+
+/**
+ * A plan whose writes of one kind alternate refusal and success, past the ceiling.
+ * Without `clearRowErrors(kind)` the count reaches 20 and the run aborts.
+ *
+ * @param {number} n
+ * @returns {(i: number) => boolean} true when write `i` must be refused
+ */
+const alternating = (n) => (i) => i % 2 === 0 && i < n;
+
+test("a label 409 resets the label ceiling — a re-run over refused colours still finishes", async () => {
+  const plan = {
+    labels: Array.from({ length: 60 }, (_, i) => ({ name: `l${i}` })),
+    epics: [],
+    stories: [],
+  };
+  const refuse = alternating(60);
+  let i = -1;
+  const client = {
+    createLabel: async () => {
+      i += 1;
+      if (refuse(i)) throw refusal(400, "invalid_parameter");
+      // The CONTRACT's named reset: a label the project already holds is proof the
+      // server is not refusing every label write.
+      const conflict = new ConflictError("conflict: label exists");
+      conflict.status = 409;
+      conflict.code = "conflict";
+      throw conflict;
+    },
+    createStory: async () => ({ story_id: 1 }),
+    createTask: async () => ({}),
+    createComment: async () => ({}),
+    listEpics: async () => [],
+    createEpic: async () => ({}),
+  };
+  const result = await writePlan(client, 91, plan, { stream: capture(), retryDelayMs: 1 });
+  assert.equal(result.errors.length, 30);
+  assert.equal(result.labelsExisting, 30);
+});
+
+test("a written task resets the task ceiling", async () => {
+  const op = {
+    ...bareStory("3"),
+    tasks: Array.from({ length: 60 }, () => ({ description: "t", complete: false })),
+  };
+  const refuse = alternating(60);
+  let i = -1;
+  const client = {
+    createLabel: async () => ({}),
+    createStory: async () => ({ story_id: 1 }),
+    createTask: async () => {
+      i += 1;
+      if (refuse(i)) throw refusal(400, "invalid_parameter");
+      return {};
+    },
+    createComment: async () => ({}),
+    listEpics: async () => [],
+    createEpic: async () => ({}),
+  };
+  const result = await writePlan(
+    client,
+    91,
+    { labels: [], epics: [], stories: [op] },
+    {
+      stream: capture(),
+      retryDelayMs: 1,
+    },
+  );
+  assert.equal(result.tasks, 30);
+  assert.equal(result.errors.length, 30);
+});
+
+test("a written blocker resets the blocker ceiling", async () => {
+  const op = {
+    ...bareStory("3"),
+    blockers: Array.from({ length: 60 }, () => ({ desc: "b", resolved: false })),
+  };
+  const refuse = alternating(60);
+  let i = -1;
+  const client = {
+    createLabel: async () => ({}),
+    createStory: async () => ({ story_id: 1 }),
+    createTask: async () => ({}),
+    createComment: async () => ({}),
+    createBlocker: async () => {
+      i += 1;
+      if (refuse(i)) throw refusal(400, "invalid_parameter");
+      return {};
+    },
+    listEpics: async () => [],
+    createEpic: async () => ({}),
+  };
+  const result = await writePlan(
+    client,
+    91,
+    { labels: [], epics: [], stories: [op] },
+    {
+      stream: capture(),
+      retryDelayMs: 1,
+    },
+  );
+  assert.equal(result.blockers, 30);
+  assert.equal(result.errors.length, 30);
+});
+
+test("a written link resets the link ceiling", async () => {
+  const op = {
+    ...bareStory("3"),
+    links: Array.from({ length: 60 }, (_, n) => ({
+      url: `https://github.com/o/r/pull/${n}`,
+      link_type: "pull_request",
+    })),
+  };
+  const refuse = alternating(60);
+  let i = -1;
+  const client = {
+    createLabel: async () => ({}),
+    createStory: async () => ({ story_id: 1 }),
+    createTask: async () => ({}),
+    createComment: async () => ({}),
+    createLink: async () => {
+      i += 1;
+      if (refuse(i)) throw refusal(400, "invalid_parameter");
+      return {};
+    },
+    listEpics: async () => [],
+    createEpic: async () => ({}),
+  };
+  const result = await writePlan(
+    client,
+    91,
+    { labels: [], epics: [], stories: [op] },
+    {
+      stream: capture(),
+      retryDelayMs: 1,
+      sendLinks: true,
+    },
+  );
+  assert.equal(result.links, 30);
+  assert.equal(result.errors.length, 30);
+});
+
+// --- every stage carries its rows out with a fatal, not the story stage alone ---
+
+test("a fatal in the epic stage carries the epics already refused", async () => {
+  // The epic row is one of the two permanent losses (CONTRACT.md), so it must survive
+  // the error that ended the run — the writer's result is discarded.
+  const plan = {
+    labels: [],
+    stories: [],
+    epics: [
+      { title: "milestone one", description: null },
+      { title: "milestone two", description: null },
+    ],
+  };
+  const fatal = new AuthError("unauthorized (401)");
+  fatal.status = 401;
+  const client = {
+    createLabel: async () => ({}),
+    createStory: async () => ({ story_id: 1 }),
+    createTask: async () => ({}),
+    createComment: async () => ({}),
+    listEpics: async () => [],
+    /** @param {number} _p @param {{ name: string }} epic */
+    createEpic: async (_p, epic) => {
+      if (epic.name === "milestone one") throw refusal(400, "invalid_parameter");
+      throw fatal;
+    },
+  };
+  await assert.rejects(
+    writePlan(client, 91, plan, { stream: capture(), retryDelayMs: 1 }),
+    (err) => {
+      assert.equal(err, fatal);
+      const carried = /** @type {any} */ (err).errors;
+      assert.equal(carried.length, 1);
+      assert.equal(carried[0].row, "milestone one");
+      return true;
+    },
+  );
+});
+
+test("a fatal in the label stage carries the labels already refused", async () => {
+  const plan = { labels: [{ name: "bug" }, { name: "docs" }], stories: [], epics: [] };
+  const fatal = new AuthError("unauthorized (401)");
+  fatal.status = 401;
+  const client = {
+    /** @param {number} _p @param {{ name: string }} label */
+    createLabel: async (_p, label) => {
+      if (label.name === "bug") throw refusal(400, "invalid_parameter");
+      throw fatal;
+    },
+    createStory: async () => ({ story_id: 1 }),
+    createTask: async () => ({}),
+    createComment: async () => ({}),
+    listEpics: async () => [],
+    createEpic: async () => ({}),
+  };
+  await assert.rejects(
+    writePlan(client, 91, plan, { stream: capture(), retryDelayMs: 1 }),
+    (err) => {
+      assert.equal(err, fatal);
+      const carried = /** @type {any} */ (err).errors;
+      assert.equal(carried.length, 1);
+      assert.equal(carried[0].row, "bug");
+      return true;
+    },
+  );
+});

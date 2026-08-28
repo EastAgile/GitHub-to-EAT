@@ -1061,3 +1061,76 @@ test("429 without Retry-After still raises RateLimitError", async () => {
     },
   );
 });
+
+test("a 200 whose body is not JSON fails every write as a terminal EATError, not a SyntaxError", async () => {
+  // A proxy answering 200 text/html: `response.json()` throws a bare SyntaxError, which
+  // the writer neither contains nor reports — the run dies with a raw Node stack.
+  await withServer(
+    (_req, res) => {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end("<html>gateway</html>");
+    },
+    async (base) => {
+      const client = new EATClient(base, "tok");
+      /** @type {[string, () => Promise<unknown>][]} */
+      const calls = [
+        ["listStoryPage", () => client.listStoryPage(91)],
+        ["createLabel", () => client.createLabel(91, { name: "bug" }, "k")],
+        ["createEpic", () => client.createEpic(91, { name: "Sprint 4" }, "k")],
+        ["createStory", () => client.createStory(91, { name: "issue" }, "k")],
+        ["createTask", () => client.createTask(91, 1, { description: "t" }, "k")],
+        ["createComment", () => client.createComment(91, 1, "hi", "k")],
+        ["createBlocker", () => client.createBlocker(91, 1, { desc: "b" }, "k")],
+        ["createLink", () => client.createLink(91, 1, { url: "https://x/1" }, "k")],
+      ];
+      for (const [name, call] of calls) {
+        await assert.rejects(call(), (err) => {
+          assert.ok(err instanceof EATError, `${name}: ${err}`);
+          assert.ok(!(err instanceof SyntaxError), `${name} leaked a SyntaxError`);
+          // Terminal on both writer rules: outside the >= 500 retry band and outside
+          // ROW_SCOPED_STATUSES, so it is neither replayed nor skipped as one bad row.
+          assert.equal(err.status, 200, `${name} status`);
+          return true;
+        });
+      }
+    },
+  );
+});
+
+test("an over-long machine code is capped at the source, on the error itself", async () => {
+  // Both of today's consumers cap it again, so only the error can pin the source bound.
+  await withServer(
+    (_req, res) => {
+      json(res, 400, { code: "c".repeat(500), error: "nope" });
+    },
+    async (base) => {
+      await assert.rejects(
+        new EATClient(base, "tok").createStory(91, { name: "n" }, "k"),
+        (err) => {
+          assert.equal(/** @type {any} */ (err).code.length, 100);
+          return true;
+        },
+      );
+    },
+  );
+});
+
+test("a Retry-After past 2^53 is discarded — isFinite alone would accept it", async () => {
+  // 9007199254740993 parses to a finite double, but not the integer the header sent:
+  // `Number.isFinite` passes it, and the CLI would advertise a wait that is off by one.
+  await withServer(
+    (_req, res) => {
+      res.writeHead(429, { "Retry-After": "9007199254740993" });
+      res.end("slow down");
+    },
+    async (base) => {
+      await assert.rejects(new EATClient(base, "tok").getMeta(), (err) => {
+        assert.ok(err instanceof RateLimitError);
+        assert.equal(err.retryAfter, undefined);
+        assert.match(err.message, /retry later/);
+        assert.doesNotMatch(err.message, /9007199254740992/);
+        return true;
+      });
+    },
+  );
+});

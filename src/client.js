@@ -76,6 +76,31 @@ function bodyCode(body) {
   return typeof body?.code === "string" ? body.code.slice(0, 100) : undefined;
 }
 
+/**
+ * Read a successful response's JSON, or fail typed. A proxy answering 200 text/html
+ * would otherwise raise a bare `SyntaxError`, which the writer neither contains nor
+ * carries, so the run dies with no report of the rows it already skipped.
+ *
+ * @param {Response} response
+ * @param {string} what the method + path, for the message
+ * @returns {Promise<any>}
+ */
+async function parsedBody(response, what) {
+  try {
+    return await response.json();
+  } catch (err) {
+    const error = new EATError(
+      `${what} answered ${response.status} with a body that is not JSON — ` +
+        "refusing to read that as a completed write.",
+      { cause: err },
+    );
+    // The real 200, so the writer treats it as terminal: outside the retry band and
+    // outside the row-scoped statuses, a replay would just repeat the same body.
+    error.status = 200;
+    throw error;
+  }
+}
+
 /** Thin client for the subset of EAT endpoints this tool uses. */
 export class EATClient {
   /** @type {Record<string, string>} */
@@ -450,7 +475,7 @@ export class EATClient {
     if (importSource !== undefined) params.set("import_source", importSource);
     if (importExternalId !== undefined) params.set("import_external_id", importExternalId);
     const response = await this.#request("GET", `/projects/${projectId}/stories?${params}`);
-    return response.json();
+    return parsedBody(response, `GET /projects/${projectId}/stories`);
   }
 
   /**
@@ -467,7 +492,7 @@ export class EATClient {
       json: label,
       headers: { "Idempotency-Key": idempotencyKey },
     });
-    return response.json();
+    return parsedBody(response, `POST /projects/${projectId}/labels`);
   }
 
   /**
@@ -508,7 +533,7 @@ export class EATClient {
       json: description == null ? { name } : { name, description },
       headers: { "Idempotency-Key": idempotencyKey },
     });
-    return response.json();
+    return parsedBody(response, `POST /projects/${projectId}/epics`);
   }
 
   /**
@@ -525,7 +550,7 @@ export class EATClient {
       json: story,
       headers: { "Idempotency-Key": idempotencyKey },
     });
-    return response.json();
+    return parsedBody(response, `POST /projects/${projectId}/stories`);
   }
 
   /**
@@ -546,7 +571,7 @@ export class EATClient {
         headers: { "Idempotency-Key": idempotencyKey },
       },
     );
-    return response.json();
+    return parsedBody(response, `POST /projects/${projectId}/stories/${storyId}/tasks`);
   }
 
   /**
@@ -572,7 +597,7 @@ export class EATClient {
       `/projects/${projectId}/stories/${storyId}/comments`,
       { json, headers: { "Idempotency-Key": idempotencyKey } },
     );
-    return response.json();
+    return parsedBody(response, `POST /projects/${projectId}/stories/${storyId}/comments`);
   }
 
   /**
@@ -594,7 +619,7 @@ export class EATClient {
         headers: { "Idempotency-Key": idempotencyKey },
       },
     );
-    return response.json();
+    return parsedBody(response, `POST /projects/${projectId}/stories/${storyId}/blockers`);
   }
 
   /**
@@ -620,7 +645,7 @@ export class EATClient {
       `/projects/${projectId}/stories/${storyId}/links`,
       { json, headers: { "Idempotency-Key": idempotencyKey } },
     );
-    return response.json();
+    return parsedBody(response, `POST /projects/${projectId}/stories/${storyId}/links`);
   }
 
   /**

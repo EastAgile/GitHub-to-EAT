@@ -682,6 +682,15 @@ test("a NUL in a written string is rejected invalid_chars", async () => {
     );
     await assert.rejects(client.createLabel(91, { name: `bad${N}label` }, "k-l"), /invalid_chars/);
     await assert.rejects(client.createEpic(91, { name: `bad${N}epic` }, "k-e"), /invalid_chars/);
+    // A milestone body is the epic description, so it needs its own check.
+    await assert.rejects(
+      client.createEpic(91, { name: "clean epic", description: `bad${N}body` }, "k-ed"),
+      /invalid_chars/,
+    );
+    await assert.rejects(
+      client.createBlocker(91, story.story_id, { desc: `bad${N}blocker` }, "k-b"),
+      /invalid_chars/,
+    );
     // The author rides every `--include people` comment, so a NUL in it refuses the row.
     await assert.rejects(
       client.createComment(91, story.story_id, "clean", "k-ca", {

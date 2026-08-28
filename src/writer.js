@@ -323,7 +323,11 @@ export async function writePlan(client, projectId, plan, options = {}) {
    */
   const carrying = (p) =>
     p.catch((err) => {
-      if (err instanceof EATError) /** @type {any} */ (err).errors ??= result.errors;
+      // Any error object, not just EATError: a 200 `null` body raises a TypeError, and
+      // `??=` on a frozen one would throw in strict mode and replace the real error.
+      if (err && typeof err === "object" && Object.isExtensible(err)) {
+        /** @type {any} */ (err).errors ??= result.errors;
+      }
       throw err;
     });
 
