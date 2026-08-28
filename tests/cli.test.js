@@ -7,7 +7,11 @@ import { test } from "node:test";
 import { defaultConfirm, main, parseRepo } from "../src/cli.js";
 import { AuthError, EATError, EATTimeout, RateLimitError } from "../src/client.js";
 import { runDirect as realRunDirect } from "../src/direct.js";
-import { GitHubClient, GitHubError } from "../src/github.js";
+import {
+  GitHubClient,
+  GitHubError,
+  RateLimitError as GitHubRateLimitError,
+} from "../src/github.js";
 import { MAPPINGS } from "../src/mappings.js";
 import { makeState, startMockServer } from "../src/mockserver.js";
 import { preflight as realPreflight } from "../src/preflight.js";
@@ -507,6 +511,30 @@ test("the direct engine's placeholder owners render through the shared report pa
   );
 });
 
+test("the placeholder-owner note scrubs a control-bearing login", async () => {
+  // Belt and braces behind GITHUB_LOGIN: the note is a `\r`-drawn terminal line, and an
+  // ESC or a bidi override in it would rewrite or reorder what the user reads.
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      const out = capture();
+      const code = await main(
+        ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--engine", "direct", "-y"],
+        {
+          stdout: out,
+          stderr: capture(),
+          preflight: async () => preflightResult(),
+          runDirect: async () =>
+            outcome({ externalMembersCreated: ["ali\u001b[2Kce", "b\u202eob"] }),
+        },
+      );
+      assert.equal(code, 0);
+      assert.ok(out.buf.includes("note: 2 placeholder owner(s) created: @ali[2Kce, @bob"), out.buf);
+      assert.ok(!out.buf.includes("\u001b"), JSON.stringify(out.buf));
+      assert.ok(!out.buf.includes("\u202e"), JSON.stringify(out.buf));
+    }),
+  );
+});
+
 test("the ceiling abort still reports the rows it skipped, scrubbed", async () => {
   await inTempDir(() =>
     withEnv({ EAT_AGENT_KEY: "key" }, async () => {
@@ -531,6 +559,47 @@ test("the ceiling abort still reports the rows it skipped, scrubbed", async () =
       assert.ok(err.buf.includes("  - row 3: invalid_chars — comment 1: failed (400)\n"), err.buf);
       assert.ok(err.buf.includes("row 4[2K: invalid_chars"), err.buf);
       assert.ok(!err.buf.includes("\r"), JSON.stringify(err.buf));
+      assert.ok(!err.buf.includes("\u001b"), JSON.stringify(err.buf));
+    }),
+  );
+});
+
+test("a programming-bug fatal still lists the skipped rows before it rethrows", async () => {
+  // A TypeError out of the writer is neither EATError nor GitHubError, so the rows
+  // would be lost and stderr empty; the stack still has to surface for a real bug.
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      const err = capture();
+      await assert.rejects(
+        main(
+          ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--engine", "direct", "-y"],
+          {
+            stdout: capture(),
+            stderr: err,
+            preflight: async () => preflightResult(),
+            runDirect: async () => {
+              const boom = new TypeError("Cannot read properties of null (reading 'story_id')");
+              /** @type {any} */ (boom).errors = [
+                { code: "invalid_parameter", row: "3", detail: "comment 1: failed (400)" },
+                {
+                  code: "invalid_parameter",
+                  row: "4\u001b[2K\r",
+                  detail: "comment 2: failed (400)",
+                },
+              ];
+              throw boom;
+            },
+          },
+        ),
+        TypeError,
+      );
+      assert.ok(err.buf.includes("2 row(s) were skipped before the abort:"), err.buf);
+      assert.ok(
+        err.buf.includes("  - row 3: invalid_parameter — comment 1: failed (400)\n"),
+        err.buf,
+      );
+      // Scrubbed on this branch too — the rows are server text either way.
+      assert.ok(err.buf.includes("row 4[2K: invalid_parameter"), err.buf);
       assert.ok(!err.buf.includes("\u001b"), JSON.stringify(err.buf));
     }),
   );
@@ -2524,4 +2593,98 @@ test("the server engine is untouched: a tokenless run still imports", async () =
   const { code, reached } = await runDirectEngine(directArgv("--engine", "server", "-y"));
   assert.equal(code, 0);
   assert.deepEqual(reached, ["preflight", "runImport"], "no token, no refusal, EAT does the fetch");
+});
+
+test("a GitHub rate limit gets the rerun advice too — it is the commoner direct failure", async () => {
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      const err = capture();
+      const code = await main(
+        ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--engine", "direct", "-y"],
+        {
+          stdout: capture(),
+          stderr: err,
+          preflight: async () => preflightResult(),
+          runDirect: async () => {
+            throw new GitHubRateLimitError("GitHub rate limit exhausted; resets in 60s.");
+          },
+        },
+      );
+      assert.equal(code, 1);
+      assert.ok(err.buf.includes("GitHub rate limit exhausted"), err.buf);
+      assert.ok(err.buf.includes("rerun it once the limit clears"), err.buf);
+    }),
+  );
+});
+
+test("a non-429 direct fatal never offers the rerun advice", async () => {
+  // The advice is true only of a rate limit: a bad key or a wrong project repeats.
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      const err = capture();
+      const code = await main(
+        ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--engine", "direct", "-y"],
+        {
+          stdout: capture(),
+          stderr: err,
+          preflight: async () => preflightResult(),
+          runDirect: async () => {
+            const fatal = new AuthError("authentication failed — check EAT_AGENT_KEY");
+            fatal.status = 401;
+            throw fatal;
+          },
+        },
+      );
+      assert.equal(code, 1);
+      assert.ok(err.buf.includes("authentication failed"), err.buf);
+      assert.ok(!err.buf.includes("rerun it once the limit clears"), err.buf);
+    }),
+  );
+});
+
+test("an over-long row-error code is capped on the rendered line", async () => {
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      const err = capture();
+      const code = await main(
+        ["--token", "ghp_test", "--project", "91", "--repo", "o/r", "--engine", "direct", "-y"],
+        {
+          stdout: capture(),
+          stderr: err,
+          preflight: async () => preflightResult(),
+          runDirect: async () =>
+            outcome({ errors: [{ code: "c".repeat(5000), row: "3", detail: "" }] }),
+        },
+      );
+      assert.equal(code, 1);
+      // The code gets its own 100-character budget, so `row 3:` stays readable.
+      assert.ok(err.buf.includes(`  - row 3: ${"c".repeat(100)}\n`), err.buf.slice(0, 200));
+      assert.ok(!err.buf.includes("c".repeat(101)), err.buf.slice(0, 200));
+    }),
+  );
+});
+
+test("a 429 on the server engine says the import may still be finishing", async () => {
+  // The server keeps importing past a 429, so "import failed" is the one thing it is not.
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key", EAT_API_BASE: "http://127.0.0.1:9/api/v1" }, async () => {
+      const err = capture();
+      const code = await main(["--project", "91", "--repo", "o/r", "--engine", "server", "-y"], {
+        stdout: capture(),
+        stderr: err,
+        preflight: async () => preflightResult(),
+        runImport: async () => {
+          const limit = new RateLimitError(
+            "East Agile Tracker rate limit hit (429) on /projects/91/import/json; retry after 42s.",
+          );
+          limit.status = 429;
+          throw limit;
+        },
+      });
+      assert.equal(code, 1);
+      assert.ok(err.buf.includes("retry after 42s"), err.buf);
+      assert.ok(err.buf.includes("may still be finishing the import"), err.buf);
+      assert.ok(!err.buf.includes("import failed"), err.buf);
+    }),
+  );
 });

@@ -54,11 +54,12 @@ export async function runWithProgress(func, message, { stream, intervalMs = 500 
   }
 }
 
-// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control chars is the point
-const CONTROL = /[\u0000-\u001f\u007f-\u009f]/g;
+// Cf as well as Cc: the bidi overrides reorder a warning line without carrying one
+// control byte. Same class as mapping.js's stripControls.
+const CONTROL = /[\p{Cc}\p{Cf}]/gu;
 
 /**
- * Strip terminal control characters (C0/C1, incl. CR/LF/ESC) and cap length.
+ * Strip terminal control characters (C0/C1/DEL and Unicode `Cf`) and cap length.
  * Server-supplied text is rendered raw to the terminal, and the `\r`-drawn
  * progress line would otherwise let a hostile status/error rewrite the line.
  *

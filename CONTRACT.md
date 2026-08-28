@@ -98,10 +98,12 @@ The API base is `.../api/v1`. Shapes the CLI parses:
   the 1-based source row, never a pre-formatted English sentence (server story
   #31311). The CLI renders one `  - row <row>: <code>` line per entry on stderr
   and still exits 1, but it prints **at most the first 50** and counts the rest
-  in a `  … and N more` line; the exact total always rides the `N error(s)`
-  summary line, so the cap hides no count. A bare string from an older/other
-  source is rendered as-is, and every entry is control-character-scrubbed before
-  it reaches the terminal.
+  in a `  … and N more` line. The exact total rides one of two lines, never the
+  capped list: the `N error(s)` summary on a run that finished, or
+  `N row(s) were skipped before the abort` on a run a fatal error ended. So the
+  cap hides no count. A bare string from an older/other source is rendered as-is,
+  and every entry is scrubbed of control characters — C0, C1, DEL and the Unicode
+  `Cf` formats, the bidi overrides included — before it reaches the terminal.
   The **direct engine fills the same shape differently**: `row` is the GitHub
   external id (`3`, `release-100`), not a 1-based row number — it writes from a
   plan, not from a numbered source file, and the external id is what a user can
@@ -264,10 +266,17 @@ ghost *assignee* is simply absent — the caller does not become an owner.
   comment body is trimmed before it is sent (the server importer stores it
   untrimmed, testing `trim()` only to skip blank comments).
 - **Placeholder-owner reporting** — the create responses carry no created-vs-reused
-  signal, so the direct engine's `N placeholder owner(s)` line reports the distinct
-  logins the run *attached*, not strictly the `external_member` rows it created; on
-  a re-import into a project that already knows those people the count therefore
-  over-reports where the server engine's would read 0.
+  signal, so neither of the direct engine's two lines reports `external_member` rows
+  created. **Two lines, two rules.** The dry run's
+  `would create N placeholder owner(s)` reads the plan: the distinct logins the run
+  *would attach* as requestor, owner or comment author. The import's
+  `N placeholder owner(s) created` reads the writes that landed: a login a refused
+  row was the only carrier of is absent, because the server refused that row and
+  created nobody. **The gap is deliberate.** A dry run writes nothing, so it cannot
+  know which rows the server will refuse; the two lines answer different questions
+  and each answers its own correctly. Both over-report against the server engine's
+  `external_members_created` in the same way: on a re-import into a project that
+  already knows those people, both still list them where the server engine reads 0.
 
 ## v2 — async import
 
@@ -1895,10 +1904,13 @@ engine now does the same, on a **narrow allowlist** of statuses:
   next. The list is an **allowlist for exactly this reason**: a `400 <= s < 500`
   band would absorb a status that means the run itself is wrong, and skip every
   remaining row instead of stopping.
-- **`429` is not retried and not contained.** The transport does not wait out a
-  rate limit (see "The transport does not retry a rate limit" above), so it
-  raises a typed error naming the `Retry-After` wait and the run stops. Absorbing
-  it would burn the rest of the plan against a server that is answering nothing.
+- **`429` is not retried and not contained** on any write or listing path. The
+  transport does not wait out a rate limit (see "The transport does not retry a
+  rate limit" above), so it raises a typed error naming the `Retry-After` wait and
+  the run stops. Absorbing it would burn the rest of the plan against a server that
+  is answering nothing. The feature detects are the one exception — they swallow a
+  `429` like every other failure, see "The listing and prescan stages do not
+  contain" below.
   The transport message states the **wait only**: `pollImport` shares that path,
   and there the server keeps importing past a `429`, so "rerun once the limit
   clears" is added by the direct engine's CLI branch, not by the transport.
@@ -1915,11 +1927,23 @@ engine now does the same, on a **narrow allowlist** of statuses:
   never fire for a sub-resource**: a story create that succeeds says nothing about
   the comment endpoint, so 500 stories × 3 refused comments would clear the count
   500 times and skip 1,500 rows without ever aborting.
+  **The abort message over-claims on one kind.** It says nothing further would be
+  written correctly, which is false for a label the server refused on its
+  **colour**: `POST /stories` attaches labels by name and get-or-creates them with
+  default colours, so those rows would still keep their labels. The writer cannot
+  tell a bad colour from a bad name apart, because the discriminator is
+  `details.constraint` and the CLI does not read it (see "`row` and `code`" below).
+  A systemic colour `400` therefore costs 20 label rows and the run. That is still
+  strictly better than the pre-containment behaviour, where one refused label ended
+  the run at its first row.
 - **Every fatal error reports what was skipped before it.** Any throw out of
   `writePlan` discards the result that holds `errors`, so the writer attaches the
   contained rows to the error itself — the ceiling abort, and equally a `401`, a
-  `429` or a `5xx` that lands after a row was already skipped. The CLI prints them
-  under the error, so a durable skip is never lost to the failure that followed it.
+  `429` or a `5xx` that lands after a row was already skipped. It attaches them to
+  **any** error object it can extend, a plain `TypeError` from a programming bug
+  included, and the CLI prints them for any error it reports — above the error line,
+  and above the rethrow that surfaces a bug's stack — so a durable skip is never
+  lost to the failure that followed it.
 - **Why the ceiling and the exit code both matter: the loss is durable.** The
   dedup marker and the provenance pair land on the **story create**, so a story
   whose comment was skipped is `skipped (already imported)` on every later run.
@@ -1942,9 +1966,9 @@ engine now does the same, on a **narrow allowlist** of statuses:
   characters. The *reason* rides
   one level down, in `details.constraint` (`invalid_chars`, `too_long`,
   `required`, `invalid`), which the CLI does not read. Both the code and the
-  message are capped and stripped of control characters before any of it reaches
-  the terminal. `detail` names the sub-resource (`comment 2: …`), which is the
-  only record of *what* was lost.
+  message are capped and stripped of control characters — C0, C1, DEL and the
+  Unicode `Cf` formats — before any of it reaches the terminal. `detail` names the
+  sub-resource (`comment 2: …`), which is the only record of *what* was lost.
 - **Which stages contain.** Epic creates, story creates (a skipped story skips its
   own tasks, blockers, comments and links, which would target a story that does
   not exist), and each task, blocker, comment, link and label create. A refused
@@ -1962,10 +1986,10 @@ engine now does the same, on a **narrow allowlist** of statuses:
 - **The listing and prescan stages do not contain.** `GET /epics` and the dedup
   prescan still fail the run, because a wrong answer there mis-plans every row
   rather than one — a row-scoped `400` there is fatal like any other status. The
-  **feature detects are the exception**: `GET /openapi.json` failures (404, auth,
-  a body that will not parse) are caught and cached as `null`, so an unreadable
-  spec degrades the run to v3 payloads instead of failing it — see "Fidelity
-  limitations" below.
+  **feature detects are the exception**: **any** `GET /openapi.json` failure — 404,
+  auth, `429`, a `5xx`, a timeout, or a body that will not parse — is caught and
+  cached as `null`, so an unreadable spec degrades the run to v3 payloads instead
+  of failing it — see "Fidelity limitations" below.
 
 ### Length limits (direct engine)
 
@@ -2009,17 +2033,22 @@ therefore clamps plan text client-side before writing:
   plan cannot produce a `too_long` 400; one over-long GitHub issue can never
   abort the run.
 - **NUL strip, and it is silent.** The same pass first removes every `0x00` from
-  every plan string — story name, description, cross-link block, external id and
-  label names, label name and colours, epic title and description, task, blocker,
-  comment, link url and type, and each imported person's id, username, display
-  name and profile URL. The **external id** is load-bearing beyond the write: it
-  keys the dedup marker and the Idempotency-Key, so a NUL left in it would break
-  the re-run key, not one column. Postgres `text` cannot store a NUL,
-  so the public create refuses the row `400 invalid_parameter
-  {"constraint":"invalid_chars"}`. GitHub's GraphQL API returns literal NULs where
-  REST does not, so the V5 transport flip is what made this reachable
-  (directus/directus#14579 carries 88 in one comment body; `gh api` strips them on
-  the way through, which is why every check made through it read clean).
+  every plan string it enumerates below — story name, description, cross-link block,
+  external id and label names, label name and colours, epic title and description,
+  task, blocker, comment, link url and type, and each imported person's id, username,
+  display name and profile URL. Four written plan strings are **outside** it: the
+  story's `created_at`, `started_at` and `completed_at`, and a comment's `created_at`.
+  The mock does not check those four either, so a NUL in one costs its row — one
+  contained refusal, not the run. Only GitHub's own timestamps fill them, and a
+  release's date is validated RFC 3339 before it is used at all.
+  The **external id** is load-bearing beyond the write: it keys the dedup marker and
+  the Idempotency-Key, so a NUL left in it would break the re-run key, not one
+  column. Postgres `text` cannot store a NUL, so the public create refuses the row
+  `400 invalid_parameter {"constraint":"invalid_chars"}`. GitHub's GraphQL API
+  returns literal NULs where REST does not, so the V5 transport flip is what made
+  this reachable (directus/directus#14579 carries 88 in one comment body; `gh api`
+  strips them on the way through, which is why every check made through it read
+  clean).
   Unlike the clamp, **the strip warns about nothing**, and that silence is
   deliberate parity: the server importer's `strip_nul_bytes`
   (`services/import/normalize.rs`) drops them silently too, so a warning here
@@ -2036,13 +2065,16 @@ therefore clamps plan text client-side before writing:
   story name, description, label, requestor or owner, a task description, a
   comment body, a comment author, or a blocker description. Story **links** are
   checked too, but under their own wording: `constraint: "invalid"`, not
-  `invalid_chars`, on a NUL in the `url` or the `title`. A NUL in a link's
-  `link_type` is refused too, and under that same `invalid` wording — it fails
-  the seven-name allowlist rather than the NUL check. Four written fields it
-  does **not** check for a NUL: the two label colours and the provenance pair
-  (`import_source` / `import_external_id`). Nothing in the mock proves those four
-  are NUL-free, so the strip in `clampPlan` is their only guard and its own tests
-  have to carry a NUL through each of them.
+  `invalid_chars`, on a NUL in the `url` or the `title`. The **title** check is
+  unreachable from a real run: the direct engine never fills `link.title`, so only
+  a hand-built payload can trip it. A NUL in a link's `link_type` is refused too,
+  and under that same `invalid` wording — it fails the seven-name allowlist rather
+  than the NUL check. Four written fields it does **not** check for a NUL: the two
+  label colours and the provenance pair (`import_source` / `import_external_id`).
+  Nothing in the mock proves those four are NUL-free, so the strip in `clampPlan` is
+  their only guard and its own tests have to carry a NUL through each of them. The
+  four **date** fields above are neither checked here nor stripped there, so they
+  have no guard at all — a NUL in one is a contained row.
 
 ### Marker dedup (direct engine)
 
@@ -2254,11 +2286,14 @@ and both are prescanned, in union.
   disappears entirely, once people ride too) only when it can. Under
   `--include prs` a PR's creator is sent as an owner as well as the requestor,
   mirroring the server importer.
-- **Placeholder-owner reporting** — the direct engine's `N placeholder owner(s)
-  created` / `would create N placeholder owner(s)` line lists the distinct GitHub
-  logins the run attached as requestor, owner or comment author. The story-create
-  response carries no created-vs-reused signal, so unlike the server engine's
-  `external_members_created` this is the roster touched, not the rows created: a
+- **Placeholder-owner reporting** — the direct engine prints two different lines
+  under one heading. `would create N placeholder owner(s)` (dry run) lists the
+  distinct GitHub logins the plan would attach as requestor, owner or comment author.
+  `N placeholder owner(s) created` (import) lists only the logins a write actually
+  carried to the server, so a contained row's people drop out of it. A dry run cannot
+  predict a refusal, which is why the two differ on the same repo. The story-create
+  response carries no created-vs-reused signal either, so unlike the server engine's
+  `external_members_created` both lines report a roster, not rows created: a
   re-import into a project that already knows those people still lists them.
 - **Sub-issue hierarchy** — EAT has no parent/child story relation, so the
   cross-links above are plain text in the description, not a queryable link: a

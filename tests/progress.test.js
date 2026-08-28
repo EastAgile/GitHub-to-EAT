@@ -125,6 +125,12 @@ test("scrubControl strips control chars (CR/LF/ESC/TAB) and caps length", () => 
   assert.equal(scrubControl("hello", 40), "hello");
 });
 
+test("scrubControl strips Unicode format characters, so a bidi override cannot reorder a line", () => {
+  // Same class mapping.js's stripControls kills: RLO/PDF would flip the tail of a warning.
+  assert.equal(scrubControl("row \u202e3 desu\u202c"), "row 3 desu");
+  assert.equal(scrubControl("a\u200bb\u2066c\ufeffd"), "abcd");
+});
+
 test("formatImportStatus scrubs a hostile unknown status and coerces bad numbers", () => {
   // A status carrying CR/ANSI-ESC/newline must not survive to the \r-drawn line.
   assert.equal(

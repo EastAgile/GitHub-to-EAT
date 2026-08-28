@@ -2334,13 +2334,18 @@ test("NUL bytes are stripped from every plan string, as the server importer does
         tasks: [{ description: `ta${N}sk`, complete: false }],
         blockers: [{ desc: `blo${N}cker` }],
         links: [{ url: `http://x/${N}`, link_type: `pull${N}_request` }],
-        requestor: { source: "github", external_id: "7", username: `al${N}ice` },
-        owners: [{ source: "github", external_id: "8", username: `b${N}ob` }],
+        requestor: { source: "github", external_id: `7${N}`, username: `al${N}ice` },
+        owners: [{ source: "github", external_id: `8${N}`, username: `b${N}ob` }],
         comments: [
           {
             text: `he${N}llo`,
             created_at: null,
-            author: { source: "github", external_id: "9", username: `ca${N}rol` },
+            author: {
+              source: "github",
+              external_id: `9${N}`,
+              username: `ca${N}rol`,
+              html_url: `https://github.com/ca${N}rol`,
+            },
           },
         ],
       },
@@ -2360,6 +2365,12 @@ test("NUL bytes are stripped from every plan string, as the server importer does
   assert.equal(s.requestor?.username, "alice");
   assert.equal(s.owners?.[0].username, "bob");
   assert.equal(s.comments[0].author?.username, "carol");
+  // A person's external_id keys the `external_member` row: a NUL left in it would
+  // resolve to a different person than the same login on another row.
+  assert.equal(s.requestor?.external_id, "7");
+  assert.equal(s.owners?.[0].external_id, "8");
+  assert.equal(s.comments[0].author?.external_id, "9");
+  assert.equal(s.comments[0].author?.html_url, "https://github.com/carol");
   assert.equal(s.external_id, "1");
   assert.equal(s.crossLinks, "Sub-issues: #12");
   assert.equal(s.links?.[0].link_type, "pull_request");
