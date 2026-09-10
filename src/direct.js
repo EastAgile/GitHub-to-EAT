@@ -110,14 +110,21 @@ export class HybridFetcher {
    * @param {string} owner
    * @param {string} repo
    * @param {{ token?: string, timeout?: number, apiBase?: string,
-   *   warn?: (message: string) => void, onProgress?: (status: any) => void }} [options]
+   *   warn?: (message: string) => void, onProgress?: (status: any) => void,
+   *   sleep?: (ms: number) => Promise<void>,
+   *   onRateLimitWait?: (wait: import("./github.js").RateLimitWait | null) => void }} [options]
    * @throws {import("./github.js").GitHubAuthError} without a token — GraphQL has no
    *   anonymous mode
    */
-  constructor(owner, repo, { token, timeout, apiBase, warn, onProgress } = {}) {
+  constructor(
+    owner,
+    repo,
+    { token, timeout, apiBase, warn, onProgress, sleep, onRateLimitWait } = {},
+  ) {
     // `shared` reaches both transports: the bearer must ride REST too, or the free probe
-    // reads the anonymous bucket and a private repo 404s on /releases.
-    const shared = { token, timeout, apiBase, warn };
+    // reads the anonymous bucket and a private repo 404s on /releases. The rate-limit
+    // backoff rides it for the same reason — one policy, whichever transport meets a limit.
+    const shared = { token, timeout, apiBase, warn, sleep, onRateLimitWait };
     this.#graph = new GitHubGraphQLFetcher(owner, repo, { ...shared, onProgress });
     this.#rest = new GitHubClient(owner, repo, shared);
   }
@@ -447,6 +454,16 @@ function attachedPeople(plan) {
 }
 
 /**
+ * One rate-limit backoff, worded once for the redrawn TTY line and the plain non-TTY one.
+ *
+ * @param {import("./github.js").RateLimitWait} wait
+ * @returns {string}
+ */
+function rateLimitWaitText({ seconds, retry, retries }) {
+  return `rate limited by GitHub, retrying in ${seconds}s (retry ${retry} of ${retries})`;
+}
+
+/**
  * Run the client-side import pipeline and return the same
  * {@link import("./importer.js").ImportOutcome} shape the server engine yields.
  *
@@ -475,6 +492,7 @@ function attachedPeople(plan) {
  */
 export async function runDirect(client, projectId, owner, repo, options) {
   const { token, dryRun, stream, runId, github, customize, announce, included = [] } = options;
+  const out = stream ?? process.stderr;
   // Buffered, not written straight through: the fetch runs under a TTY spinner that
   // holds an open `\r` line, which would otherwise swallow the first warning.
   /** @type {string[]} */
@@ -482,6 +500,9 @@ export async function runDirect(client, projectId, owner, repo, options) {
   // Exact where the REST path had no count at all: GraphQL's `totalCount` prices the walk
   // on its first page, so the spinner can say how far along it is.
   let pages = "";
+  // The buffered `warn` seam would surface a backoff only once it is over. This rides the
+  // message thunk instead, which every spinner redraw re-reads.
+  let waiting = "";
   const source =
     github ??
     new HybridFetcher(owner, repo, {
@@ -490,6 +511,11 @@ export async function runDirect(client, projectId, owner, repo, options) {
       warn: (m) => fetchWarnings.push(m),
       onProgress: ({ progress_current: current, progress_total: total }) => {
         pages = total == null ? ` page ${current}` : ` page ${current}/${total}`;
+      },
+      onRateLimitWait: (wait) => {
+        waiting = wait === null ? "" : ` — ${rateLimitWaitText(wait)}`;
+        // A non-TTY run redraws nothing, so a silent minute reads as a hang there too.
+        if (wait !== null && !out.isTTY) out.write(`${rateLimitWaitText(wait)}...\n`);
       },
     });
   const releases = included.includes("releases");
@@ -500,10 +526,10 @@ export async function runDirect(client, projectId, owner, repo, options) {
   const pullRequests = included.includes("prs");
   const fetched = await runWithProgress(
     () => source.fetchAll({ releases, pullRequests, dependencies }),
-    () => `fetching ${owner}/${repo} from GitHub${pages}`,
+    () => `fetching ${owner}/${repo} from GitHub${pages}${waiting}`,
     { stream },
   );
-  for (const message of fetchWarnings) (stream ?? process.stderr).write(message);
+  for (const message of fetchWarnings) out.write(message);
   // The wizard sits after the fetch so its questions reflect real issues; EOF
   // rejects here, before any prescan or write.
   const customization = customize

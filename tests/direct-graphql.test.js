@@ -706,3 +706,111 @@ test("the server engine's output and import body are byte-identical to before th
     await mock.close();
   }
 });
+
+// --- the rate-limit wait on the progress line (story #259659) ----------------
+
+/**
+ * A GitHub stand-in that refuses the first `ImportIssues` POST with a bare 429 — no
+ * `retry-after`, so the run falls back to the floor — and serves the listing on the
+ * re-send. `state.issuePosts` counts the POSTs that asked for the issue listing.
+ *
+ * @param {(context: { base: string, state: { issuePosts: number } }) => Promise<void>} fn
+ */
+async function withRateLimitedGitHub(fn) {
+  const http = await import("node:http");
+  const state = { issuePosts: 0 };
+  const page = { pageInfo: { hasNextPage: false, endCursor: null } };
+  const server = http.createServer(async (req, res) => {
+    const { pathname } = new URL(req.url ?? "", "http://x");
+    if (req.method === "POST" && pathname === "/graphql") {
+      /** @type {Buffer[]} */
+      const chunks = [];
+      for await (const chunk of req) chunks.push(Buffer.from(chunk));
+      const request = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      const issues = request.operationName === "ImportIssues";
+      if (issues) state.issuePosts += 1;
+      if (issues && state.issuePosts === 1) {
+        res.writeHead(429, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ message: "slow down" }));
+        return;
+      }
+      /** @type {Record<string, unknown>} */
+      const connections = {
+        ImportIssues: { issues: { totalCount: 1, ...page, nodes: [issueNode()] } },
+        ImportLabels: { labels: { ...page, nodes: [] } },
+      };
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ data: { repository: connections[request.operationName] ?? {} } }));
+      return;
+    }
+    const body =
+      pathname === "/rate_limit" ? { resources: { graphql: { remaining: 5000 } } } : null;
+    res.writeHead(body === null ? 404 : 200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(body ?? { message: "no stub route" }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(undefined)));
+  const address = /** @type {import("node:net").AddressInfo} */ (server.address());
+  try {
+    await fn({ base: `http://127.0.0.1:${address.port}`, state });
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(() => resolve(undefined)));
+  }
+}
+
+/**
+ * Run one import whose first issue listing is rate-limited, with the floor cut to a
+ * second so the wait is real but short.
+ *
+ * @param {import("../src/progress.js").OutStream} stream
+ * @returns {Promise<{ issuePosts: number }>}
+ */
+async function importThroughOneWait(stream) {
+  const { runDirect } = await import("../src/direct.js");
+  const { withEnv } = await import("./helpers.js");
+  const mock = await startMockServer();
+  /** @type {{ issuePosts: number }} */
+  let counted = { issuePosts: 0 };
+  try {
+    await withEnv({ GITHUB_IMPORT_RATE_LIMIT_FLOOR_SECS: "1" }, () =>
+      withRateLimitedGitHub(async ({ base, state }) => {
+        await runDirect(new EATClient(mock.baseUrl, "ea_token"), 91, "o", "r", {
+          included: ["issues"],
+          token: "ghp_secret",
+          apiBase: base,
+          stream,
+        });
+        counted = state;
+      }),
+    );
+  } finally {
+    await mock.close();
+  }
+  return counted;
+}
+
+test("a rate-limit wait shows on the redrawn fetch line and never breaks it", async () => {
+  const stream = { ...capture(), isTTY: true, columns: 200 };
+  const state = await importThroughOneWait(stream);
+  assert.equal(state.issuePosts, 2, "the refused listing was re-sent exactly once");
+  // The whole fetch stage is one `\r`-redrawn line, so it ends at the first newline.
+  const fetchLine = stream.buf.slice(0, stream.buf.indexOf("\n"));
+  assert.match(fetchLine, /rate limited by GitHub, retrying in 1s \(retry 1 of 3\)/);
+  // A notice written as its own line would have ended the redrawn line early.
+  assert.match(fetchLine, /fetching o\/r from GitHub.* — done in \d+s$/);
+  // The last redraw is what the reader is left looking at: a finished wait must
+  // not leave it claiming the run is still backing off.
+  const finished = fetchLine.slice(fetchLine.lastIndexOf("\r"));
+  assert.doesNotMatch(finished, /rate limited/);
+});
+
+test("a non-TTY run prints one plain line per wait, so a silent minute is not a hang", async () => {
+  const stream = capture();
+  const state = await importThroughOneWait(stream);
+  assert.equal(state.issuePosts, 2);
+  const notice = "rate limited by GitHub, retrying in 1s (retry 1 of 3)";
+  assert.equal(stream.buf.split(notice).length - 1, 1, "one line per wait, not one per redraw");
+  // Between the fetch line and the next stage: the notice landed during the wait.
+  assert.ok(stream.buf.indexOf(notice) > stream.buf.indexOf("fetching o/r from GitHub..."));
+  assert.ok(stream.buf.indexOf(notice) < stream.buf.indexOf("scanning project 91"));
+});

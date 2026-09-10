@@ -591,13 +591,20 @@ export class GitHubGraphQLFetcher {
    * @param {string} owner
    * @param {string} repo
    * @param {{ token?: string, timeout?: number, apiBase?: string,
-   *   warn?: (message: string) => void, onProgress?: (status: any) => void }} [options]
+   *   warn?: (message: string) => void, onProgress?: (status: any) => void,
+   *   sleep?: (ms: number) => Promise<void>,
+   *   onRateLimitWait?: (wait: import("./github.js").RateLimitWait | null) => void }} [options]
    *   `warn` defaults to stderr, so a construction site that forgets it cannot swallow a
-   *   degraded fetch; `onProgress` takes the same status doc `src/progress.js` renders
+   *   degraded fetch; `onProgress` takes the same status doc `src/progress.js` renders;
+   *   `sleep` and `onRateLimitWait` are the rate-limit backoff's seams
    * @throws {import("./github.js").GitHubAuthError} without a token — GraphQL has no
    *   anonymous mode
    */
-  constructor(owner, repo, { token, timeout, apiBase = GITHUB_API_BASE, warn, onProgress } = {}) {
+  constructor(
+    owner,
+    repo,
+    { token, timeout, apiBase = GITHUB_API_BASE, warn, onProgress, sleep, onRateLimitWait } = {},
+  ) {
     this.owner = owner;
     this.repo = repo;
     this.apiBase = apiBase.replace(/\/+$/, "");
@@ -607,6 +614,8 @@ export class GitHubGraphQLFetcher {
       token,
       timeout,
       apiBase,
+      sleep,
+      onRateLimitWait,
       warn: this.#warn,
     });
   }

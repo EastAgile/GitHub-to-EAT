@@ -9,7 +9,7 @@ import {
   GitHubError,
   RateLimitError,
   repoNotFound,
-  statusError,
+  sendRetrying,
   transportError,
 } from "./github.js";
 import { scrubControl } from "./progress.js";
@@ -76,15 +76,25 @@ export class GitHubGraphQLClient {
   /** @type {boolean} */
   #lowBudgetWarned = false;
 
+  /** @type {{ sleep?: (ms: number) => Promise<void>,
+   *    onWait?: (wait: import("./github.js").RateLimitWait | null) => void }} */
+  #retry;
+
   /**
    * @param {string} owner
    * @param {string} repo
    * @param {{ token?: string, timeout?: number, apiBase?: string,
-   *   warn?: (message: string) => void }} [options]
+   *   warn?: (message: string) => void, sleep?: (ms: number) => Promise<void>,
+   *   onRateLimitWait?: (wait: import("./github.js").RateLimitWait | null) => void }} [options]
    *   `timeout` is per-request, in seconds; `warn` defaults to stderr so a caller that
-   *   forgets it cannot swallow a spent point budget in silence.
+   *   forgets it cannot swallow a spent point budget in silence; `sleep` is the
+   *   rate-limit backoff's test seam and `onRateLimitWait` reports it
    */
-  constructor(owner, repo, { token, timeout = 30, apiBase = GITHUB_API_BASE, warn } = {}) {
+  constructor(
+    owner,
+    repo,
+    { token, timeout = 30, apiBase = GITHUB_API_BASE, warn, sleep, onRateLimitWait } = {},
+  ) {
     // GitHub's GraphQL endpoint answers anonymous requests 401, so a tokenless
     // client can only buy a wasted round-trip: refuse it here (CONTRACT.md).
     if (!token) {
@@ -95,6 +105,7 @@ export class GitHubGraphQLClient {
     this.owner = owner;
     this.repo = repo;
     this.timeout = timeout;
+    this.#retry = { sleep, onWait: onRateLimitWait };
     this.apiBase = apiBase.replace(/\/+$/, "");
     this.#warn = warn ?? ((message) => void process.stderr.write(message));
     this.#headers = {
@@ -120,22 +131,25 @@ export class GitHubGraphQLClient {
    * @returns {Promise<Record<string, any>>}
    */
   async query(operationName, query, variables, { enrichmentField, onEnrichmentRefused } = {}) {
-    let response;
-    try {
-      response = await fetch(`${this.apiBase}${GRAPHQL_PATH}`, {
-        method: "POST",
-        headers: this.#headers,
-        body: JSON.stringify({ operationName, query, variables }),
-        // A redirect target's envelope would be parsed as trusted GitHub data;
-        // the REST path confines its own hops for the same reason.
-        redirect: "error",
-        signal: AbortSignal.timeout(this.timeout * 1000),
-      });
-    } catch (err) {
-      throw transportError(err, this.timeout);
-    }
-    const failed = await statusError(response, { owner: this.owner, repo: this.repo });
-    if (failed) throw failed;
+    const response = await sendRetrying(
+      async () => {
+        try {
+          return await fetch(`${this.apiBase}${GRAPHQL_PATH}`, {
+            method: "POST",
+            headers: this.#headers,
+            body: JSON.stringify({ operationName, query, variables }),
+            // A redirect target's envelope would be parsed as trusted GitHub data;
+            // the REST path confines its own hops for the same reason.
+            redirect: "error",
+            signal: AbortSignal.timeout(this.timeout * 1000),
+          });
+        } catch (err) {
+          throw transportError(err, this.timeout);
+        }
+      },
+      { owner: this.owner, repo: this.repo },
+      this.#retry,
+    );
 
     /** @type {any} */
     let envelope;

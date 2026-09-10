@@ -84,17 +84,57 @@ function envelope(payload, status = 200, headers = {}) {
  * A client wired to `base`, with a recording warn sink.
  *
  * @param {string} base
- * @param {{ token?: string, owner?: string, repo?: string, timeout?: number }} [options]
+ * @param {{ token?: string, owner?: string, repo?: string, timeout?: number,
+ *   sleep?: (ms: number) => Promise<void>,
+ *   onRateLimitWait?: (wait: unknown) => void }} [options]
+ *   `sleep` defaults to a no-op so no test spends a real rate-limit backoff
  */
-function clientAt(base, { token = "ghp_secret", owner = "octocat", repo = "hello", timeout } = {}) {
+function clientAt(
+  base,
+  {
+    token = "ghp_secret",
+    owner = "octocat",
+    repo = "hello",
+    timeout,
+    sleep = async () => {},
+    onRateLimitWait,
+  } = {},
+) {
   const warned = capture();
   const client = new GitHubGraphQLClient(owner, repo, {
     apiBase: base,
     token,
     timeout,
+    sleep,
+    onRateLimitWait,
     warn: (message) => void warned.write(message),
   });
   return { client, warned };
+}
+
+/** Records the waits the client asked for, without spending them. */
+function recordSleep() {
+  /** @type {number[]} */
+  const waits = [];
+  return { waits, sleep: async (/** @type {number} */ ms) => void waits.push(ms) };
+}
+
+/**
+ * A GraphQL endpoint that refuses `refusals` POSTs with an HTTP status, then answers
+ * with `payload`. `state.requests` counts every POST that reached it.
+ *
+ * @param {number} refusals
+ * @param {{ status?: number, headers?: Record<string, string>, payload?: unknown }} [options]
+ */
+function refusingThen(refusals, { status = 429, headers = {}, payload = { data: {} } } = {}) {
+  const state = { requests: 0 };
+  /** @type {http.RequestListener} */
+  const handler = (_req, res) => {
+    state.requests += 1;
+    if (state.requests <= refusals) return json(res, status, { message: "slow down" }, headers);
+    json(res, 200, payload);
+  };
+  return { handler, state };
 }
 
 // --- the request -------------------------------------------------------------
@@ -761,6 +801,69 @@ test("an HTTP 403 with budget left and no retry-after stays a plain GitHubError"
       return true;
     });
   });
+});
+
+// --- the bounded rate-limit retry, shared with REST (story #259659) ----------
+
+test("a rate-limited POST is retried and costs exactly one request per attempt", async () => {
+  const { handler, state } = refusingThen(2, {
+    headers: { "retry-after": "1" },
+    payload: { data: { ok: true } },
+  });
+  const { waits, sleep } = recordSleep();
+  await withGitHub(handler, async (base) => {
+    assert.deepEqual(await clientAt(base, { sleep }).client.query("Op", QUERY, {}), { ok: true });
+  });
+  assert.equal(state.requests, 3, "two refusals plus the attempt that succeeded");
+  assert.deepEqual(waits, [1000, 1000]);
+});
+
+test("a GraphQL host that refuses every attempt fails after exactly four POSTs", async () => {
+  const { handler, state } = refusingThen(Number.POSITIVE_INFINITY, {
+    headers: { "retry-after": "1" },
+  });
+  const { waits, sleep } = recordSleep();
+  await withGitHub(handler, async (base) => {
+    await assert.rejects(clientAt(base, { sleep }).client.query("Op", QUERY, {}), RateLimitError);
+  });
+  assert.equal(state.requests, 4, "one initial attempt and three retries");
+  assert.deepEqual(waits, [1000, 1000, 1000]);
+});
+
+test("an envelope RATE_LIMITED is the point budget, not the secondary limit, so it is not retried", async () => {
+  // The hour-scale point budget: retrying it would hold a foreground command open
+  // until the window resets. github.rs classifies it after send_retrying returns Ok.
+  const { handler, seen } = envelope({ errors: [{ type: "RATE_LIMITED", message: "spent" }] });
+  const { waits, sleep } = recordSleep();
+  let requests = 0;
+  await withGitHub(
+    (req, res) => {
+      requests += 1;
+      handler(req, res);
+    },
+    async (base) => {
+      await assert.rejects(clientAt(base, { sleep }).client.query("Op", QUERY, {}), (err) => {
+        assert.ok(err instanceof RateLimitError);
+        assert.match(/** @type {Error} */ (err).message, /point budget/);
+        return true;
+      });
+    },
+  );
+  assert.equal(requests, 1, "an envelope-level refusal never re-sends");
+  assert.deepEqual(waits, []);
+  assert.equal(seen.method, "POST");
+});
+
+test("a GraphQL wait past two minutes fails on the first POST, without waiting", async () => {
+  const { handler, state } = refusingThen(Number.POSITIVE_INFINITY, {
+    headers: { "retry-after": "121" },
+  });
+  const { waits, sleep } = recordSleep();
+  await withGitHub(handler, async (base) => {
+    await assert.rejects(clientAt(base, { sleep }).client.query("Op", QUERY, {}), RateLimitError);
+  });
+  assert.equal(state.requests, 1);
+  assert.deepEqual(waits, []);
 });
 
 test("an HTTP 500 maps to GitHubError carrying status and body", async () => {
