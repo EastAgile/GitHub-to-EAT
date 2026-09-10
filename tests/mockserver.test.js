@@ -53,6 +53,26 @@ test("hasStories reflects the state", async () => {
   }
 });
 
+// The preflight warning exists for a project a previous import filled, and those rows are
+// exactly the ones the default list hides — so the probe has to lift the same filters.
+test("projectHasStories sees a project whose every row is hidden (#90824)", async () => {
+  const mock = await startMockServer(
+    makeState({
+      stories: {
+        91: [
+          { story_id: 1, title: "archived", archived_at: "2026-01-01T00:00:00Z" },
+          { story_id: 2, title: "frozen on a past iteration", iteration_id: 42, icebox: false },
+        ],
+      },
+    }),
+  );
+  try {
+    assert.equal(await new EATClient(mock.baseUrl, "ea_token").projectHasStories(91), true);
+  } finally {
+    await mock.close();
+  }
+});
+
 test("an empty project has no stories", async () => {
   const mock = await startMockServer();
   try {

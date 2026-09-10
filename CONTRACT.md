@@ -2131,8 +2131,12 @@ and both are prescanned, in union.
     cannot 400 an older deployment: `archived` / `archived_at` entered the
     server's `fields=` allowlist with archiving itself (#275), ten days before
     the visibility params above (#25174 / #25177) existed to hide anything.
-  - The flags ride on the prescan reads only. `listStoryPage` defaults them off,
-    so any other caller's query is unchanged.
+  - **Two call sites, one rule.** The prescan reads send the flags, and so does
+    the preflight probe behind the "project already has stories; import appends,
+    it does not replace" warning — a project a previous import filled is mostly
+    Done-panel rows, so a default-filtered probe reads it as empty and the
+    warning never prints, on both engines. `listStoryPage` still defaults the
+    flags off, so any other caller's query is unchanged.
 - **Provenance pair (primary)** — every story create carries
   `import_source: "github"` and `import_external_id: "{n}"` (the GitHub issue
   number as a string, or `release-<id>` for a release — the same keys the
