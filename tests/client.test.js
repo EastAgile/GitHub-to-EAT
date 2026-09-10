@@ -449,7 +449,7 @@ test("supportsProvenanceDedup false when the pair is absent or the spec 404s", a
   }
 });
 
-test("listStoryPage sends the provenance filters as query params", async () => {
+test("listStoryPage sends the provenance and visibility filters as query params", async () => {
   /** @type {URL | undefined} */
   let seen;
   await withServer(
@@ -462,11 +462,32 @@ test("listStoryPage sends the provenance filters as query params", async () => {
         importSource: "github",
         importExternalId: "42",
         fields: "story_id",
+        includeDone: true,
+        includeArchived: true,
       });
     },
   );
-  assert.equal(seen?.searchParams.get("import_source"), "github");
-  assert.equal(seen?.searchParams.get("import_external_id"), "42");
+  // The whole string, not per-key lookups: a dropped flag has to fail this test (#90824).
+  assert.equal(
+    seen?.search,
+    "?limit=200&fields=story_id&import_source=github&import_external_id=42" +
+      "&include_done=true&archived=include&include_archived=true",
+  );
+});
+
+test("listStoryPage omits the visibility filters unless the caller asks", async () => {
+  /** @type {URL | undefined} */
+  let seen;
+  await withServer(
+    (req, res) => {
+      seen = new URL(req.url ?? "/", "http://mock");
+      json(res, 200, { items: [], next_cursor: null });
+    },
+    async (base) => {
+      await new EATClient(base, "tok").listStoryPage(91, { fields: "story_id" });
+    },
+  );
+  assert.equal(seen?.search, "?limit=200&fields=story_id");
 });
 
 test("supportsBackdating degrades to false on an unparseable spec", async () => {

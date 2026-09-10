@@ -395,3 +395,22 @@ test("the prescans request labels only when asked, and both do it the same way",
     "story_id,import_external_id,tasks_count,blocker_count,comment_count,labels",
   ]);
 });
+
+test("both prescans ask the server for Done-panel and archived rows (#90824)", async () => {
+  /** @type {any[]} */
+  const opts = [];
+  /** @type {any} */
+  const client = {
+    listStoryPage: async (/** @type {number} */ _id, /** @type {any} */ o) => {
+      opts.push(o);
+      return { items: [], next_cursor: null };
+    },
+  };
+  await prescanImported(client, 91, "o", "r");
+  await prescanProvenance(client, 91);
+  assert.equal(opts.length, 2);
+  for (const o of opts) {
+    assert.equal(o.includeDone, true);
+    assert.equal(o.includeArchived, true);
+  }
+});

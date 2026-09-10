@@ -2083,6 +2083,27 @@ The direct engine's **primary** re-run key is the re-import provenance pair
 is the fallback for older servers and legacy marker-only rows. Both are written
 and both are prescanned, in union.
 
+- **The prescan must see every row, including the hidden ones.** `GET /stories`
+  hides two classes by default, and both prescan reads therefore send the
+  filters that lift them — `include_done=true`, plus `archived=include` **and**
+  `include_archived=true` together:
+  - **Done-panel rows** (EAT #25177) — a row frozen on a past iteration is
+    excluded unless `include_done=true`. This is the common case, not the edge
+    one: a closed GitHub issue imports as an `accepted` story carrying
+    `completed_at`, which lands it on a past iteration. Without the flag the
+    prescan cannot see most of what a normal import wrote, and the next run
+    duplicates it.
+  - **Archived rows** (EAT #25174) — excluded by a separate default. An
+    archived row still occupies its `(project, source, external_id)`, so the
+    same duplication applies to it.
+  - **Both archived spellings, deliberately.** `archived` is the tri-state
+    param (`exclude` | `include` | `only`); `include_archived` is a DEPRECATED
+    alias the server honours only when `archived` is absent. A current server
+    obeys `archived` and ignores the alias; a deployment older than #25174
+    obeys the alias and ignores the unknown `archived` param. Sending both is
+    correct on either, and neither can 400 the other.
+  - The flags ride on the prescan reads only. `listStoryPage` defaults them off,
+    so any other caller's query is unchanged.
 - **Provenance pair (primary)** — every story create carries
   `import_source: "github"` and `import_external_id: "{n}"` (the GitHub issue
   number as a string, or `release-<id>` for a release — the same keys the

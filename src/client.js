@@ -458,21 +458,39 @@ export class EATClient {
    * Fetch one cursor page of a project's stories (direct-engine prescan).
    * `limit`/`cursor` drive cursor mode; `fields` is the sparse-fieldset allowlist.
    * `importSource`/`importExternalId` are the provenance list filters (EAT #31427).
+   * `includeDone`/`includeArchived` lift the two default visibility filters (EAT #25177,
+   * #25174); both default off, so a caller that does not ask keeps the old query.
    *
    * @param {number} projectId
    * @param {{ limit?: number, cursor?: string, fields?: string,
-   *   importSource?: string, importExternalId?: string }} [options]
+   *   importSource?: string, importExternalId?: string,
+   *   includeDone?: boolean, includeArchived?: boolean }} [options]
    * @returns {Promise<{ items: any[], next_cursor: string | null }>}
    */
   async listStoryPage(
     projectId,
-    { limit = 200, cursor, fields, importSource, importExternalId } = {},
+    {
+      limit = 200,
+      cursor,
+      fields,
+      importSource,
+      importExternalId,
+      includeDone = false,
+      includeArchived = false,
+    } = {},
   ) {
     const params = new URLSearchParams({ limit: String(limit) });
     if (cursor) params.set("cursor", cursor);
     if (fields) params.set("fields", fields);
     if (importSource !== undefined) params.set("import_source", importSource);
     if (importExternalId !== undefined) params.set("import_external_id", importExternalId);
+    if (includeDone) params.set("include_done", "true");
+    // Both spellings on purpose: a current server obeys `archived` and ignores the
+    // deprecated alias, an older one obeys the alias and ignores the unknown param.
+    if (includeArchived) {
+      params.set("archived", "include");
+      params.set("include_archived", "true");
+    }
     const response = await this.#request("GET", `/projects/${projectId}/stories?${params}`);
     return parsedBody(response, `GET /projects/${projectId}/stories`);
   }
