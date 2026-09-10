@@ -583,10 +583,8 @@ test("divergence: the CLI clamps a blocker in bytes where both server ends take 
   assert.ok(desc.startsWith(clamped), "a prefix of what either server end would write");
 });
 
-/**
- * `blockers.rs::create` ported (agile-tracker `a774ed013`): the public create numbers each
- * row `COALESCE(MAX(blocker_display_order), -1) + 1` per story, so posting order is the order.
- */
+/** `blockers.rs::create` ported (agile-tracker `a774ed013`): the create numbers each row
+ * `COALESCE(MAX(blocker_display_order), -1) + 1`, so posting order becomes display order. */
 const serverAssignedOrder = (/** @type {any[]} */ stored) =>
   stored.reduce((max, row) => Math.max(max, row.blocker_display_order), -1) + 1;
 
