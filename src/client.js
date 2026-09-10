@@ -100,6 +100,24 @@ async function parsedBody(response, what) {
   }
 }
 
+/**
+ * Lift the two visibility filters `GET /stories` applies by default (EAT #25177, #25174).
+ * Both archived spellings on purpose: a current server obeys `archived` and ignores the
+ * deprecated alias, a deployment older than #25174 obeys the alias and ignores the unknown
+ * param. One helper so the two call sites — the prescan reads and the preflight probe —
+ * cannot drift apart.
+ *
+ * @param {URLSearchParams} params
+ * @param {{ done?: boolean, archived?: boolean }} [which] both default on
+ */
+function admitHiddenStories(params, { done = true, archived = true } = {}) {
+  if (done) params.set("include_done", "true");
+  if (archived) {
+    params.set("archived", "include");
+    params.set("include_archived", "true");
+  }
+}
+
 /** Thin client for the subset of EAT endpoints this tool uses. */
 export class EATClient {
   /** @type {Record<string, string>} */
@@ -218,11 +236,16 @@ export class EATClient {
   /**
    * Return true if the project already contains at least one story.
    *
+   * Lifts the same two visibility filters the prescan does: a project a previous GitHub
+   * import filled is mostly Done-panel rows, which the default list hides (#90824).
+   *
    * @param {number} projectId
    * @returns {Promise<boolean>}
    */
   async projectHasStories(projectId) {
-    const response = await this.#request("GET", `/projects/${projectId}/stories?limit=1`);
+    const params = new URLSearchParams({ limit: "1" });
+    admitHiddenStories(params);
+    const response = await this.#request("GET", `/projects/${projectId}/stories?${params}`);
     const data = await response.json();
     // With ?limit, EAT returns a cursor page {"items": [...], "next_cursor": ...};
     // a bare array (no query) is also tolerated.
@@ -458,21 +481,33 @@ export class EATClient {
    * Fetch one cursor page of a project's stories (direct-engine prescan).
    * `limit`/`cursor` drive cursor mode; `fields` is the sparse-fieldset allowlist.
    * `importSource`/`importExternalId` are the provenance list filters (EAT #31427).
+   * `includeDone`/`includeArchived` lift the two default visibility filters (EAT #25177,
+   * #25174); both default off, so a caller that does not ask keeps the old query.
    *
    * @param {number} projectId
    * @param {{ limit?: number, cursor?: string, fields?: string,
-   *   importSource?: string, importExternalId?: string }} [options]
+   *   importSource?: string, importExternalId?: string,
+   *   includeDone?: boolean, includeArchived?: boolean }} [options]
    * @returns {Promise<{ items: any[], next_cursor: string | null }>}
    */
   async listStoryPage(
     projectId,
-    { limit = 200, cursor, fields, importSource, importExternalId } = {},
+    {
+      limit = 200,
+      cursor,
+      fields,
+      importSource,
+      importExternalId,
+      includeDone = false,
+      includeArchived = false,
+    } = {},
   ) {
     const params = new URLSearchParams({ limit: String(limit) });
     if (cursor) params.set("cursor", cursor);
     if (fields) params.set("fields", fields);
     if (importSource !== undefined) params.set("import_source", importSource);
     if (importExternalId !== undefined) params.set("import_external_id", importExternalId);
+    admitHiddenStories(params, { done: includeDone, archived: includeArchived });
     const response = await this.#request("GET", `/projects/${projectId}/stories?${params}`);
     return parsedBody(response, `GET /projects/${projectId}/stories`);
   }

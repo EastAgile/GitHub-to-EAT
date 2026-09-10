@@ -83,9 +83,14 @@ test("prescanImported walks every cursor page and keeps the matched rows", () =>
     assert.deepEqual([...imported.keys()].sort(), ["3", "7"]);
     assert.equal(imported.get("3").tasks_count, 2);
     assert.equal(calls.length, 2);
-    assert.equal(calls[0].fields, "story_id,description,tasks_count,blocker_count,comment_count");
+    assert.equal(
+      calls[0].fields,
+      "story_id,description,tasks_count,blocker_count,comment_count,archived",
+    );
     assert.equal(calls[0].limit, 1);
     assert.equal(calls[1].cursor, "1");
+    // Visibility has to ride every page: set on the first request only, a re-run still duplicates.
+    assert.deepEqual({ ...calls[1], cursor: undefined }, { ...calls[0], cursor: undefined });
   });
 });
 
@@ -115,9 +120,11 @@ test("prescanProvenance filters by import_source and keys off import_external_id
     assert.equal(calls[0].importSource, "github");
     assert.equal(
       calls[0].fields,
-      "story_id,import_external_id,tasks_count,blocker_count,comment_count",
+      "story_id,import_external_id,tasks_count,blocker_count,comment_count,archived",
     );
     assert.equal(calls[1].cursor, "1");
+    // Visibility has to ride every page: set on the first request only, a re-run still duplicates.
+    assert.deepEqual({ ...calls[1], cursor: undefined }, { ...calls[0], cursor: undefined });
   });
 });
 
@@ -389,9 +396,32 @@ test("the prescans request labels only when asked, and both do it the same way",
   await prescanProvenance(client, 91);
   await prescanProvenance(client, 91, "github", { withLabels: true });
   assert.deepEqual(fields, [
-    "story_id,description,tasks_count,blocker_count,comment_count",
-    "story_id,description,tasks_count,blocker_count,comment_count,labels",
-    "story_id,import_external_id,tasks_count,blocker_count,comment_count",
-    "story_id,import_external_id,tasks_count,blocker_count,comment_count,labels",
+    "story_id,description,tasks_count,blocker_count,comment_count,archived",
+    "story_id,description,tasks_count,blocker_count,comment_count,archived,labels",
+    "story_id,import_external_id,tasks_count,blocker_count,comment_count,archived",
+    "story_id,import_external_id,tasks_count,blocker_count,comment_count,archived,labels",
   ]);
+});
+
+test("both prescans ask the server for Done-panel and archived rows (#90824)", async () => {
+  /** @type {any[]} */
+  const opts = [];
+  /** @type {any} */
+  const client = {
+    listStoryPage: async (/** @type {number} */ _id, /** @type {any} */ o) => {
+      opts.push(o);
+      return { items: [], next_cursor: null };
+    },
+  };
+  await prescanImported(client, 91, "o", "r");
+  await prescanProvenance(client, 91);
+  assert.equal(opts.length, 2);
+  // The whole visibility set, not a subset: CONTRACT says these two classes are the only
+  // ones a query param lifts, so a third flag has to fail here and send the reader back.
+  for (const o of opts) {
+    const visibility = Object.fromEntries(
+      Object.entries(o).filter(([key]) => key.startsWith("include") || key === "archived"),
+    );
+    assert.deepEqual(visibility, { includeDone: true, includeArchived: true });
+  }
 });

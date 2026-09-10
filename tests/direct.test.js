@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { AuthError, EATClient, EATError } from "../src/client.js";
-import { markerFor } from "../src/dedup.js";
+import { markerExternalId, markerFor } from "../src/dedup.js";
 import { runDirect } from "../src/direct.js";
 import { DEFAULT_CUSTOMIZATION, FALLBACK_LIMITS } from "../src/mapping.js";
 import { makeState, startMockServer } from "../src/mockserver.js";
@@ -331,6 +331,238 @@ test("a server-style provenance row (pair, no marker) is skipped and counted (AC
     const rows = mock.state.stories[91];
     assert.equal(rows.length, 2);
     assert.ok(rows.some((r) => r.title === "older closed issue"));
+  } finally {
+    await mock.close();
+  }
+});
+
+// A closed issue imports as an accepted story carrying completed_at, which lands it on a
+// past iteration — the Done panel the default story list hides (#90824).
+const donePanel = { iteration_id: 42, icebox: false };
+
+test("a Done-panel row is found by the marker prescan, not re-imported (#90824)", async () => {
+  const state = makeState({
+    provenance: false,
+    stories: {
+      91: [
+        {
+          story_id: 100,
+          title: "older closed issue",
+          description: `steps\n\n${markerFor("o", "r", "3")}`,
+          ...donePanel,
+          tasks_count: 1,
+          comment_count: 1,
+        },
+      ],
+    },
+  });
+  const mock = await startMockServer(state);
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    });
+    assert.equal(result.skipped, 1);
+    assert.equal(result.importedStories, 1);
+    const rows = mock.state.stories[91];
+    assert.equal(rows.length, 2);
+    assert.equal(
+      rows.filter((r) => markerExternalId(r.description, "o", "r") === "3").length,
+      1,
+      "the hidden row was re-created",
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a Done-panel row is found by the provenance prescan, not re-imported (#90824)", async () => {
+  const state = makeState({
+    stories: {
+      91: [
+        {
+          story_id: 200,
+          title: "older closed issue",
+          description: null,
+          import_source: "github",
+          import_external_id: "3",
+          ...donePanel,
+          tasks_count: 1,
+          comment_count: 1,
+        },
+      ],
+    },
+  });
+  const mock = await startMockServer(state);
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    });
+    assert.equal(result.skipped, 1);
+    assert.equal(result.importedStories, 1);
+    const rows = mock.state.stories[91];
+    assert.equal(rows.length, 2);
+    assert.equal(
+      rows.filter((r) => r.import_external_id === "3").length,
+      1,
+      "the hidden row was re-created",
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("an archived row is found by either prescan, not re-imported (#90824)", async () => {
+  // The server importer's dedup preload does not filter archived rows, so skipping them
+  // is parity — one marker-only row, one pair-only row, both archived.
+  const archived = { archived_at: "2026-01-01T00:00:00Z" };
+  const state = makeState({
+    stories: {
+      91: [
+        {
+          story_id: 300,
+          title: "older closed issue",
+          description: `steps\n\n${markerFor("o", "r", "3")}`,
+          ...archived,
+          tasks_count: 1,
+          comment_count: 1,
+        },
+        {
+          story_id: 301,
+          title: "newer open issue",
+          description: null,
+          import_source: "github",
+          import_external_id: "7",
+          ...archived,
+          tasks_count: 0,
+          comment_count: 0,
+        },
+      ],
+    },
+  });
+  const mock = await startMockServer(state);
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    });
+    // skipped: 2 is the attempt shape — both issues were planned, then both dropped.
+    assert.equal(result.skipped, 2);
+    assert.equal(result.importedStories, 0);
+    assert.equal(mock.state.stories[91].length, 2);
+  } finally {
+    await mock.close();
+  }
+});
+
+// The tri-state off is a deployment older than #25174: it drops `archived` as an unknown
+// param, so only the deprecated alias can admit the rows. Proves the alias by effect.
+test("on a pre-#25174 server the deprecated alias carries the archived prescan (#90824)", async () => {
+  const archived = { archived_at: "2026-01-01T00:00:00Z" };
+  const state = makeState({
+    archivedTriState: false,
+    stories: {
+      91: [
+        {
+          story_id: 300,
+          title: "older closed issue",
+          description: `steps\n\n${markerFor("o", "r", "3")}`,
+          ...archived,
+          tasks_count: 1,
+          comment_count: 1,
+        },
+        {
+          story_id: 301,
+          title: "newer open issue",
+          description: null,
+          import_source: "github",
+          import_external_id: "7",
+          ...archived,
+          tasks_count: 0,
+          comment_count: 0,
+        },
+      ],
+    },
+  });
+  const mock = await startMockServer(state);
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    });
+    assert.equal(result.skipped, 2);
+    assert.equal(result.importedStories, 0);
+    assert.equal(mock.state.stories[91].length, 2);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("an archived skip is named on stderr, not folded into `skipped N` (#90824)", async () => {
+  const state = makeState({
+    stories: {
+      91: [
+        {
+          story_id: 300,
+          title: "older closed issue",
+          description: `steps\n\n${markerFor("o", "r", "3")}`,
+          archived_at: "2026-01-01T00:00:00Z",
+          tasks_count: 1,
+          comment_count: 1,
+        },
+        {
+          story_id: 301,
+          title: "newer open issue",
+          description: null,
+          import_source: "github",
+          import_external_id: "7",
+          tasks_count: 0,
+          comment_count: 0,
+        },
+      ],
+    },
+  });
+  const mock = await startMockServer(state);
+  const stream = capture();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream,
+      github: { fetchAll: async () => fetchedRepo() },
+    });
+    assert.equal(result.skipped, 2);
+    // 1 of 2, not 2 of 2: the live skip is a normal one and must not be counted.
+    assert.match(stream.buf, /warning: 1 of the 2 skipped issue\(s\) matched a story archived/);
+    assert.match(stream.buf, /Unarchive/);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a skip with no archived row warns about nothing (#90824)", async () => {
+  const mock = await startMockServer();
+  const stream = capture();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const options = {
+      included: ["issues"],
+      stream,
+      github: { fetchAll: async () => fetchedRepo() },
+    };
+    await runDirect(client, 91, "o", "r", options);
+    const rerun = await runDirect(client, 91, "o", "r", options);
+    assert.equal(rerun.skipped, 2);
+    assert.equal(/archived/.test(stream.buf), false);
   } finally {
     await mock.close();
   }

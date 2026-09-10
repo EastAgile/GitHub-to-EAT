@@ -67,6 +67,10 @@ import { DONE_STATES, STARTED_STATES } from "./mapping.js";
  *   the re-import pair on POST /stories, create validates + persists it, and
  *   GET /stories honours the `import_source`/`import_external_id` list filters
  *   (EAT #31427); false simulates an older server that ignores the pair
+ * @property {boolean} archivedTriState when true (default), GET /stories honours the
+ *   `archived` tri-state and lets it win over `include_archived` (EAT #25174); false
+ *   simulates a deployment older than #25174, where `archived` is an unknown param —
+ *   ignored, never validated — and only the deprecated alias admits archived rows
  * @property {boolean} backdating when true (default, mirroring prod), the
  *   openapi advertises `created_at`/`completed_at` on story creates and
  *   `created_at` on comment creates, and the handlers persist them; false
@@ -145,6 +149,7 @@ export function makeState(overrides = {}) {
     externalMembers: {},
     serverDryRun: true,
     provenance: true,
+    archivedTriState: true,
     backdating: true,
     startedBackdating: true,
     people: true,
@@ -193,6 +198,9 @@ const STORY_FIELDS = new Set([
   "tasks_complete_count",
   "tasks",
   "blockers",
+  "iteration_id",
+  "archived",
+  "archived_at",
   "import_source",
   "import_external_id",
 ]);
@@ -548,7 +556,9 @@ async function handle(state, req, res) {
       const [includeArchived, includeDone] = flags;
       // Story #275/#25174 — archived rows are excluded by default; the tri-state
       // `archived` wins, and the legacy `include_archived=true` aliases `include`.
-      const archivedParam = url.searchParams.get("archived");
+      // Pre-#25174 the param does not exist, so it is neither validated nor obeyed —
+      // `StoryFilter` has no deny_unknown_fields, so serde drops it silently.
+      const archivedParam = state.archivedTriState ? url.searchParams.get("archived") : null;
       if (archivedParam !== null && !["exclude", "include", "only"].includes(archivedParam)) {
         send(res, 400, {
           code: "validation_failed",
@@ -729,6 +739,9 @@ const NOT_FOUND = { status: 404, payload: { error: "not found" } };
 const LABEL_DEFAULT_BACKGROUND = "#3498db";
 const LABEL_DEFAULT_TEXT = "#ffffff";
 
+/** Stands in for the past window a backdated completion lands on — this mock has no calendar. */
+const DONE_PANEL_ITERATION_ID = 42;
+
 /**
  * `comments` / `people` / `links` on a story row are bookkeeping for tests — the real
  * read shape carries none of them (they aren't in the fields= allowlist either).
@@ -739,7 +752,8 @@ const LABEL_DEFAULT_TEXT = "#ffffff";
 function toStoryPayload(row) {
   const { comments, people, links, ...payload } = row;
   // The read row publishes the title under both spellings, and both are in STORY_FIELDS.
-  return { ...payload, name: payload.title };
+  // `archived` is derived, never stored — the server projects `archived_at IS NOT NULL`.
+  return { ...payload, name: payload.title, archived: payload.archived_at != null };
 }
 
 /**
@@ -1092,6 +1106,9 @@ function createStory(state, projectId, body) {
     if (body.completed_at != null) {
       story.completed_at =
         body.completed_at < body.created_at ? body.created_at : body.completed_at;
+      // The server places a forward create on the window holding its completion — a PAST
+      // iteration, which the default story list then hides (#25177). Icebox opts out there too.
+      if (!story.icebox) story.iteration_id = DONE_PANEL_ITERATION_ID;
     }
   }
   if (startedBackdatingOn(state) && body.started_at != null) {

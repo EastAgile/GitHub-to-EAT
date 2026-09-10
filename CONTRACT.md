@@ -193,8 +193,9 @@ built on the mock is not misread as proof about the server:
 - Having no iteration calendar, its `include_done` filter stands in for "frozen on
   a past iteration" with "carries any `iteration_id`", so it hides
   current-iteration rows the real server returns.
-- Its read row omits `archived` / `archived_at`, which the real list and detail
-  paths always project. The mock also has no route that archives a story.
+- Its read row derives `archived` from a seeded `archived_at`, the way the real
+  list and detail paths project `archived_at IS NOT NULL`. The mock has no route
+  that archives a story, so a test seeds `archived_at` on the state row itself.
 - Validation **order** differs: the mock checks `archived` before `fields=`,
   `limit` and `cursor`, where the real handler validates those three first and
   `archived` last. Only a request carrying two invalid params can tell, and it
@@ -202,10 +203,11 @@ built on the mock is not misread as proof about the server:
 - A non-numeric `limit` is an extractor rejection on the server (empty
   `details.fields`), where the mock answers `details.fields=["limit"]`; only
   `limit=0` and `limit>200` reach the real handler and legitimately name it.
-- The mock's `fields=` allowlist mirrors the published `openapi.json` list, which
-  omits `archived` / `archived_at` / `iteration_id` that the server's own
-  `STORY_FIELDS` accepts — so `fields=archived` 400s on the mock and 200s on the
-  server.
+- The mock's `fields=` allowlist mirrors the published `openapi.json` list. It
+  carries `archived` / `archived_at` / `iteration_id`, which the server's
+  `STORY_FIELDS` has accepted since story #275 and its `openapi.json` has
+  published since 2026-08-04. It is still a subset: names no CLI path reads are
+  left out, so `fields=current_panel` 400s on the mock and 200s on the server.
 
 ### GitHub identity mapping (both engines)
 
@@ -2083,6 +2085,68 @@ The direct engine's **primary** re-run key is the re-import provenance pair
 is the fallback for older servers and legacy marker-only rows. Both are written
 and both are prescanned, in union.
 
+- **The prescan must see every row the list can still return.** `GET /stories`
+  hides two classes that a query param lifts, and both prescan reads therefore
+  send the filters that lift them — `include_done=true`, plus `archived=include`
+  **and** `include_archived=true` together. Those two are the whole opt-in set;
+  a third hidden class has no opt-in at all, and is named below:
+  - **Done-panel rows** (EAT #25177) — a row frozen on a past iteration is
+    excluded unless `include_done=true`. This is the common case, not the edge
+    one: a closed GitHub issue imports as an `accepted` story carrying
+    `completed_at`, which lands it on a past iteration. Without the flag the
+    prescan cannot see most of what a normal import wrote, and the next run
+    duplicates it.
+  - **Archived rows** (EAT #25174) — excluded by a separate default. Reading
+    them back is what puts the two engines in step, not a preference: the
+    server-side importer's own dedup preload is
+    `SELECT import_external_id FROM story WHERE project_id = $1 AND
+    import_source = $2 AND import_external_id IS NOT NULL`
+    (`services/import/writer.rs`) — no archived, Done-panel or `expired`
+    predicate — so a server import already skips an archived row, and the
+    direct engine was the engine out of step. Nothing downstream would catch
+    the duplicate either: `story_import_provenance_idx` is deliberately NOT
+    unique, so a second row can hold the same `(project, source, external_id)`.
+  - **Soft-deleted (`expired`) rows — no opt-in.** The list query pins
+    `AND s.expired IS NULL` unconditionally (`handlers/stories.rs`, the story
+    list `WHERE` clause), and publishes no param that lifts it. A prescan
+    therefore never sees one, and that is the intended outcome: a row the
+    member deleted is a row the next run may legitimately re-create. The class
+    is dormant today — the story delete path hard-deletes, so nothing in
+    today's backend sets `story.expired` — so this is a boundary, not a live
+    divergence.
+  - **Both archived spellings, deliberately.** `archived` is the tri-state
+    param (`exclude` | `include` | `only`); `include_archived` is a DEPRECATED
+    alias the server honours only when `archived` is absent. A current server
+    obeys `archived` and ignores the alias; a deployment older than #25174
+    obeys the alias and ignores the unknown `archived` param. Sending both is
+    correct on either, and neither can 400 the other. `include_done` needs no
+    such argument: one commit added the Done-panel exclusion and the flag that
+    lifts it, so a deployment that does not know the flag does not hide the rows
+    either. The alias is pinned by effect, not only by a query-string
+    assertion: the mock's `archivedTriState: false` state models a deployment
+    older than #25174 — `archived` is an unknown param there, neither validated
+    nor obeyed — and one archived prescan regression runs against it.
+  - **An archived skip is named, not silent.** Both prescan fieldsets carry
+    `archived`, and a run that skips an issue whose story is archived prints one
+    warning counting those skips and naming the remedy (unarchive the story, or
+    delete it and re-run). Without it an archived skip folds into `skipped N`
+    while no story appears on the board, which reads as a lost issue. The field
+    cannot 400 an older deployment: `archived` / `archived_at` entered the
+    server's `fields=` allowlist with archiving itself (#275), ten days before
+    the visibility params above (#25174 / #25177) existed to hide anything.
+  - **The cost, so a later report does not read as a regression.** Lifting the
+    filters widens both walks. The provenance pass stays bounded — it also
+    sends `import_source=github`, so it pages only imported rows. The marker
+    pass cannot narrow that way, so it now pages the project's whole history,
+    Done panel and archived rows included, and its request count grows with
+    total history rather than with imported rows. Correctness needs the walk:
+    a row it does not see is a row the next run duplicates.
+  - **Two call sites, one rule.** The prescan reads send the flags, and so does
+    the preflight probe behind the "project already has stories; import appends,
+    it does not replace" warning — a project a previous import filled is mostly
+    Done-panel rows, so a default-filtered probe reads it as empty and the
+    warning never prints, on both engines. `listStoryPage` still defaults the
+    flags off, so any other caller's query is unchanged.
 - **Provenance pair (primary)** — every story create carries
   `import_source: "github"` and `import_external_id: "{n}"` (the GitHub issue
   number as a string, or `release-<id>` for a release — the same keys the
@@ -2092,8 +2156,9 @@ and both are prescanned, in union.
   `GET /openapi.json` (the `import_source` property on the project-scoped
   `POST …/stories` schema); on a server that advertises it the prescan reads
   provenance back via the `GET /stories?import_source=github` list filter
-  (`fields=story_id,import_external_id,tasks_count,comment_count`, plus `labels`
-  under `--include …,milestones`, which is the only rule that reads them). Because the
+  (`fields=story_id,import_external_id,tasks_count,blocker_count,comment_count,archived`,
+  plus `labels` under `--include …,milestones`, which is the only rule that reads
+  them). Because the
   server-side importer writes the same pair, cross-engine dedup is now
   **symmetric**: a direct-written story is skipped by a later server import and
   vice versa.

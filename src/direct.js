@@ -570,6 +570,20 @@ export async function runDirect(client, projectId, owner, repo, options) {
   // Only when links ride at all: otherwise the pre-legend warning already said they don't.
   if (sendLinks) warnLinksPruned(mapped, plan, included, stream);
 
+  // EAT hides archived rows from its default views, so the story behind this skip is one
+  // the user cannot find — a silent `skipped N` reads as a lost issue instead.
+  const archivedSkips = mapped.stories.filter(
+    (op) => imported.get(op.external_id)?.archived === true,
+  ).length;
+  if (archivedSkips) {
+    stream?.write(
+      `warning: ${archivedSkips} of the ${skipped} skipped issue(s) matched a story archived ` +
+        "in EAT — an archived story still counts as imported, so the issue stays skipped and " +
+        "no story appears on the board. Unarchive that story in EAT, or delete it, then " +
+        "re-run to bring the issue back.\n",
+    );
+  }
+
   // The marker lands at story-create, before tasks/blockers/comments — a run that
   // died in that window left a skipped-but-incomplete story. Surface it, loudly.
   for (const op of mapped.stories) {

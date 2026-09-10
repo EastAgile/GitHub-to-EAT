@@ -32,6 +32,19 @@ async function withServer(handler, fn) {
 }
 
 /**
+ * Every query pair, sorted. The whole set, so a dropped param still fails the assertion;
+ * sorted, so it does not also pin the order of the `params.set` calls that built it.
+ *
+ * @param {URL | undefined} url
+ * @returns {[string, string][]}
+ */
+function sortedPairs(url) {
+  return [...(url?.searchParams ?? [])].sort(
+    (a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]),
+  );
+}
+
+/**
  * @param {http.ServerResponse} res
  * @param {number} code
  * @param {unknown} payload
@@ -127,16 +140,27 @@ test("unreachable host raises EATError", async () => {
   await assert.rejects(client.getMeta(), EATError);
 });
 
-test("projectHasStories true on a bare list", async () => {
+test("projectHasStories true on a bare list, probed past both hidden classes", async () => {
+  /** @type {URL | undefined} */
+  let seen;
   await withServer(
     (req, res) => {
-      assert.equal(req.url, "/api/v1/projects/91/stories?limit=1");
+      seen = new URL(req.url ?? "/", "http://mock");
       json(res, 200, [{ id: 1 }]);
     },
     async (base) => {
       assert.equal(await new EATClient(base, "tok").projectHasStories(91), true);
     },
   );
+  assert.equal(seen?.pathname, "/api/v1/projects/91/stories");
+  // The whole query, so a dropped flag fails here too — the probe reads the same rows
+  // the prescan does, or the "already has stories" warning goes missing (#90824).
+  assert.deepEqual(sortedPairs(seen), [
+    ["archived", "include"],
+    ["include_archived", "true"],
+    ["include_done", "true"],
+    ["limit", "1"],
+  ]);
 });
 
 test("projectHasStories false on an empty list", async () => {
@@ -449,7 +473,7 @@ test("supportsProvenanceDedup false when the pair is absent or the spec 404s", a
   }
 });
 
-test("listStoryPage sends the provenance filters as query params", async () => {
+test("listStoryPage sends the provenance and visibility filters as query params", async () => {
   /** @type {URL | undefined} */
   let seen;
   await withServer(
@@ -462,11 +486,40 @@ test("listStoryPage sends the provenance filters as query params", async () => {
         importSource: "github",
         importExternalId: "42",
         fields: "story_id",
+        includeDone: true,
+        includeArchived: true,
       });
     },
   );
-  assert.equal(seen?.searchParams.get("import_source"), "github");
-  assert.equal(seen?.searchParams.get("import_external_id"), "42");
+  // The whole set, not per-key lookups: a dropped flag has to fail this test (#90824).
+  // Sorted, so it does not also pin the order the params were set in.
+  assert.deepEqual(sortedPairs(seen), [
+    ["archived", "include"],
+    ["fields", "story_id"],
+    ["import_external_id", "42"],
+    ["import_source", "github"],
+    ["include_archived", "true"],
+    ["include_done", "true"],
+    ["limit", "200"],
+  ]);
+});
+
+test("listStoryPage omits the visibility filters unless the caller asks", async () => {
+  /** @type {URL | undefined} */
+  let seen;
+  await withServer(
+    (req, res) => {
+      seen = new URL(req.url ?? "/", "http://mock");
+      json(res, 200, { items: [], next_cursor: null });
+    },
+    async (base) => {
+      await new EATClient(base, "tok").listStoryPage(91, { fields: "story_id" });
+    },
+  );
+  assert.deepEqual(sortedPairs(seen), [
+    ["fields", "story_id"],
+    ["limit", "200"],
+  ]);
 });
 
 test("supportsBackdating degrades to false on an unparseable spec", async () => {

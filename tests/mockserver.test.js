@@ -53,6 +53,26 @@ test("hasStories reflects the state", async () => {
   }
 });
 
+// The preflight warning exists for a project a previous import filled, and those rows are
+// exactly the ones the default list hides — so the probe has to lift the same filters.
+test("projectHasStories sees a project whose every row is hidden (#90824)", async () => {
+  const mock = await startMockServer(
+    makeState({
+      stories: {
+        91: [
+          { story_id: 1, title: "archived", archived_at: "2026-01-01T00:00:00Z" },
+          { story_id: 2, title: "frozen on a past iteration", iteration_id: 42, icebox: false },
+        ],
+      },
+    }),
+  );
+  try {
+    assert.equal(await new EATClient(mock.baseUrl, "ea_token").projectHasStories(91), true);
+  } finally {
+    await mock.close();
+  }
+});
+
 test("an empty project has no stories", async () => {
   const mock = await startMockServer();
   try {
@@ -1318,6 +1338,30 @@ test("archived stories are hidden by default and admitted by include_archived", 
     assert.deepEqual(await titles("archived=include"), ["live", "filed"]);
     assert.deepEqual(await titles("archived=only"), ["filed"]);
     assert.deepEqual(await titles("archived=exclude"), ["live"]);
+  } finally {
+    await mock.close();
+  }
+});
+
+// The server allowlisted all three in #275 / earlier, ten days BEFORE the visibility
+// params (#25174/#25177) shipped, so no deployment that hides a row refuses the fieldset.
+test("archived / archived_at / iteration_id are allowlisted, and archived is computed", async () => {
+  const mock = await startMockServer();
+  try {
+    for (const name of ["live", "filed"]) {
+      await post(mock.baseUrl, "/projects/91/stories", { name });
+    }
+    mock.state.stories[91][1].archived_at = "2026-07-01T00:00:00Z";
+    const response = await fetch(
+      `${mock.baseUrl}/projects/91/stories?archived=include&fields=archived,archived_at,iteration_id`,
+      { headers: { "X-TrackerToken": "ea_token" } },
+    );
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), [
+      { story_id: 1, archived: false },
+      { story_id: 2, archived: true, archived_at: "2026-07-01T00:00:00Z" },
+    ]);
   } finally {
     await mock.close();
   }

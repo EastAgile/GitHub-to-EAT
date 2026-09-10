@@ -68,9 +68,14 @@ export function markerExternalId(description, owner, repo) {
  *
  * @typedef {object} PrescanClient
  * @property {(projectId: number, opts: { limit?: number, cursor?: string,
- *   fields?: string, importSource?: string, importExternalId?: string })
+ *   fields?: string, importSource?: string, importExternalId?: string,
+ *   includeDone?: boolean, includeArchived?: boolean })
  *   => Promise<{ items: any[], next_cursor: string | null }>} listStoryPage
  */
+
+// A closed issue imports as an accepted story on a past iteration — the Done panel the
+// default list hides — and an archived row still holds its (project, source, external_id).
+const PRESCAN_VISIBILITY = { includeDone: true, includeArchived: true };
 
 /**
  * Every label name on one already-imported story row, keyed the way epics are. Both
@@ -119,7 +124,8 @@ export async function prescanImported(
     const page = await client.listStoryPage(projectId, {
       limit: pageSize,
       ...(cursor ? { cursor } : {}),
-      fields: `story_id,description,tasks_count,blocker_count,comment_count${labels}`,
+      fields: `story_id,description,tasks_count,blocker_count,comment_count,archived${labels}`,
+      ...PRESCAN_VISIBILITY,
     });
     for (const row of page.items ?? []) {
       const id = markerExternalId(row.description, owner, repo);
@@ -159,7 +165,8 @@ export async function prescanProvenance(
       importSource: source,
       limit: pageSize,
       ...(cursor ? { cursor } : {}),
-      fields: `story_id,import_external_id,tasks_count,blocker_count,comment_count${labels}`,
+      fields: `story_id,import_external_id,tasks_count,blocker_count,comment_count,archived${labels}`,
+      ...PRESCAN_VISIBILITY,
     });
     for (const row of page.items ?? []) {
       const id = row.import_external_id;
