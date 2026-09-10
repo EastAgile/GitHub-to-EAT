@@ -2083,19 +2083,35 @@ The direct engine's **primary** re-run key is the re-import provenance pair
 is the fallback for older servers and legacy marker-only rows. Both are written
 and both are prescanned, in union.
 
-- **The prescan must see every row, including the hidden ones.** `GET /stories`
-  hides two classes by default, and both prescan reads therefore send the
-  filters that lift them — `include_done=true`, plus `archived=include` **and**
-  `include_archived=true` together:
+- **The prescan must see every row the list can still return.** `GET /stories`
+  hides two classes that a query param lifts, and both prescan reads therefore
+  send the filters that lift them — `include_done=true`, plus `archived=include`
+  **and** `include_archived=true` together. Those two are the whole opt-in set;
+  a third hidden class has no opt-in at all, and is named below:
   - **Done-panel rows** (EAT #25177) — a row frozen on a past iteration is
     excluded unless `include_done=true`. This is the common case, not the edge
     one: a closed GitHub issue imports as an `accepted` story carrying
     `completed_at`, which lands it on a past iteration. Without the flag the
     prescan cannot see most of what a normal import wrote, and the next run
     duplicates it.
-  - **Archived rows** (EAT #25174) — excluded by a separate default. An
-    archived row still occupies its `(project, source, external_id)`, so the
-    same duplication applies to it.
+  - **Archived rows** (EAT #25174) — excluded by a separate default. Reading
+    them back is what puts the two engines in step, not a preference: the
+    server-side importer's own dedup preload is
+    `SELECT import_external_id FROM story WHERE project_id = $1 AND
+    import_source = $2 AND import_external_id IS NOT NULL`
+    (`services/import/writer.rs`) — no archived, Done-panel or `expired`
+    predicate — so a server import already skips an archived row, and the
+    direct engine was the engine out of step. Nothing downstream would catch
+    the duplicate either: `story_import_provenance_idx` is deliberately NOT
+    unique, so a second row can hold the same `(project, source, external_id)`.
+  - **Soft-deleted (`expired`) rows — no opt-in.** The list query pins
+    `AND s.expired IS NULL` unconditionally (`handlers/stories.rs`, the story
+    list `WHERE` clause), and publishes no param that lifts it. A prescan
+    therefore never sees one, and that is the intended outcome: a row the
+    member deleted is a row the next run may legitimately re-create. The class
+    is dormant today — the story delete path hard-deletes, so nothing in
+    today's backend sets `story.expired` — so this is a boundary, not a live
+    divergence.
   - **Both archived spellings, deliberately.** `archived` is the tri-state
     param (`exclude` | `include` | `only`); `include_archived` is a DEPRECATED
     alias the server honours only when `archived` is absent. A current server

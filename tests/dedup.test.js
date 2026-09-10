@@ -409,8 +409,12 @@ test("both prescans ask the server for Done-panel and archived rows (#90824)", a
   await prescanImported(client, 91, "o", "r");
   await prescanProvenance(client, 91);
   assert.equal(opts.length, 2);
+  // The whole visibility set, not a subset: CONTRACT says these two classes are the only
+  // ones a query param lifts, so a third flag has to fail here and send the reader back.
   for (const o of opts) {
-    assert.equal(o.includeDone, true);
-    assert.equal(o.includeArchived, true);
+    const visibility = Object.fromEntries(
+      Object.entries(o).filter(([key]) => key.startsWith("include") || key === "archived"),
+    );
+    assert.deepEqual(visibility, { includeDone: true, includeArchived: true });
   }
 });
