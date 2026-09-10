@@ -89,6 +89,8 @@ test("prescanImported walks every cursor page and keeps the matched rows", () =>
     );
     assert.equal(calls[0].limit, 1);
     assert.equal(calls[1].cursor, "1");
+    // Visibility has to ride every page: set on the first request only, a re-run still duplicates.
+    assert.deepEqual({ ...calls[1], cursor: undefined }, { ...calls[0], cursor: undefined });
   });
 });
 
@@ -121,6 +123,8 @@ test("prescanProvenance filters by import_source and keys off import_external_id
       "story_id,import_external_id,tasks_count,blocker_count,comment_count,archived",
     );
     assert.equal(calls[1].cursor, "1");
+    // Visibility has to ride every page: set on the first request only, a re-run still duplicates.
+    assert.deepEqual({ ...calls[1], cursor: undefined }, { ...calls[0], cursor: undefined });
   });
 });
 
