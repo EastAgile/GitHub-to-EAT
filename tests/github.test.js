@@ -12,6 +12,7 @@ import {
   RateBudgetError,
   RateLimitError,
   RepoNotFoundError,
+  sendRetrying,
 } from "../src/github.js";
 import { withEnv } from "./helpers.js";
 
@@ -34,8 +35,19 @@ async function withGitHub(handler, fn) {
   }
 }
 
-// The rate-limit backoff is real by default; a classification test must not spend it.
-const noSleep = async () => {};
+// No test here legitimately waits this often: one refused request retries three times, and
+// the paginated case spends four waits in a run. A seam called past this has lost the retry
+// bound, and must fail its test — `node --test` sets no timeout, so a spin is not a red test.
+const MAX_TEST_WAITS = 10;
+
+/** The rate-limit backoff is real by default; a classification test must not spend it. */
+function noSleep() {
+  let slept = 0;
+  return async () => {
+    slept += 1;
+    if (slept > MAX_TEST_WAITS) throw new Error(`the retry bound is gone: ${slept} waits`);
+  };
+}
 
 /**
  * @param {http.ServerResponse} res
@@ -507,7 +519,7 @@ test("retry-after wins over x-ratelimit-reset when a secondary limit sends both"
       ),
     async (base) => {
       await assert.rejects(
-        new GitHubClient("o", "r", { apiBase: base, sleep: noSleep }).listIssues(),
+        new GitHubClient("o", "r", { apiBase: base, sleep: noSleep() }).listIssues(),
         (err) => {
           assert.ok(err instanceof RateLimitError);
           assert.match(err.message, /resets in 60s/);
@@ -531,7 +543,7 @@ test("403 with a zeroed rate-limit maps to RateLimitError with the reset time", 
       ),
     async (base) => {
       await assert.rejects(
-        new GitHubClient("o", "r", { apiBase: base, sleep: noSleep }).listIssues(),
+        new GitHubClient("o", "r", { apiBase: base, sleep: noSleep() }).listIssues(),
         (err) => {
           assert.ok(err instanceof RateLimitError);
           assert.match(err.message, /2030/);
@@ -548,7 +560,7 @@ test("an x-ratelimit-reset past Date's range stays a RateLimitError, not a Range
       json(res, 429, { message: "too many requests" }, { "x-ratelimit-reset": "1e18" }),
     async (base) => {
       await assert.rejects(
-        new GitHubClient("o", "r", { apiBase: base, sleep: noSleep }).listIssues(),
+        new GitHubClient("o", "r", { apiBase: base, sleep: noSleep() }).listIssues(),
         (err) => {
           assert.ok(err instanceof RateLimitError);
           assert.match(err.message, /resets later/);
@@ -566,7 +578,7 @@ test("429 maps to RateLimitError with the reset time and the --token hint", asyn
       json(res, 429, { message: "too many requests" }, { "x-ratelimit-reset": String(reset) }),
     async (base) => {
       await assert.rejects(
-        new GitHubClient("o", "r", { apiBase: base, sleep: noSleep }).listIssues(),
+        new GitHubClient("o", "r", { apiBase: base, sleep: noSleep() }).listIssues(),
         (err) => {
           assert.ok(err instanceof RateLimitError);
           assert.match(err.message, /2030/);
@@ -589,7 +601,7 @@ test("403 with retry-after maps to RateLimitError even with remaining budget", a
       ),
     async (base) => {
       await assert.rejects(
-        new GitHubClient("o", "r", { apiBase: base, sleep: noSleep }).listIssues(),
+        new GitHubClient("o", "r", { apiBase: base, sleep: noSleep() }).listIssues(),
         (err) => {
           assert.ok(err instanceof RateLimitError);
           assert.match(err.message, /60s/);
@@ -603,9 +615,34 @@ test("403 with retry-after maps to RateLimitError even with remaining budget", a
 
 // --- the bounded rate-limit retry (story #259659) ----------------------------
 
+// Two past the four requests the bound allows: enough to stand in for "always refuses",
+// few enough that a lost bound fails on the count instead of spinning forever.
+const ALWAYS = 6;
+
+/**
+ * The three refusal shapes the status mapping classes as rate limiting.
+ *
+ * @type {{ label: string, status: number, headers: Record<string, string> }[]}
+ */
+const RATE_LIMIT_SHAPES = [
+  { label: "429", status: 429, headers: { "retry-after": "1" } },
+  {
+    label: "403 + retry-after (the secondary limit this story is about)",
+    status: 403,
+    headers: { "retry-after": "1", "x-ratelimit-remaining": "4999" },
+  },
+  {
+    label: "403 + x-ratelimit-remaining: 0 (the primary limit)",
+    status: 403,
+    headers: { "x-ratelimit-remaining": "0", "retry-after": "1" },
+  },
+];
+
 /**
  * A server that refuses `refusals` requests as rate limiting, then serves an empty listing.
  * `state.requests` counts every request, so a retry that did nothing cannot read as one that did.
+ * Even an "always refuses" fixture stops at {@link ALWAYS}: a regression that drops the retry
+ * bound must fail on the count, and `node --test` sets no timeout to catch a spin.
  *
  * @param {number} refusals
  * @param {{ status?: number, headers?: Record<string, string> }} [options]
@@ -625,7 +662,14 @@ function refusingThen(refusals, { status = 429, headers = {} } = {}) {
 function recordSleep() {
   /** @type {number[]} */
   const waits = [];
-  return { waits, sleep: async (/** @type {number} */ ms) => void waits.push(ms) };
+  return {
+    waits,
+    sleep: async (/** @type {number} */ ms) => {
+      waits.push(ms);
+      if (waits.length > MAX_TEST_WAITS)
+        throw new Error(`the retry bound is gone: ${waits.length} waits`);
+    },
+  };
 }
 
 test("a rate-limited listing is retried and costs exactly one request per attempt", async () => {
@@ -639,7 +683,7 @@ test("a rate-limited listing is retried and costs exactly one request per attemp
 });
 
 test("a host that refuses every attempt fails after exactly four requests", async () => {
-  const { handler, state } = refusingThen(Number.POSITIVE_INFINITY, {
+  const { handler, state } = refusingThen(ALWAYS, {
     headers: { "retry-after": "1" },
   });
   const { waits, sleep } = recordSleep();
@@ -654,7 +698,7 @@ test("a host that refuses every attempt fails after exactly four requests", asyn
 });
 
 test("a rate-limit refusal carrying no retry-after waits the one-minute floor", async () => {
-  const { handler, state } = refusingThen(Number.POSITIVE_INFINITY);
+  const { handler, state } = refusingThen(ALWAYS);
   const { waits, sleep } = recordSleep();
   await withGitHub(handler, async (base) => {
     await assert.rejects(
@@ -668,7 +712,7 @@ test("a rate-limit refusal carrying no retry-after waits the one-minute floor", 
 
 test("a retry-after that is not an integer number of seconds falls back to the floor", async () => {
   for (const header of ["Wed, 21 Oct 2015 07:28:00 GMT", "-5", "1.5", "", "later"]) {
-    const { handler, state } = refusingThen(Number.POSITIVE_INFINITY, {
+    const { handler, state } = refusingThen(ALWAYS, {
       headers: { "retry-after": header },
     });
     const { waits, sleep } = recordSleep();
@@ -683,8 +727,8 @@ test("a retry-after that is not an integer number of seconds falls back to the f
   }
 });
 
-test("GITHUB_IMPORT_RATE_LIMIT_FLOOR_SECS shortens the floor, as it does on the server", async () => {
-  const { handler, state } = refusingThen(Number.POSITIVE_INFINITY);
+test("GITHUB_IMPORT_RATE_LIMIT_FLOOR_SECS sets the floor, as it does on the server", async () => {
+  const { handler, state } = refusingThen(ALWAYS);
   const { waits, sleep } = recordSleep();
   await withEnv({ GITHUB_IMPORT_RATE_LIMIT_FLOOR_SECS: "2" }, async () => {
     await withGitHub(handler, async (base) => {
@@ -699,22 +743,24 @@ test("GITHUB_IMPORT_RATE_LIMIT_FLOOR_SECS shortens the floor, as it does on the 
 });
 
 test("an advertised wait past two minutes fails on the first request, without waiting", async () => {
-  const { handler, state } = refusingThen(Number.POSITIVE_INFINITY, {
-    headers: { "retry-after": "121" },
-  });
-  const { waits, sleep } = recordSleep();
-  await withGitHub(handler, async (base) => {
-    await assert.rejects(
-      new GitHubClient("o", "r", { apiBase: base, sleep }).listIssues(),
-      RateLimitError,
-    );
-  });
-  assert.equal(state.requests, 1, "the ceiling is checked before a retry is spent");
-  assert.deepEqual(waits, []);
+  // The last is past `Number.MAX_SAFE_INTEGER`: github.rs parses it as a `u64` and refuses
+  // it on the ceiling, so reading it as a missing header and waiting the floor would diverge.
+  for (const header of ["121", "9999999999999999"]) {
+    const { handler, state } = refusingThen(ALWAYS, { headers: { "retry-after": header } });
+    const { waits, sleep } = recordSleep();
+    await withGitHub(handler, async (base) => {
+      await assert.rejects(
+        new GitHubClient("o", "r", { apiBase: base, sleep }).listIssues(),
+        RateLimitError,
+      );
+    });
+    assert.equal(state.requests, 1, `retry-after: ${header} — the ceiling precedes the retry`);
+    assert.deepEqual(waits, [], `retry-after: ${header}`);
+  }
 });
 
 test("a wait of exactly two minutes is inside the ceiling and is retried", async () => {
-  const { handler, state } = refusingThen(Number.POSITIVE_INFINITY, {
+  const { handler, state } = refusingThen(ALWAYS, {
     headers: { "retry-after": "120" },
   });
   const { waits, sleep } = recordSleep();
@@ -729,7 +775,7 @@ test("a wait of exactly two minutes is inside the ceiling and is retried", async
 });
 
 test("a 500 is not a rate limit, so it costs exactly one request", async () => {
-  const { handler, state } = refusingThen(Number.POSITIVE_INFINITY, { status: 500 });
+  const { handler, state } = refusingThen(ALWAYS, { status: 500 });
   const { waits, sleep } = recordSleep();
   await withGitHub(handler, async (base) => {
     await assert.rejects(
@@ -746,7 +792,7 @@ test("a 500 is not a rate limit, so it costs exactly one request", async () => {
 });
 
 test("a bare 403 with budget left is not a rate limit, so it costs exactly one request", async () => {
-  const { handler, state } = refusingThen(Number.POSITIVE_INFINITY, {
+  const { handler, state } = refusingThen(ALWAYS, {
     status: 403,
     headers: { "x-ratelimit-remaining": "4999" },
   });
@@ -785,6 +831,203 @@ test("the wait notice names the seconds and the retry, and carries no host text"
   // The trailing null clears the notice, so a finished wait cannot leave the
   // progress line claiming the run is still backing off.
   assert.deepEqual(notices, [{ seconds: 1, attempt: 1, maxRetries: 3 }, null]);
+});
+
+test("an override outside 1..120 is clamped, so it cannot disable the retry", async () => {
+  // The floor feeds the ceiling test too, so an override above the ceiling would fail every
+  // header-less refusal on its first response; 0 would burst four requests at the limiter.
+  for (const [override, wait] of [
+    ["600", 120_000],
+    ["121", 120_000],
+    ["0", 1000],
+  ]) {
+    const { handler, state } = refusingThen(ALWAYS);
+    const { waits, sleep } = recordSleep();
+    await withEnv({ GITHUB_IMPORT_RATE_LIMIT_FLOOR_SECS: String(override) }, async () => {
+      await withGitHub(handler, async (base) => {
+        await assert.rejects(
+          new GitHubClient("o", "r", { apiBase: base, sleep }).listIssues(),
+          RateLimitError,
+        );
+      });
+    });
+    assert.equal(state.requests, 4, `override ${override} still retries`);
+    assert.deepEqual(waits, [wait, wait, wait], `override ${override}`);
+  }
+});
+
+test("a retry-after with a leading + is a wait, as the server's u64 parse reads it", async () => {
+  const { handler, state } = refusingThen(ALWAYS, { headers: { "retry-after": "+5" } });
+  const { waits, sleep } = recordSleep();
+  await withGitHub(handler, async (base) => {
+    await assert.rejects(
+      new GitHubClient("o", "r", { apiBase: base, sleep }).listIssues(),
+      RateLimitError,
+    );
+  });
+  assert.equal(state.requests, 4);
+  assert.deepEqual(waits, [5000, 5000, 5000], "5 seconds, not the one-minute floor");
+});
+
+test("every shape the mapping calls a rate limit is retried to the same four requests", async () => {
+  for (const shape of RATE_LIMIT_SHAPES) {
+    const { handler, state } = refusingThen(ALWAYS, {
+      status: shape.status,
+      headers: shape.headers,
+    });
+    const { waits, sleep } = recordSleep();
+    await withGitHub(handler, async (base) => {
+      await assert.rejects(
+        new GitHubClient("o", "r", { apiBase: base, sleep }).listIssues(),
+        RateLimitError,
+        shape.label,
+      );
+    });
+    assert.equal(state.requests, 4, shape.label);
+    assert.equal(waits.length, 3, shape.label);
+  }
+});
+
+test("the four-request bound is per refused request: a second page spends its own", async () => {
+  let base = "";
+  const state = { page1: 0, page2: 0 };
+  const { waits, sleep } = recordSleep();
+  await withGitHub(
+    (req, res) => {
+      const url = new URL(req.url ?? "", "http://x");
+      if (url.pathname !== "/repos/o/r/issues") return json(res, 200, []);
+      const second = url.searchParams.get("page") === "2";
+      if (second) state.page2 += 1;
+      else state.page1 += 1;
+      const seen = second ? state.page2 : state.page1;
+      if (seen <= 2) return json(res, 429, { message: "slow down" }, { "retry-after": "1" });
+      if (second) return json(res, 200, []);
+      json(res, 200, [], {
+        link: `<${base}/repos/o/r/issues?state=all&per_page=100&page=2>; rel="next"`,
+      });
+    },
+    async (started) => {
+      base = started;
+      assert.deepEqual(await new GitHubClient("o", "r", { apiBase: base, sleep }).listIssues(), []);
+    },
+  );
+  assert.deepEqual(state, { page1: 3, page2: 3 }, "each page carries its own budget");
+  assert.deepEqual(waits, [1000, 1000, 1000, 1000], "four waits in one run, none refused");
+});
+
+test("every wait names its own attempt, under one id for the loop that spends it", async () => {
+  const { handler, state } = refusingThen(ALWAYS, { headers: { "retry-after": "1" } });
+  const { sleep } = recordSleep();
+  /** @type {unknown[]} */
+  const notices = [];
+  /** @type {number[]} */
+  const ids = [];
+  await withGitHub(handler, async (base) => {
+    await assert.rejects(
+      new GitHubClient("o", "r", {
+        apiBase: base,
+        sleep,
+        onRateLimitWait: (wait, id) => {
+          notices.push(wait);
+          ids.push(id);
+        },
+      }).listIssues(),
+      RateLimitError,
+    );
+  });
+  assert.equal(state.requests, 4);
+  // Three waits, each with its own ordinal: at a single wait "per wait" and "per run"
+  // render the same notice.
+  assert.deepEqual(notices, [
+    { seconds: 1, attempt: 1, maxRetries: 3 },
+    null,
+    { seconds: 1, attempt: 2, maxRetries: 3 },
+    null,
+    { seconds: 1, attempt: 3, maxRetries: 3 },
+    null,
+  ]);
+  assert.equal(new Set(ids).size, 1, "one retry loop, one wait id, however many waits");
+});
+
+test("the free /rate_limit probe never retries: its answer is optional", async () => {
+  // Server parity: github.rs `fetch_rate_limits` sends it with plain `send`, never
+  // `send_retrying`. A retried probe stalls the run for minutes and then discards it.
+  const state = { requests: 0 };
+  const { waits, sleep } = recordSleep();
+  await withGitHub(
+    (_req, res) => {
+      state.requests += 1;
+      // Bounded like every other refusing fixture: a probe that retried would read this
+      // budget on its second attempt and fail the assertions, rather than spin.
+      if (state.requests > ALWAYS) {
+        return json(res, 200, { resources: { graphql: { remaining: 4242 } } });
+      }
+      json(res, 429, { message: "slow down" }, { "retry-after": "1" });
+    },
+    async (base) => {
+      const budget = await new GitHubClient("o", "r", { apiBase: base, sleep }).graphqlBudget();
+      assert.equal(budget, null, "a refused probe leaves the run ungated");
+    },
+  );
+  assert.equal(state.requests, 1);
+  assert.deepEqual(waits, []);
+});
+
+test("the dry run's dependency estimate counts every request, retries included", async () => {
+  let blocked = 0;
+  const { sleep } = recordSleep();
+  await withGitHub(
+    (req, res) => {
+      const { pathname } = new URL(req.url ?? "", "http://x");
+      if (pathname === "/repos/o/r/issues") return json(res, 200, [{ number: 7 }]);
+      if (pathname !== "/repos/o/r/issues/7/dependencies/blocked_by") return json(res, 200, []);
+      blocked += 1;
+      if (blocked === 1) return json(res, 429, { message: "slow down" }, { "retry-after": "1" });
+      json(res, 200, [{ number: 12, title: "a" }]);
+    },
+    async (base) => {
+      const fetched = await new GitHubClient("o", "r", { apiBase: base, sleep }).fetchAll({
+        dependencies: true,
+      });
+      assert.deepEqual(
+        (fetched.blockedBy.get("7") ?? []).map((/** @type {any} */ d) => d.number),
+        [12],
+      );
+      // One page, two requests: pricing the budget at one would understate a retried
+      // page by up to 4x.
+      assert.equal(fetched.dependencyRequests, 2);
+    },
+  );
+  assert.equal(blocked, 2);
+});
+
+test("a refusal the retry gives up on has its body released, not left pinning the socket", async () => {
+  for (const [label, headers, requests] of [
+    ["the retries are spent", { "retry-after": "1" }, 4],
+    ["the wait is past the ceiling", { "retry-after": "121" }, 1],
+  ]) {
+    let cancelled = 0;
+    let sent = 0;
+    const send = async () => {
+      sent += 1;
+      const body = new ReadableStream({
+        cancel() {
+          cancelled += 1;
+        },
+      });
+      // Bounded for the same reason as `refusingThen`: a lost retry bound must fail on
+      // the count, not spin under a sleep that never sleeps.
+      if (sent > ALWAYS) return new Response("[]", { status: 200 });
+      return new Response(body, { status: 429, headers: /** @type {any} */ (headers) });
+    };
+    await assert.rejects(
+      sendRetrying(send, { owner: "o", repo: "r" }, { sleep: noSleep() }),
+      RateLimitError,
+      String(label),
+    );
+    assert.equal(sent, requests, String(label));
+    assert.equal(cancelled, requests, `${label}: every refused body was released`);
+  }
 });
 
 test("401 maps to GitHubAuthError", async () => {
@@ -1133,7 +1376,7 @@ test("the sub-issue stage degrades on a rate limit instead of throwing away the 
   await withGitHub(handler, async (base) => {
     const fetched = await new GitHubClient("o", "r", {
       apiBase: base,
-      sleep: noSleep,
+      sleep: noSleep(),
       warn: (m) => warnings.push(m),
     }).fetchAll();
     // Everything gathered before the limit survives; the issues themselves are intact.
@@ -1156,7 +1399,7 @@ test("a rate limit anywhere but the sub-issue stage still fails the whole fetch"
       },
       async (base) => {
         await assert.rejects(
-          new GitHubClient("o", "r", { apiBase: base, sleep: noSleep }).fetchAll(),
+          new GitHubClient("o", "r", { apiBase: base, sleep: noSleep() }).fetchAll(),
           (err) => err instanceof RateLimitError,
           `a 429 on ${limited} must fail the run`,
         );

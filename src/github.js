@@ -155,7 +155,9 @@ export async function statusError(response, { owner, repo }) {
 
 /**
  * A header (or env var) read as GitHub's delta-seconds, or null when it is anything else —
- * an HTTP-date, a fraction, a sign, empty. github.rs parses the same value as a `u64`.
+ * an HTTP-date, a fraction, a leading `-`, empty. github.rs parses the same value as a
+ * `u64`, which also accepts a leading `+`, and leaves a huge one to the ceiling below
+ * rather than reading it as a header that was never sent.
  *
  * @param {string | null | undefined} raw
  * @returns {number | null}
@@ -163,18 +165,24 @@ export async function statusError(response, { owner, repo }) {
 function deltaSeconds(raw) {
   const text = (raw ?? "").trim();
   if (!/^\+?\d+$/.test(text)) return null;
-  const seconds = Number(text);
-  return Number.isSafeInteger(seconds) ? seconds : null;
+  return Number(text);
 }
 
+// The floor is judged by the ceiling below like any advertised wait, so an override above
+// it would fail every header-less refusal on the first response — the retry off, silently.
+const MIN_RATE_LIMIT_FLOOR_SECS = 1;
+
 /**
- * The wait a rate-limit refusal falls back to when it advertises none. The env var
- * carries the server's own name for the override (config.rs), so a test shortens both alike.
+ * The wait a rate-limit refusal falls back to when it advertises none. The env var carries
+ * the server's own name for the override (config.rs), so a test shortens both alike; unlike
+ * the server this clamps it into 1..120, where it still retries.
  *
  * @returns {number} seconds
  */
 function rateLimitFloorSecs() {
-  return deltaSeconds(process.env.GITHUB_IMPORT_RATE_LIMIT_FLOOR_SECS) ?? RATE_LIMIT_FLOOR_SECS;
+  const override = deltaSeconds(process.env.GITHUB_IMPORT_RATE_LIMIT_FLOOR_SECS);
+  if (override === null) return RATE_LIMIT_FLOOR_SECS;
+  return Math.min(Math.max(override, MIN_RATE_LIMIT_FLOOR_SECS), MAX_RATE_LIMIT_WAIT_SECS);
 }
 
 /**
@@ -200,28 +208,42 @@ const realSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * @param {() => Promise<Response>} send issues one request, mapping its own transport failures
  * @param {{ owner: string, repo: string }} target
  * @param {{ sleep?: (ms: number) => Promise<void>,
- *   onWait?: (wait: RateLimitWait | null, id: number) => void }} [options]
+ *   onWait?: (wait: RateLimitWait | null, id: number) => void, maxRetries?: number }} [options]
  *   `sleep` is the test seam; `onWait` reports the backoff, then takes null at its end,
- *   both under an `id` naming this loop
+ *   both under an `id` naming this loop; `maxRetries` of 0 sends once, for a request whose
+ *   answer is optional (github.rs sends its `/rate_limit` probe with plain `send`)
  * @returns {Promise<Response>}
  */
-export async function sendRetrying(send, target, { sleep = realSleep, onWait } = {}) {
+export async function sendRetrying(
+  send,
+  target,
+  { sleep = realSleep, onWait, maxRetries = MAX_RATE_LIMIT_RETRIES } = {},
+) {
   waitIds += 1;
   const id = waitIds;
   let attempt = 0;
+  // The classifier never reads a rate-limited body, and an unread one pins the socket —
+  // for the whole backoff on the retry path, and for the rest of the run on a throw the
+  // caller degrades past.
+  const release = (/** @type {Response} */ response) =>
+    void response.body?.cancel().catch(() => {});
   for (;;) {
     const response = await send();
     const failed = await statusError(response, target);
     if (!failed) return response;
-    if (!(failed instanceof RateLimitError) || attempt >= MAX_RATE_LIMIT_RETRIES) throw failed;
+    if (!(failed instanceof RateLimitError) || attempt >= maxRetries) {
+      release(response);
+      throw failed;
+    }
     const seconds = deltaSeconds(response.headers.get("retry-after")) ?? rateLimitFloorSecs();
-    if (seconds > MAX_RATE_LIMIT_WAIT_SECS) throw failed;
+    if (seconds > MAX_RATE_LIMIT_WAIT_SECS) {
+      release(response);
+      throw failed;
+    }
     attempt += 1;
-    // The classifier never reads a rate-limited body, and an unread one pins the socket
-    // for the whole backoff.
-    void response.body?.cancel().catch(() => {});
+    release(response);
     // Every field is a number this module parsed, so no host text reaches the terminal.
-    onWait?.({ seconds, attempt, maxRetries: MAX_RATE_LIMIT_RETRIES }, id);
+    onWait?.({ seconds, attempt, maxRetries }, id);
     try {
       await sleep(seconds * 1000);
     } finally {
@@ -335,12 +357,15 @@ export class GitHubClient {
    * GET one absolute URL, mapping GitHub's error statuses to the error hierarchy.
    *
    * @param {string} url
-   * @param {Record<string, string>} [extraHeaders] per-request header overrides
+   * @param {{ headers?: Record<string, string>, onSend?: () => void, maxRetries?: number }}
+   *   [options] `headers` overrides per request, `onSend` counts every attempt a retry
+   *   spends, and `maxRetries` of 0 turns the retry off for an optional request
    * @returns {Promise<Response>}
    */
-  async #get(url, extraHeaders) {
+  async #get(url, { headers: extraHeaders, onSend, maxRetries } = {}) {
     return sendRetrying(
       async () => {
+        onSend?.();
         let response;
         try {
           response = await fetch(url, {
@@ -359,7 +384,7 @@ export class GitHubClient {
         return response;
       },
       { owner: this.owner, repo: this.repo },
-      this.#retry,
+      { ...this.#retry, maxRetries },
     );
   }
 
@@ -369,7 +394,8 @@ export class GitHubClient {
    * @param {string} path repo-relative path with query (e.g. `/issues?state=all`)
    * @param {{ maxPages?: number, headers?: Record<string, string>, onPage?: () => void,
    *   truncateAtCap?: boolean }} [options] `maxPages` refuses to follow `Link` past that
-   *   many pages; `onPage` is called once per request, so a stage can price itself;
+   *   many pages; `onPage` is called once per request sent, retries included, so a stage
+   *   can price itself;
    *   `truncateAtCap` returns the pages already collected instead of throwing there
    * @returns {Promise<any[]>}
    */
@@ -383,8 +409,7 @@ export class GitHubClient {
     let url = `${this.apiBase}/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}${path}`;
     while (url) {
       pages += 1;
-      onPage?.();
-      const response = await this.#get(url, headers);
+      const response = await this.#get(url, { headers, onSend: onPage });
       /** @type {unknown} */
       let page;
       try {
@@ -431,7 +456,9 @@ export class GitHubClient {
    */
   async graphqlBudget() {
     try {
-      const response = await this.#get(`${this.apiBase}/rate_limit`);
+      // Optional and uncounted: a retried probe would stall the run for minutes and then
+      // discard the answer. github.rs sends it with plain `send` for the same reason.
+      const response = await this.#get(`${this.apiBase}/rate_limit`, { maxRetries: 0 });
       const payload = await response.json();
       const remaining = payload?.resources?.graphql?.remaining;
       return Number.isFinite(remaining) ? Number(remaining) : null;
@@ -584,8 +611,8 @@ export class GitHubClient {
       {
         maxPages: MAX_DEPENDENCY_PAGES,
         headers: { "X-GitHub-Api-Version": DEPENDENCIES_API_VERSION },
-        // Counted per page, not per issue: an issue past 100 dependencies costs
-        // more than one request, and the dry run must not understate the budget.
+        // Counted per request, not per issue or per page: an issue past 100 dependencies
+        // paginates and a refused page is re-sent, and the dry run must not understate it.
         onPage: () => {
           this.#dependencyRequests += 1;
         },
