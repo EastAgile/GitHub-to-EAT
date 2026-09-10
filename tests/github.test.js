@@ -1388,6 +1388,30 @@ test("the sub-issue stage degrades on a rate limit instead of throwing away the 
   assert.match(warnings[0], /--token/);
 });
 
+test("a degradable stage spends the retry before it abandons the issue", async () => {
+  // CONTRACT.md: the sub-issue and dependency stages sit behind the same retry, so each
+  // pays the backoffs first. github.rs runs its dependency batch through `send_retrying`
+  // too, so the cost is shared rather than a divergence.
+  const { handler } = subIssueHandler({
+    issues: [{ number: 7, ...summary(1) }],
+    subIssueStatus: { 7: 429 },
+  });
+  const { waits, sleep } = recordSleep();
+  /** @type {string[]} */
+  const warnings = [];
+  await withGitHub(handler, async (base) => {
+    const fetched = await new GitHubClient("o", "r", {
+      apiBase: base,
+      sleep,
+      warn: (m) => warnings.push(m),
+    }).fetchAll();
+    assert.equal(fetched.subIssues.size, 0, "the issue is abandoned, the fetch survives");
+    assert.equal(fetched.issues.length, 1);
+  });
+  assert.deepEqual(waits, [60_000, 60_000, 60_000], "three backoffs, then the stage degrades");
+  assert.match(warnings[0], /rate limit/i);
+});
+
 test("a rate limit anywhere but the sub-issue stage still fails the whole fetch", async () => {
   for (const limited of ["/repos/o/r/issues", "/repos/o/r/issues/comments", "/repos/o/r/labels"]) {
     await withGitHub(
