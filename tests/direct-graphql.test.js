@@ -710,9 +710,8 @@ test("the server engine's output and import body are byte-identical to before th
 // --- the rate-limit wait on the progress line (story #259659) ----------------
 
 /**
- * A GitHub stand-in that refuses the first `ImportIssues` POST with a bare 429 — no
- * `retry-after`, so the run falls back to the floor — and serves the listing on the
- * re-send. `state.issuePosts` counts the POSTs that asked for the issue listing.
+ * A GitHub stand-in that refuses the first `ImportIssues` POST with a bare 429, so the run
+ * falls back to the floor. `state.issuePosts` counts the POSTs asking for the issue listing.
  *
  * @param {(context: { base: string, state: { issuePosts: number } }) => Promise<void>} fn
  */

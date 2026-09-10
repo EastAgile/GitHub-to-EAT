@@ -122,8 +122,7 @@ export class HybridFetcher {
     { token, timeout, apiBase, warn, onProgress, sleep, onRateLimitWait } = {},
   ) {
     // `shared` reaches both transports: the bearer must ride REST too, or the free probe
-    // reads the anonymous bucket and a private repo 404s on /releases. The rate-limit
-    // backoff rides it for the same reason — one policy, whichever transport meets a limit.
+    // reads the anonymous bucket and a private repo 404s on /releases.
     const shared = { token, timeout, apiBase, warn, sleep, onRateLimitWait };
     this.#graph = new GitHubGraphQLFetcher(owner, repo, { ...shared, onProgress });
     this.#rest = new GitHubClient(owner, repo, shared);

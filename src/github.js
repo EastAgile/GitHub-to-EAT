@@ -190,17 +190,14 @@ function rateLimitFloorSecs() {
 const realSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * Send, and re-send while GitHub refuses for rate limiting — github.rs `send_retrying`, so
- * both engines wait the same bounded backoff. Only an HTTP-status refusal is retried; a
- * GraphQL envelope's own `RATE_LIMITED` is the hour-scale point budget and is classified
- * by the caller, after this returns.
+ * Send, and re-send while GitHub refuses for rate limiting: github.rs `send_retrying`. Only an
+ * HTTP-status refusal retries; an envelope's `RATE_LIMITED` is the point budget the caller reads.
  *
  * @param {() => Promise<Response>} send issues one request, mapping its own transport failures
  * @param {{ owner: string, repo: string }} target
  * @param {{ sleep?: (ms: number) => Promise<void>,
  *   onWait?: (wait: RateLimitWait | null) => void }} [options]
- *   `sleep` is the test seam; `onWait` reports the backoff to a progress line and is
- *   called again with null when it ends
+ *   `sleep` is the test seam; `onWait` reports the backoff, then takes null at its end
  * @returns {Promise<Response>}
  */
 export async function sendRetrying(send, target, { sleep = realSleep, onWait } = {}) {

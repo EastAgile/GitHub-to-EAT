@@ -604,9 +604,8 @@ test("403 with retry-after maps to RateLimitError even with remaining budget", a
 // --- the bounded rate-limit retry (story #259659) ----------------------------
 
 /**
- * A server that refuses `refusals` requests as rate limiting, then serves an empty
- * listing. `state.requests` counts every request that reached it, so a retry that
- * silently did nothing cannot read as a retry that worked.
+ * A server that refuses `refusals` requests as rate limiting, then serves an empty listing.
+ * `state.requests` counts every request, so a retry that did nothing cannot read as one that did.
  *
  * @param {number} refusals
  * @param {{ status?: number, headers?: Record<string, string> }} [options]
