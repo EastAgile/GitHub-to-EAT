@@ -2122,7 +2122,10 @@ and both are prescanned, in union.
     correct on either, and neither can 400 the other. `include_done` needs no
     such argument: one commit added the Done-panel exclusion and the flag that
     lifts it, so a deployment that does not know the flag does not hide the rows
-    either.
+    either. The alias is pinned by effect, not only by a query-string
+    assertion: the mock's `archivedTriState: false` state models a deployment
+    older than #25174 — `archived` is an unknown param there, neither validated
+    nor obeyed — and one archived prescan regression runs against it.
   - **An archived skip is named, not silent.** Both prescan fieldsets carry
     `archived`, and a run that skips an issue whose story is archived prints one
     warning counting those skips and naming the remedy (unarchive the story, or

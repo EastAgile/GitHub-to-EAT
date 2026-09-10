@@ -462,6 +462,51 @@ test("an archived row is found by either prescan, not re-imported (#90824)", asy
   }
 });
 
+// The tri-state off is a deployment older than #25174: it drops `archived` as an unknown
+// param, so only the deprecated alias can admit the rows. Proves the alias by effect.
+test("on a pre-#25174 server the deprecated alias carries the archived prescan (#90824)", async () => {
+  const archived = { archived_at: "2026-01-01T00:00:00Z" };
+  const state = makeState({
+    archivedTriState: false,
+    stories: {
+      91: [
+        {
+          story_id: 300,
+          title: "older closed issue",
+          description: `steps\n\n${markerFor("o", "r", "3")}`,
+          ...archived,
+          tasks_count: 1,
+          comment_count: 1,
+        },
+        {
+          story_id: 301,
+          title: "newer open issue",
+          description: null,
+          import_source: "github",
+          import_external_id: "7",
+          ...archived,
+          tasks_count: 0,
+          comment_count: 0,
+        },
+      ],
+    },
+  });
+  const mock = await startMockServer(state);
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream: capture(),
+      github: { fetchAll: async () => fetchedRepo() },
+    });
+    assert.equal(result.skipped, 2);
+    assert.equal(result.importedStories, 0);
+    assert.equal(mock.state.stories[91].length, 2);
+  } finally {
+    await mock.close();
+  }
+});
+
 test("an archived skip is named on stderr, not folded into `skipped N` (#90824)", async () => {
   const state = makeState({
     stories: {

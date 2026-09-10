@@ -67,6 +67,10 @@ import { DONE_STATES, STARTED_STATES } from "./mapping.js";
  *   the re-import pair on POST /stories, create validates + persists it, and
  *   GET /stories honours the `import_source`/`import_external_id` list filters
  *   (EAT #31427); false simulates an older server that ignores the pair
+ * @property {boolean} archivedTriState when true (default), GET /stories honours the
+ *   `archived` tri-state and lets it win over `include_archived` (EAT #25174); false
+ *   simulates a deployment older than #25174, where `archived` is an unknown param —
+ *   ignored, never validated — and only the deprecated alias admits archived rows
  * @property {boolean} backdating when true (default, mirroring prod), the
  *   openapi advertises `created_at`/`completed_at` on story creates and
  *   `created_at` on comment creates, and the handlers persist them; false
@@ -145,6 +149,7 @@ export function makeState(overrides = {}) {
     externalMembers: {},
     serverDryRun: true,
     provenance: true,
+    archivedTriState: true,
     backdating: true,
     startedBackdating: true,
     people: true,
@@ -551,7 +556,9 @@ async function handle(state, req, res) {
       const [includeArchived, includeDone] = flags;
       // Story #275/#25174 — archived rows are excluded by default; the tri-state
       // `archived` wins, and the legacy `include_archived=true` aliases `include`.
-      const archivedParam = url.searchParams.get("archived");
+      // Pre-#25174 the param does not exist, so it is neither validated nor obeyed —
+      // `StoryFilter` has no deny_unknown_fields, so serde drops it silently.
+      const archivedParam = state.archivedTriState ? url.searchParams.get("archived") : null;
       if (archivedParam !== null && !["exclude", "include", "only"].includes(archivedParam)) {
         send(res, 400, {
           code: "validation_failed",
