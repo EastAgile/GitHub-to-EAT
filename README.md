@@ -130,13 +130,15 @@ must contain `issues` — the other types only add to an issue import:
 - `deps` — each issue's "blocked by" dependencies become blockers on its story,
   one per entry, reading `Blocked by #90 (Upstream fix)` and unresolved. A
   blocker is recorded whether or not the blocking issue is itself imported.
-  Works on both engines and writes the same text, with one narrow exception: an
-  over-long blocker is cut at 255 **bytes** by the direct engine (what the public
-  API accepts) and 255 **characters** by the server, so a multi-byte title near
-  that boundary lands slightly shorter on `--engine direct` — tracked as EAT
-  #35629. The server engine needs a tracker new enough to accept
-  `include_dependencies`; against an older one the run is refused up front,
-  naming `--engine direct`, rather than reporting success with no blockers in it.
+  Works on both engines, and both return the blockers in the order GitHub lists
+  them. Both write the same text, with one narrow exception: the server keeps a
+  blocker line up to 255 characters, and near that boundary `--engine direct`
+  keeps fewer characters when the title uses accented or non-Latin characters. A
+  short accented title reaches both ends whole. What the direct engine writes is
+  always the start of what the server writes. Tracked as CLI bug #482645. The
+  server engine needs a tracker new enough to accept `include_dependencies`;
+  against an older one the run is refused up front, naming `--engine direct`,
+  rather than reporting success with no blockers in it.
   On `--engine direct` the blockers ride the issue listing itself, so the flag
   costs no extra GitHub request — one extra point per listing page, plus a
   follow-up for an issue with more than 100 blockers. A `--dry-run` spends the

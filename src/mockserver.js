@@ -1305,9 +1305,10 @@ function createBlocker(state, projectId, storyId, body) {
     blocker_id: state.nextId++,
     story_id: storyId,
     blocker_desc: desc,
-    // `blockers.rs` INSERTs (story_id, blocker_desc, resolved) only: the public
-    // route binds no order, so the column stays at its `NOT NULL DEFAULT 0`.
-    blocker_display_order: 0,
+    // `blockers.rs::create` INSERTs `COALESCE(MAX(blocker_display_order), -1) + 1`
+    // scoped to the story (agile-tracker `a774ed013`).
+    blocker_display_order:
+      Math.max(-1, ...story.blockers.map((/** @type {any} */ r) => r.blocker_display_order)) + 1,
     resolved: body.resolved === true,
     created: new Date().toISOString(),
     expired: null,
