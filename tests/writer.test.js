@@ -1068,11 +1068,11 @@ test("writePlan creates one blocker per op, in order, after the story's tasks", 
         ["Blocked by #90 (Upstream fix)", false],
       ],
     );
-    // Insertion order is what the writer controls: `POST /blockers` binds no
-    // display order, so every row the public route writes keeps the column's default.
+    // `POST /blockers` numbers each create `MAX(blocker_display_order) + 1` per story
+    // (agile-tracker `a774ed013`), so the writer's posting order becomes display order.
     assert.deepEqual(
       story.blockers.map((/** @type {any} */ b) => b.blocker_display_order),
-      [0, 0],
+      [0, 1],
     );
     assert.equal(story.blocker_count, 2);
     // The other story asked for none and got none.

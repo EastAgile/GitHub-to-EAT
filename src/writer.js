@@ -524,8 +524,8 @@ export async function writePlan(client, projectId, plan, options = {}) {
             );
             if (ok) result.tasks += 1;
           }
-          // Written sequentially, in GitHub's own `blocked_by` order: the public
-          // route sets no display order, so insertion order is all the CLI controls.
+          // Sequential on purpose: the route numbers each create `MAX + 1` per story,
+          // so the posting order becomes the stored display order.
           for (const [i, blocker] of (op.blockers ?? []).entries()) {
             const ok = await contained("blocker", op.external_id, `blocker ${i + 1}`, () =>
               retrying(() =>
