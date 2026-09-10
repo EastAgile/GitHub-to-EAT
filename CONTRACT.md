@@ -2134,6 +2134,13 @@ and both are prescanned, in union.
     cannot 400 an older deployment: `archived` / `archived_at` entered the
     server's `fields=` allowlist with archiving itself (#275), ten days before
     the visibility params above (#25174 / #25177) existed to hide anything.
+  - **The cost, so a later report does not read as a regression.** Lifting the
+    filters widens both walks. The provenance pass stays bounded — it also
+    sends `import_source=github`, so it pages only imported rows. The marker
+    pass cannot narrow that way, so it now pages the project's whole history,
+    Done panel and archived rows included, and its request count grows with
+    total history rather than with imported rows. Correctness needs the walk:
+    a row it does not see is a row the next run duplicates.
   - **Two call sites, one rule.** The prescan reads send the flags, and so does
     the preflight probe behind the "project already has stories; import appends,
     it does not replace" warning — a project a previous import filled is mostly
