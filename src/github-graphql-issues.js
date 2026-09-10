@@ -593,7 +593,8 @@ export class GitHubGraphQLFetcher {
    * @param {{ token?: string, timeout?: number, apiBase?: string,
    *   warn?: (message: string) => void, onProgress?: (status: any) => void,
    *   sleep?: (ms: number) => Promise<void>,
-   *   onRateLimitWait?: (wait: import("./github.js").RateLimitWait | null) => void }} [options]
+   *   onRateLimitWait?: (wait: import("./github.js").RateLimitWait | null,
+   *     id: number) => void }} [options]
    *   `warn` defaults to stderr, so a construction site that forgets it cannot swallow a
    *   degraded fetch; `onProgress` takes the same status doc `src/progress.js` renders;
    *   `sleep` and `onRateLimitWait` are the rate-limit backoff's seams

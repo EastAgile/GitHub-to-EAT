@@ -77,7 +77,7 @@ export class GitHubGraphQLClient {
   #lowBudgetWarned = false;
 
   /** @type {{ sleep?: (ms: number) => Promise<void>,
-   *    onWait?: (wait: import("./github.js").RateLimitWait | null) => void }} */
+   *    onWait?: (wait: import("./github.js").RateLimitWait | null, id: number) => void }} */
   #retry;
 
   /**
@@ -85,7 +85,8 @@ export class GitHubGraphQLClient {
    * @param {string} repo
    * @param {{ token?: string, timeout?: number, apiBase?: string,
    *   warn?: (message: string) => void, sleep?: (ms: number) => Promise<void>,
-   *   onRateLimitWait?: (wait: import("./github.js").RateLimitWait | null) => void }} [options]
+   *   onRateLimitWait?: (wait: import("./github.js").RateLimitWait | null,
+   *     id: number) => void }} [options]
    *   `timeout` is per-request, in seconds; `warn` defaults to stderr so a caller that
    *   forgets it cannot swallow a spent point budget in silence; `sleep` is the
    *   rate-limit backoff's test seam and `onRateLimitWait` reports it

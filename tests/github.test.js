@@ -784,7 +784,7 @@ test("the wait notice names the seconds and the retry, and carries no host text"
   assert.equal(state.requests, 2);
   // The trailing null clears the notice, so a finished wait cannot leave the
   // progress line claiming the run is still backing off.
-  assert.deepEqual(notices, [{ seconds: 1, retry: 1, retries: 3 }, null]);
+  assert.deepEqual(notices, [{ seconds: 1, attempt: 1, maxRetries: 3 }, null]);
 });
 
 test("401 maps to GitHubAuthError", async () => {

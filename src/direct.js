@@ -112,7 +112,8 @@ export class HybridFetcher {
    * @param {{ token?: string, timeout?: number, apiBase?: string,
    *   warn?: (message: string) => void, onProgress?: (status: any) => void,
    *   sleep?: (ms: number) => Promise<void>,
-   *   onRateLimitWait?: (wait: import("./github.js").RateLimitWait | null) => void }} [options]
+   *   onRateLimitWait?: (wait: import("./github.js").RateLimitWait | null,
+   *     id: number) => void }} [options]
    * @throws {import("./github.js").GitHubAuthError} without a token — GraphQL has no
    *   anonymous mode
    */
@@ -458,8 +459,35 @@ function attachedPeople(plan) {
  * @param {import("./github.js").RateLimitWait} wait
  * @returns {string}
  */
-function rateLimitWaitText({ seconds, retry, retries }) {
-  return `rate limited by GitHub, retrying in ${seconds}s (retry ${retry} of ${retries})`;
+function rateLimitWaitText({ seconds, attempt, maxRetries }) {
+  return `rate limited by GitHub, retrying in ${seconds}s (retry ${attempt} of ${maxRetries})`;
+}
+
+/**
+ * The progress line's rate-limit notice. Up to four requests back off at once — the three
+ * GraphQL walks and the REST release listing — so a finished wait must clear only its own.
+ * It renders the longest wait still running, the earliest the fetch can actually resume.
+ *
+ * @returns {{ onWait: (wait: import("./github.js").RateLimitWait | null, id: number) => void,
+ *   text: () => string }}
+ */
+export function makeRateLimitNotice() {
+  /** @type {Map<number, import("./github.js").RateLimitWait>} */
+  const active = new Map();
+  return {
+    onWait(wait, id) {
+      if (wait === null) active.delete(id);
+      else active.set(id, wait);
+    },
+    text() {
+      /** @type {import("./github.js").RateLimitWait | null} */
+      let longest = null;
+      for (const wait of active.values()) {
+        if (longest === null || wait.seconds > longest.seconds) longest = wait;
+      }
+      return longest === null ? "" : ` — ${rateLimitWaitText(longest)}`;
+    },
+  };
 }
 
 /**
@@ -501,7 +529,7 @@ export async function runDirect(client, projectId, owner, repo, options) {
   let pages = "";
   // The buffered `warn` seam would surface a backoff only once it is over. This rides the
   // message thunk instead, which every spinner redraw re-reads.
-  let waiting = "";
+  const notice = makeRateLimitNotice();
   const source =
     github ??
     new HybridFetcher(owner, repo, {
@@ -511,8 +539,8 @@ export async function runDirect(client, projectId, owner, repo, options) {
       onProgress: ({ progress_current: current, progress_total: total }) => {
         pages = total == null ? ` page ${current}` : ` page ${current}/${total}`;
       },
-      onRateLimitWait: (wait) => {
-        waiting = wait === null ? "" : ` — ${rateLimitWaitText(wait)}`;
+      onRateLimitWait: (wait, id) => {
+        notice.onWait(wait, id);
         // A non-TTY run redraws nothing, so a silent minute reads as a hang there too.
         if (wait !== null && !out.isTTY) out.write(`${rateLimitWaitText(wait)}...\n`);
       },
@@ -525,7 +553,7 @@ export async function runDirect(client, projectId, owner, repo, options) {
   const pullRequests = included.includes("prs");
   const fetched = await runWithProgress(
     () => source.fetchAll({ releases, pullRequests, dependencies }),
-    () => `fetching ${owner}/${repo} from GitHub${pages}${waiting}`,
+    () => `fetching ${owner}/${repo} from GitHub${pages}${notice.text()}`,
     { stream },
   );
   for (const message of fetchWarnings) out.write(message);

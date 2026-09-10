@@ -22,6 +22,42 @@ export function capture() {
 }
 
 /**
+ * Replay a `\r`-drawn stream the way a terminal does, so a test can assert what the
+ * reader sees rather than what the writer last wrote: `\r` returns the cursor to column
+ * 0 of the current row, later characters overwrite in place, the tail of a longer
+ * earlier write survives, `\n` starts a new row, and a full row wraps onto the next.
+ *
+ * @param {string} buf everything written to the stream
+ * @param {{ columns?: number }} [options] the terminal width to wrap at
+ * @returns {string[]} the visible rows
+ */
+export function renderTerminalRows(buf, { columns = Number.POSITIVE_INFINITY } = {}) {
+  /** @type {string[][]} */
+  const rows = [[]];
+  let col = 0;
+  for (const ch of buf) {
+    if (ch === "\n") {
+      rows.push([]);
+      col = 0;
+      continue;
+    }
+    if (ch === "\r") {
+      col = 0;
+      continue;
+    }
+    // Deferred wrap, as xterm does it: a row filled to the last column moves on only
+    // when the next character arrives, so a `\r` before then stays on that row.
+    if (col >= columns) {
+      rows.push([]);
+      col = 0;
+    }
+    rows[rows.length - 1][col] = ch;
+    col += 1;
+  }
+  return rows.map((row) => Array.from(row, (cell) => cell ?? " ").join(""));
+}
+
+/**
  * Run `fn` with the working directory set to a fresh temp dir; restore after.
  *
  * @template T

@@ -180,8 +180,12 @@ function rateLimitFloorSecs() {
 /**
  * One backoff a caller is about to spend, or `null` once it is over.
  *
- * @typedef {{ seconds: number, retry: number, retries: number }} RateLimitWait
+ * @typedef {{ seconds: number, attempt: number, maxRetries: number }} RateLimitWait
  */
+
+// Names one retry loop's waits: several requests back off at once, so a caller with one
+// notice slot must be able to tell whose wait just ended.
+let waitIds = 0;
 
 /**
  * @param {number} ms
@@ -196,29 +200,32 @@ const realSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * @param {() => Promise<Response>} send issues one request, mapping its own transport failures
  * @param {{ owner: string, repo: string }} target
  * @param {{ sleep?: (ms: number) => Promise<void>,
- *   onWait?: (wait: RateLimitWait | null) => void }} [options]
- *   `sleep` is the test seam; `onWait` reports the backoff, then takes null at its end
+ *   onWait?: (wait: RateLimitWait | null, id: number) => void }} [options]
+ *   `sleep` is the test seam; `onWait` reports the backoff, then takes null at its end,
+ *   both under an `id` naming this loop
  * @returns {Promise<Response>}
  */
 export async function sendRetrying(send, target, { sleep = realSleep, onWait } = {}) {
-  let retries = 0;
+  waitIds += 1;
+  const id = waitIds;
+  let attempt = 0;
   for (;;) {
     const response = await send();
     const failed = await statusError(response, target);
     if (!failed) return response;
-    if (!(failed instanceof RateLimitError) || retries >= MAX_RATE_LIMIT_RETRIES) throw failed;
+    if (!(failed instanceof RateLimitError) || attempt >= MAX_RATE_LIMIT_RETRIES) throw failed;
     const seconds = deltaSeconds(response.headers.get("retry-after")) ?? rateLimitFloorSecs();
     if (seconds > MAX_RATE_LIMIT_WAIT_SECS) throw failed;
-    retries += 1;
+    attempt += 1;
     // The classifier never reads a rate-limited body, and an unread one pins the socket
     // for the whole backoff.
     void response.body?.cancel().catch(() => {});
     // Every field is a number this module parsed, so no host text reaches the terminal.
-    onWait?.({ seconds, retry: retries, retries: MAX_RATE_LIMIT_RETRIES });
+    onWait?.({ seconds, attempt, maxRetries: MAX_RATE_LIMIT_RETRIES }, id);
     try {
       await sleep(seconds * 1000);
     } finally {
-      onWait?.(null);
+      onWait?.(null, id);
     }
   }
 }
@@ -282,7 +289,7 @@ export class GitHubClient {
   #dependencyRequests = 0;
 
   /** @type {{ sleep?: (ms: number) => Promise<void>,
-   *    onWait?: (wait: RateLimitWait | null) => void }} */
+   *    onWait?: (wait: RateLimitWait | null, id: number) => void }} */
   #retry;
 
   /**
@@ -290,7 +297,7 @@ export class GitHubClient {
    * @param {string} repo
    * @param {{ token?: string, timeout?: number, apiBase?: string,
    *   warn?: (message: string) => void, sleep?: (ms: number) => Promise<void>,
-   *   onRateLimitWait?: (wait: RateLimitWait | null) => void }} [options]
+   *   onRateLimitWait?: (wait: RateLimitWait | null, id: number) => void }} [options]
    *   `timeout` is per-request, in seconds (default 30); `warn` defaults to stderr, so a
    *   construction site that forgets it cannot swallow a degraded fetch in silence;
    *   `sleep` is the rate-limit backoff's test seam and `onRateLimitWait` reports it

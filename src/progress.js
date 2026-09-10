@@ -34,9 +34,18 @@ export async function runWithProgress(func, message, { stream, intervalMs = 500 
   }
 
   let i = 0;
+  let width = 0;
+  // Pad to the previous line and cap to the terminal, as makeImportReporter does: a
+  // fragment that shrinks (a wait notice clearing) otherwise leaves its tail on screen.
+  const redraw = (/** @type {string} */ line) => {
+    const max = typeof out.columns === "number" && out.columns > 0 ? out.columns : Infinity;
+    const shown = line.length > max ? line.slice(0, max) : line;
+    out.write(`\r${shown}${" ".repeat(Math.max(0, width - shown.length))}`);
+    width = shown.length;
+  };
   const draw = () => {
     const elapsed = (performance.now() - start) / 1000;
-    out.write(`\r${FRAMES[i % FRAMES.length]} ${text()} (${elapsed.toFixed(0)}s) `);
+    redraw(`${FRAMES[i % FRAMES.length]} ${text()} (${elapsed.toFixed(0)}s) `);
     i += 1;
   };
   draw();
@@ -50,7 +59,8 @@ export async function runWithProgress(func, message, { stream, intervalMs = 500 
   } finally {
     clearInterval(timer);
     const total = (performance.now() - start) / 1000;
-    out.write(`\r${text()} — ${failed ? "failed after" : "done in"} ${total.toFixed(0)}s\n`);
+    redraw(`${text()} — ${failed ? "failed after" : "done in"} ${total.toFixed(0)}s`);
+    out.write("\n");
   }
 }
 
