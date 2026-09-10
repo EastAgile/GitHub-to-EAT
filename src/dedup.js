@@ -73,10 +73,8 @@ export function markerExternalId(description, owner, repo) {
  *   => Promise<{ items: any[], next_cursor: string | null }>} listStoryPage
  */
 
-/**
- * A closed issue imports as an accepted story on a past iteration — the Done panel the
- * default list hides — and an archived row still holds its (project, source, external_id).
- */
+// A closed issue imports as an accepted story on a past iteration — the Done panel the
+// default list hides — and an archived row still holds its (project, source, external_id).
 const PRESCAN_VISIBILITY = { includeDone: true, includeArchived: true };
 
 /**
