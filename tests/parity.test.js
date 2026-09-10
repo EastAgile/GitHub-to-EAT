@@ -551,16 +551,19 @@ test("parity: a release carries no blockers — release_to_record leaves the lis
   assert.deepEqual(stories[0].blockers, []);
 });
 
-// The two dependency divergences CONTRACT.md's deps section names, pinned so the
-// claim cannot rot into prose (see "Engine parity" — a divergence ships with a test).
+// The dependency divergence CONTRACT.md's deps section names, and the ordering parity
+// beside it, pinned so neither claim can rot into prose (see "Engine parity").
 
-test("divergence: the CLI clamps a blocker in bytes where the importer takes 255 chars", () => {
-  // `POST /blockers` validates in bytes (`str::len()`), so the CLI must cut earlier
-  // than common.rs's `chars().take(255)` — server ask #35629 (/s/y9q8ea68) tracks it.
+/** Both server ends stop at 255 characters: `validate_length` counts characters since
+ * agile-tracker `8e5ed5479`, and the importer does `desc.chars().take(255)`. */
+const SERVER_CHAR_LIMIT = 255;
+
+test("divergence: the CLI clamps a blocker in bytes where both server ends take 255 chars", () => {
+  // The CLI is now the stricter end. Project-91 bug #482645 (/s/3zktusgn) tracks it.
   const title = "é".repeat(238); // 255 chars once wrapped, 493 bytes
   const desc = blockedByDesc(90, title);
-  assert.equal([...desc].length, 255, "exactly the server importer's char cut");
-  assert.ok(Buffer.byteLength(desc, "utf8") > 255, "and past the public route's byte limit");
+  assert.equal([...desc].length, SERVER_CHAR_LIMIT, "exactly what both server ends accept");
+  assert.ok(Buffer.byteLength(desc, "utf8") > 255, "and past the byte budget the CLI keeps");
 
   const op = mapRepo({
     issues: [issue({ number: 7 })],
@@ -572,17 +575,22 @@ test("divergence: the CLI clamps a blocker in bytes where the importer takes 255
     clampPlan({ labels: [], stories: [op] }, FALLBACK_LIMITS).stories[0]
   ).blockers[0].desc;
   // 254, not 255: the cut never splits a character, so the last é does not fit.
-  assert.ok(Buffer.byteLength(clamped, "utf8") <= 255, "inside the route's byte limit");
+  assert.ok(Buffer.byteLength(clamped, "utf8") <= 255, "inside the CLI's own byte clamp");
   assert.ok(
-    [...clamped].length < 255,
-    `the CLI keeps fewer characters by design, got ${[...clamped].length}`,
+    [...clamped].length < SERVER_CHAR_LIMIT,
+    `the divergence points one way: the CLI keeps fewer than ${SERVER_CHAR_LIMIT} characters, got ${[...clamped].length}`,
   );
-  assert.ok(desc.startsWith(clamped), "a prefix of what the importer would write");
+  assert.ok(desc.startsWith(clamped), "a prefix of what either server end would write");
 });
 
-test("divergence: the CLI cannot set blocker_display_order; the importer writes the index", () => {
-  // `CreateBlocker` has no order field, so every direct-engine row keeps the column's
-  // DEFAULT 0 where common.rs pushes `idx as i64` — server ask #35639 (/s/kp82mw25) tracks it.
+/**
+ * `blockers.rs::create` ported (agile-tracker `a774ed013`): the public create numbers each
+ * row `COALESCE(MAX(blocker_display_order), -1) + 1` per story, so posting order is the order.
+ */
+const serverAssignedOrder = (/** @type {any[]} */ stored) =>
+  stored.reduce((max, row) => Math.max(max, row.blocker_display_order), -1) + 1;
+
+test("parity: the CLI posts blockers in blocked_by order, which is the order the server stores", () => {
   const { stories } = mapRepo({
     issues: [issue({ number: 7 })],
     comments: [],
@@ -609,14 +617,27 @@ test("divergence: the CLI cannot set blocker_display_order; the importer writes 
   assert.deepEqual(
     blockers.map((/** @type {any} */ b) => b.desc),
     ["Blocked by #12 (Second)", "Blocked by #90 (Upstream fix)"],
+    "GitHub's own blocked_by order",
+  );
+
+  const stored = /** @type {any[]} */ ([]);
+  for (const b of blockers) {
+    stored.push({ desc: b.desc, blocker_display_order: serverAssignedOrder(stored) });
+  }
+  assert.deepEqual(
+    stored.map((row) => row.blocker_display_order),
+    blockers.map((/** @type {any} */ _b, /** @type {number} */ i) => i),
+    "the same positions the importer writes from the entry index",
   );
 });
 
 // The parity rule wants the companion ask named beside the exception, so nobody
 // has to rediscover whether one was ever filed.
-test("every write-side deps divergence CONTRACT.md names cites a companion story", () => {
+
+/** CONTRACT.md's write-side divergence bullets, each folded onto one line. */
+const contractDivergenceBullets = () => {
   const lines = readFileSync(new URL("../CONTRACT.md", import.meta.url), "utf8").split("\n");
-  const start = lines.findIndex((l) => /^- \*\*.*write-side divergences\*\*/.test(l));
+  const start = lines.findIndex((l) => /^- \*\*[^*]*write-side divergences?\*\*/.test(l));
   assert.notEqual(start, -1, "CONTRACT.md's deps section still leads a write-side divergence list");
 
   const bullets = /** @type {string[]} */ ([]);
@@ -628,9 +649,35 @@ test("every write-side deps divergence CONTRACT.md names cites a companion story
     if (/^ {2}- /.test(line)) bullets.push(line);
     else if (bullets.length > 0) bullets[bullets.length - 1] += ` ${line.trim()}`;
   }
-  // Naming both divergences beats counting them: a partial re-indent drops one silently,
-  // and a legitimately-third divergence should not have to edit this test.
-  for (const known of ["clamped in bytes", "blocker_display_order"]) {
+  return bullets;
+};
+
+/** README.md's `deps` bullet, folded onto one line. */
+const readmeDepsProse = () => {
+  const lines = readFileSync(new URL("../README.md", import.meta.url), "utf8").split("\n");
+  const start = lines.findIndex((l) => l.startsWith("- `deps` —"));
+  assert.notEqual(start, -1, "README.md still documents `deps` as an --include bullet");
+
+  const prose = [lines[start]];
+  for (const line of lines.slice(start + 1)) {
+    if (!/^ {2}\S/.test(line)) break;
+    prose.push(line.trim());
+  }
+  return prose.join(" ");
+};
+
+/** CONTRACT.md spells a *live* companion `#NNNN (/s/slug)`; a closed ask keeps the bare id. */
+const companionIds = (/** @type {string} */ text) =>
+  [...text.matchAll(/#(\d{4,}) \(\/s\/[a-z0-9]+\)/g)].map((m) => m[1]);
+
+/** A bare id, which is all a user-facing doc spells out. */
+const citedIds = (/** @type {string} */ text) => [...text.matchAll(/#(\d{4,})/g)].map((m) => m[1]);
+
+test("every write-side deps divergence CONTRACT.md names cites a companion story", () => {
+  const bullets = contractDivergenceBullets();
+  // Naming the divergence beats counting: a partial re-indent drops one silently, and a
+  // legitimately-second divergence should not have to edit this test.
+  for (const known of ["clamped in bytes"]) {
     assert.ok(
       bullets.some((b) => b.includes(known)),
       `the list parsed — a rename or re-indent must not hide the "${known}" divergence`,
@@ -643,6 +690,34 @@ test("every write-side deps divergence CONTRACT.md names cites a companion story
       bullet,
       /#\d{4,} \(\/s\/[a-z0-9]+\)/,
       `no companion story citation beside "${title}"`,
+    );
+  }
+});
+
+// #35639 reached CONTRACT.md and this file but never README.md, and the guard above reads
+// CONTRACT.md alone, so nothing caught it. This one reads both (chore #47472).
+test("every deps divergence CONTRACT.md names reaches README.md with the same story id", () => {
+  const bullets = contractDivergenceBullets();
+  const cited = new Set(citedIds(readmeDepsProse()));
+
+  const companions = new Set();
+  for (const bullet of bullets) {
+    const title = /\*\*(.+?)\*\*/.exec(bullet)?.[1] ?? bullet.trim();
+    for (const id of companionIds(bullet)) {
+      companions.add(id);
+      assert.ok(
+        cited.has(id),
+        `CONTRACT.md names "${title}" with companion #${id}, README.md's \`deps\` bullet does not cite it`,
+      );
+    }
+  }
+
+  // A closed ask in README.md is the same rot the other way round: the reader chases a
+  // story nobody will work.
+  for (const id of cited) {
+    assert.ok(
+      companions.has(id),
+      `README.md's \`deps\` bullet cites #${id}, which no CONTRACT.md divergence bullet names as a live companion`,
     );
   }
 });

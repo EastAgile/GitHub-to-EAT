@@ -1693,8 +1693,8 @@ Under `--include …,deps` each issue's GitHub "blocked by" dependencies become
 `blocker` rows on its story. This is a **both-engines** type: the server ask
 (EAT #35491) shipped before this CLI story, so the direct engine mirrors
 `github.rs` rather than inventing anything. Every mapping rule below matches;
-two *write-side* divergences are named at the end of this section, and both are
-pinned by `tests/parity.test.js` rather than asserted here.
+one *write-side* divergence is named at the end of this section, and
+`tests/parity.test.js` pins it rather than this prose.
 
 **The server engine is capability-gated.** `include_dependencies` reached the
 server on 2026-08-04 and `ImportJsonRequest` has no `deny_unknown_fields`, so a
@@ -1710,7 +1710,7 @@ probe.
 
 - **Text** — `Blocked by #<number> (<title>)`, the blocking issue's title
   **trimmed**, and `resolved: false`. Byte-identical to `blocked_by_desc` up to
-  the length clamp, which is the first divergence listed below. A
+  the length clamp, which is the one divergence listed below. A
   dependency row's `number` and `title` are both `#[serde(default)]` server-side,
   so a row with no title renders `Blocked by #90 ()` rather than being dropped.
 - **Selection** — one blocker per `blocked_by` entry, in GitHub's own listing
@@ -1718,7 +1718,15 @@ probe.
   covers a *missing* number, which becomes 0 and the same guard drops; a
   present-but-wrong-typed one is a serde error server-side, failing that whole
   page, where the CLI drops the single row and keeps the rest), and repeats are
-  deduplicated by number across pages, the first title winning.
+  deduplicated by number across pages, the first title winning. **Both engines
+  return them in that order.** `POST /blockers` assigns
+  `COALESCE(MAX(blocker_display_order), -1) + 1` per story
+  (`blockers.rs::create`, agile-tracker `a774ed013`), and both story projections
+  order by `story_id, blocker_display_order, blocker_id`. The direct-engine
+  writer posts one blocker after another in `blocked_by` order, so its rows land
+  at 0, 1, 2 and upward. Those are the positions the server importer writes from
+  the entry index. Server ask **#35639 (/s/kp82mw25)** shipped that change and
+  closed the ordering divergence.
 - **Scope** — a blocker is recorded whether or not the blocking issue is itself
   imported: the server never intersects `blocked_by` with the import set, so
   neither does the CLI. An issue with an empty listing, or one whose listing
@@ -1738,27 +1746,20 @@ probe.
   `github.rs` does not intersect `blocked_by` with the import set either.
   `--engine direct` adds one further line — the per-issue request cost, quoted as
   a lower bound — since only the direct engine spends a caller's own GitHub budget.
-- **Two write-side divergences**, both a consequence of the public API's shape
-  rather than of a mapping choice:
-  - **Length is clamped in bytes, not characters.** `POST /blockers` validates
-    with `validate_length` → Rust's `str::len()`, so the CLI cuts `blocker_desc`
-    at 255 **bytes** (never splitting a character); the server importer writes
-    the column directly and cuts at 255 **chars** (`desc.chars().take(255)`).
-    For a multi-byte title between 256 bytes and 255 chars the two engines write
-    different text — the CLI's is a prefix of the server's. The CLI's behaviour
-    is the only one the public route accepts; server ask **#35629
-    (/s/y9q8ea68)** tracks reconciling the two ends.
-  - **`blocker_display_order` is not settable from the CLI.** `CreateBlocker` is
-    `{ blocker_desc, resolved }` and `blockers.rs` INSERTs
-    `(story_id, blocker_desc, resolved)`, leaving the column at its
-    `NOT NULL DEFAULT 0`; the server importer writes the entry index. So every
-    direct-engine blocker lands at 0 where a server-engine one carries its
-    position, and the story-list projection — which orders by
-    `blocker_display_order` with no tiebreaker — returns direct-engine blockers
-    in unspecified order. The writer still posts them sequentially in GitHub's
-    `blocked_by` order, because insertion order is all it controls. Server ask
-    **#35639 (/s/kp82mw25)** tracks both halves — a settable order on the public
-    create, and a tiebreaker on the projection.
+- **One write-side divergence**, and it is a CLI mapping choice that the public
+  API no longer matches:
+  - **Length is clamped in bytes by the CLI, in characters by both server
+    ends.** The CLI cuts `blocker_desc` at 255 **bytes**, never splitting a
+    character (`byteLen` / `sliceBytes` in `src/mapping.js`). `POST /blockers`
+    validates with `validate_length`, which counts **characters** since
+    agile-tracker `8e5ed5479`; the server importer writes the column directly
+    and cuts at 255 **chars** (`relations.rs:502`, `desc.chars().take(255)`).
+    Both server ends therefore stop at 255 characters. For a multi-byte title
+    the CLI writes strictly less than either server end, and its text is a
+    prefix of the server's. Server ask #35629 is accepted: it reconciled the two
+    *server* ends toward characters, so the public route is no longer the
+    stricter end. The CLI half is the live companion, project-91 bug **#482645
+    (/s/3zktusgn)**.
 
 ### Write surface (direct engine)
 
