@@ -418,8 +418,8 @@ test("a Done-panel row is found by the provenance prescan, not re-imported (#908
 });
 
 test("an archived row is found by either prescan, not re-imported (#90824)", async () => {
-  // An archived row still occupies (project, source, external_id), so the duplication
-  // bug applies to it too — one marker-only row, one pair-only row, both archived.
+  // The server importer's dedup preload does not filter archived rows, so skipping them
+  // is parity — one marker-only row, one pair-only row, both archived.
   const archived = { archived_at: "2026-01-01T00:00:00Z" };
   const state = makeState({
     stories: {
@@ -457,6 +457,67 @@ test("an archived row is found by either prescan, not re-imported (#90824)", asy
     assert.equal(result.skipped, 2);
     assert.equal(result.importedStories, 0);
     assert.equal(mock.state.stories[91].length, 2);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("an archived skip is named on stderr, not folded into `skipped N` (#90824)", async () => {
+  const state = makeState({
+    stories: {
+      91: [
+        {
+          story_id: 300,
+          title: "older closed issue",
+          description: `steps\n\n${markerFor("o", "r", "3")}`,
+          archived_at: "2026-01-01T00:00:00Z",
+          tasks_count: 1,
+          comment_count: 1,
+        },
+        {
+          story_id: 301,
+          title: "newer open issue",
+          description: null,
+          import_source: "github",
+          import_external_id: "7",
+          tasks_count: 0,
+          comment_count: 0,
+        },
+      ],
+    },
+  });
+  const mock = await startMockServer(state);
+  const stream = capture();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const result = await runDirect(client, 91, "o", "r", {
+      included: ["issues"],
+      stream,
+      github: { fetchAll: async () => fetchedRepo() },
+    });
+    assert.equal(result.skipped, 2);
+    // 1 of 2, not 2 of 2: the live skip is a normal one and must not be counted.
+    assert.match(stream.buf, /warning: 1 of the 2 skipped issue\(s\) matched a story archived/);
+    assert.match(stream.buf, /Unarchive/);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("a skip with no archived row warns about nothing (#90824)", async () => {
+  const mock = await startMockServer();
+  const stream = capture();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const options = {
+      included: ["issues"],
+      stream,
+      github: { fetchAll: async () => fetchedRepo() },
+    };
+    await runDirect(client, 91, "o", "r", options);
+    const rerun = await runDirect(client, 91, "o", "r", options);
+    assert.equal(rerun.skipped, 2);
+    assert.equal(/archived/.test(stream.buf), false);
   } finally {
     await mock.close();
   }

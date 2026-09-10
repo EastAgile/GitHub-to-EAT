@@ -193,8 +193,9 @@ built on the mock is not misread as proof about the server:
 - Having no iteration calendar, its `include_done` filter stands in for "frozen on
   a past iteration" with "carries any `iteration_id`", so it hides
   current-iteration rows the real server returns.
-- Its read row omits `archived` / `archived_at`, which the real list and detail
-  paths always project. The mock also has no route that archives a story.
+- Its read row derives `archived` from a seeded `archived_at`, the way the real
+  list and detail paths project `archived_at IS NOT NULL`. The mock has no route
+  that archives a story, so a test seeds `archived_at` on the state row itself.
 - Validation **order** differs: the mock checks `archived` before `fields=`,
   `limit` and `cursor`, where the real handler validates those three first and
   `archived` last. Only a request carrying two invalid params can tell, and it
@@ -202,10 +203,11 @@ built on the mock is not misread as proof about the server:
 - A non-numeric `limit` is an extractor rejection on the server (empty
   `details.fields`), where the mock answers `details.fields=["limit"]`; only
   `limit=0` and `limit>200` reach the real handler and legitimately name it.
-- The mock's `fields=` allowlist mirrors the published `openapi.json` list, which
-  omits `archived` / `archived_at` / `iteration_id` that the server's own
-  `STORY_FIELDS` accepts — so `fields=archived` 400s on the mock and 200s on the
-  server.
+- The mock's `fields=` allowlist mirrors the published `openapi.json` list. It
+  carries `archived` / `archived_at` / `iteration_id`, which the server's
+  `STORY_FIELDS` has accepted since story #275 and its `openapi.json` has
+  published since 2026-08-04. It is still a subset: names no CLI path reads are
+  left out, so `fields=current_panel` 400s on the mock and 200s on the server.
 
 ### GitHub identity mapping (both engines)
 
@@ -2117,7 +2119,18 @@ and both are prescanned, in union.
     alias the server honours only when `archived` is absent. A current server
     obeys `archived` and ignores the alias; a deployment older than #25174
     obeys the alias and ignores the unknown `archived` param. Sending both is
-    correct on either, and neither can 400 the other.
+    correct on either, and neither can 400 the other. `include_done` needs no
+    such argument: one commit added the Done-panel exclusion and the flag that
+    lifts it, so a deployment that does not know the flag does not hide the rows
+    either.
+  - **An archived skip is named, not silent.** Both prescan fieldsets carry
+    `archived`, and a run that skips an issue whose story is archived prints one
+    warning counting those skips and naming the remedy (unarchive the story, or
+    delete it and re-run). Without it an archived skip folds into `skipped N`
+    while no story appears on the board, which reads as a lost issue. The field
+    cannot 400 an older deployment: `archived` / `archived_at` entered the
+    server's `fields=` allowlist with archiving itself (#275), ten days before
+    the visibility params above (#25174 / #25177) existed to hide anything.
   - The flags ride on the prescan reads only. `listStoryPage` defaults them off,
     so any other caller's query is unchanged.
 - **Provenance pair (primary)** — every story create carries
@@ -2129,8 +2142,9 @@ and both are prescanned, in union.
   `GET /openapi.json` (the `import_source` property on the project-scoped
   `POST …/stories` schema); on a server that advertises it the prescan reads
   provenance back via the `GET /stories?import_source=github` list filter
-  (`fields=story_id,import_external_id,tasks_count,comment_count`, plus `labels`
-  under `--include …,milestones`, which is the only rule that reads them). Because the
+  (`fields=story_id,import_external_id,tasks_count,blocker_count,comment_count,archived`,
+  plus `labels` under `--include …,milestones`, which is the only rule that reads
+  them). Because the
   server-side importer writes the same pair, cross-engine dedup is now
   **symmetric**: a direct-written story is skipped by a later server import and
   vice versa.

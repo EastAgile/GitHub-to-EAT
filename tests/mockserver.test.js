@@ -1323,6 +1323,30 @@ test("archived stories are hidden by default and admitted by include_archived", 
   }
 });
 
+// The server allowlisted all three in #275 / earlier, ten days BEFORE the visibility
+// params (#25174/#25177) shipped, so no deployment that hides a row refuses the fieldset.
+test("archived / archived_at / iteration_id are allowlisted, and archived is computed", async () => {
+  const mock = await startMockServer();
+  try {
+    for (const name of ["live", "filed"]) {
+      await post(mock.baseUrl, "/projects/91/stories", { name });
+    }
+    mock.state.stories[91][1].archived_at = "2026-07-01T00:00:00Z";
+    const response = await fetch(
+      `${mock.baseUrl}/projects/91/stories?archived=include&fields=archived,archived_at,iteration_id`,
+      { headers: { "X-TrackerToken": "ea_token" } },
+    );
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), [
+      { story_id: 1, archived: false },
+      { story_id: 2, archived: true, archived_at: "2026-07-01T00:00:00Z" },
+    ]);
+  } finally {
+    await mock.close();
+  }
+});
+
 test("an archived value outside exclude|include|only is 400 validation_failed", async () => {
   const mock = await startMockServer();
   try {

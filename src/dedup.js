@@ -124,7 +124,7 @@ export async function prescanImported(
     const page = await client.listStoryPage(projectId, {
       limit: pageSize,
       ...(cursor ? { cursor } : {}),
-      fields: `story_id,description,tasks_count,blocker_count,comment_count${labels}`,
+      fields: `story_id,description,tasks_count,blocker_count,comment_count,archived${labels}`,
       ...PRESCAN_VISIBILITY,
     });
     for (const row of page.items ?? []) {
@@ -165,7 +165,7 @@ export async function prescanProvenance(
       importSource: source,
       limit: pageSize,
       ...(cursor ? { cursor } : {}),
-      fields: `story_id,import_external_id,tasks_count,blocker_count,comment_count${labels}`,
+      fields: `story_id,import_external_id,tasks_count,blocker_count,comment_count,archived${labels}`,
       ...PRESCAN_VISIBILITY,
     });
     for (const row of page.items ?? []) {

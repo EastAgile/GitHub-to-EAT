@@ -193,6 +193,9 @@ const STORY_FIELDS = new Set([
   "tasks_complete_count",
   "tasks",
   "blockers",
+  "iteration_id",
+  "archived",
+  "archived_at",
   "import_source",
   "import_external_id",
 ]);
@@ -742,7 +745,8 @@ const DONE_PANEL_ITERATION_ID = 42;
 function toStoryPayload(row) {
   const { comments, people, links, ...payload } = row;
   // The read row publishes the title under both spellings, and both are in STORY_FIELDS.
-  return { ...payload, name: payload.title };
+  // `archived` is derived, never stored — the server projects `archived_at IS NOT NULL`.
+  return { ...payload, name: payload.title, archived: payload.archived_at != null };
 }
 
 /**
