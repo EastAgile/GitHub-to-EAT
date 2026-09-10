@@ -35,9 +35,8 @@ async function withGitHub(handler, fn) {
   }
 }
 
-// No test here legitimately waits this often: one refused request retries three times, and
-// the paginated case spends four waits in a run. A seam called past this has lost the retry
-// bound, and must fail its test — `node --test` sets no timeout, so a spin is not a red test.
+// Past any legitimate wait count here, so a seam called this often has lost the retry bound
+// and must fail its test: `node --test` sets no timeout, so a spin is not a red test.
 const MAX_TEST_WAITS = 10;
 
 /** The rate-limit backoff is real by default; a classification test must not spend it. */
@@ -1389,9 +1388,8 @@ test("the sub-issue stage degrades on a rate limit instead of throwing away the 
 });
 
 test("a degradable stage spends the retry before it abandons the issue", async () => {
-  // CONTRACT.md: the sub-issue and dependency stages sit behind the same retry, so each
-  // pays the backoffs first. github.rs runs its dependency batch through `send_retrying`
-  // too, so the cost is shared rather than a divergence.
+  // CONTRACT.md: both degradable stages sit behind the same retry, and github.rs runs its
+  // dependency batch through `send_retrying` too, so the cost is shared, not a divergence.
   const { handler } = subIssueHandler({
     issues: [{ number: 7, ...summary(1) }],
     subIssueStatus: { 7: 429 },

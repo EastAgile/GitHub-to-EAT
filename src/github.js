@@ -222,9 +222,8 @@ export async function sendRetrying(
   waitIds += 1;
   const id = waitIds;
   let attempt = 0;
-  // The classifier never reads a rate-limited body, and an unread one pins the socket —
-  // for the whole backoff on the retry path, and for the rest of the run on a throw the
-  // caller degrades past.
+  // An unread rate-limited body pins the socket: for the whole backoff on the retry path,
+  // and for the rest of the run on a throw a caller degrades past.
   const release = (/** @type {Response} */ response) =>
     void response.body?.cancel().catch(() => {});
   for (;;) {
