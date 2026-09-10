@@ -729,6 +729,9 @@ const NOT_FOUND = { status: 404, payload: { error: "not found" } };
 const LABEL_DEFAULT_BACKGROUND = "#3498db";
 const LABEL_DEFAULT_TEXT = "#ffffff";
 
+/** Stands in for the past window a backdated completion lands on — this mock has no calendar. */
+const DONE_PANEL_ITERATION_ID = 42;
+
 /**
  * `comments` / `people` / `links` on a story row are bookkeeping for tests — the real
  * read shape carries none of them (they aren't in the fields= allowlist either).
@@ -1092,6 +1095,9 @@ function createStory(state, projectId, body) {
     if (body.completed_at != null) {
       story.completed_at =
         body.completed_at < body.created_at ? body.created_at : body.completed_at;
+      // The server places a forward create on the window holding its completion — a PAST
+      // iteration, which the default story list then hides (#25177). Icebox opts out there too.
+      if (!story.icebox) story.iteration_id = DONE_PANEL_ITERATION_ID;
     }
   }
   if (startedBackdatingOn(state) && body.started_at != null) {
