@@ -874,10 +874,12 @@ part of such a number, as github.rs's `u64::from_str` reads it. A header that is
 absent, or that is not such a number — an HTTP-date, a fraction, a leading `-`,
 an empty or unparseable value — falls back to a **one-minute floor**.
 `GITHUB_IMPORT_RATE_LIMIT_FLOOR_SECS` sets that floor, which is how the tests
-avoid spending it, and the default is a full minute. This CLI clamps the
-override into **1..120**, where the server takes it as given: 0 would burst four
-requests at a limiter that penalises bursts, and a value above the ceiling below
-would turn the retry off for every header-less refusal.
+avoid spending it, and the default is a full minute. The variable **sets** the
+floor rather than only shortening it, and both engines take the value as given
+(config.rs reads it unclamped). The ceiling below judges that floor like any
+advertised wait, so **a value above 120 turns the retry off** for every refusal
+carrying no `retry-after`: the run fails on the first response. A value of `0`
+sends the four requests back to back. Neither is clamped, on either engine.
 
 A wait **longer than two minutes** fails at once — without sleeping, and without
 spending a retry — because that is the hourly budget resetting rather than the

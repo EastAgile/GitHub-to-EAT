@@ -68,7 +68,7 @@ cp .env.example .env
 | `EAT_API_BASE`  | no       | `https://api.eastagiletracker.com/api/v1` | API base URL (override for self-hosted/local) |
 | `EAT_APP_BASE`  | no       | `https://eastagiletracker.com`            | Web app base URL, used for the board link     |
 | `GITHUB_TOKEN`  | see note | —                                         | GitHub token (or use `--token`). Required for `--engine direct`; on the default server engine, only for **private** repos |
-| `GITHUB_IMPORT_RATE_LIMIT_FLOOR_SECS` | no | `60` | How long a rate-limit refusal that advertises no `retry-after` waits before the retry. Clamped to 1..120; the server reads the same variable |
+| `GITHUB_IMPORT_RATE_LIMIT_FLOOR_SECS` | no | `60` | How long a rate-limit refusal that advertises no `retry-after` waits before the retry. Taken as given, like the server, which reads the same variable: a value above 120 turns the retry off |
 
 ## Usage
 

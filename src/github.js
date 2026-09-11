@@ -168,21 +168,15 @@ function deltaSeconds(raw) {
   return Number(text);
 }
 
-// The floor is judged by the ceiling below like any advertised wait, so an override above
-// it would fail every header-less refusal on the first response — the retry off, silently.
-const MIN_RATE_LIMIT_FLOOR_SECS = 1;
-
 /**
  * The wait a rate-limit refusal falls back to when it advertises none. The env var carries
- * the server's own name for the override (config.rs), so a test shortens both alike; unlike
- * the server this clamps it into 1..120, where it still retries.
+ * the server's own name for the override (config.rs) and, like the server, is taken as
+ * given: the ceiling below judges it like any advertised wait.
  *
  * @returns {number} seconds
  */
 function rateLimitFloorSecs() {
-  const override = deltaSeconds(process.env.GITHUB_IMPORT_RATE_LIMIT_FLOOR_SECS);
-  if (override === null) return RATE_LIMIT_FLOOR_SECS;
-  return Math.min(Math.max(override, MIN_RATE_LIMIT_FLOOR_SECS), MAX_RATE_LIMIT_WAIT_SECS);
+  return deltaSeconds(process.env.GITHUB_IMPORT_RATE_LIMIT_FLOOR_SECS) ?? RATE_LIMIT_FLOOR_SECS;
 }
 
 /**

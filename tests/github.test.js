@@ -832,16 +832,18 @@ test("the wait notice names the seconds and the retry, and carries no host text"
   assert.deepEqual(notices, [{ seconds: 1, attempt: 1, maxRetries: 3 }, null]);
 });
 
-test("an override outside 1..120 is clamped, so it cannot disable the retry", async () => {
-  // The floor feeds the ceiling test too, so an override above the ceiling would fail every
-  // header-less refusal on its first response; 0 would burst four requests at the limiter.
-  for (const [override, wait] of [
-    ["600", 120_000],
-    ["121", 120_000],
-    ["0", 1000],
+test("an override is taken as given, so one above the ceiling turns the retry off", async () => {
+  // config.rs takes the value unclamped, and the floor feeds the ceiling test like any
+  // advertised wait — so an override past 120 fails a header-less refusal on its first
+  // response, exactly as the server does. 0 retries at once, also as the server does.
+  for (const [override, requests, waits] of [
+    ["600", 1, []],
+    ["121", 1, []],
+    ["120", 4, [120_000, 120_000, 120_000]],
+    ["0", 4, [0, 0, 0]],
   ]) {
     const { handler, state } = refusingThen(ALWAYS);
-    const { waits, sleep } = recordSleep();
+    const { waits: spent, sleep } = recordSleep();
     await withEnv({ GITHUB_IMPORT_RATE_LIMIT_FLOOR_SECS: String(override) }, async () => {
       await withGitHub(handler, async (base) => {
         await assert.rejects(
@@ -850,8 +852,8 @@ test("an override outside 1..120 is clamped, so it cannot disable the retry", as
         );
       });
     });
-    assert.equal(state.requests, 4, `override ${override} still retries`);
-    assert.deepEqual(waits, [wait, wait, wait], `override ${override}`);
+    assert.equal(state.requests, requests, `override ${override} request count`);
+    assert.deepEqual(spent, waits, `override ${override} waits`);
   }
 });
 
