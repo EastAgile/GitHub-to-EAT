@@ -7,7 +7,7 @@ import {
   runWithProgress,
   scrubControl,
 } from "../src/progress.js";
-import { capture } from "./helpers.js";
+import { capture, renderTerminalRows } from "./helpers.js";
 
 test("returns the function's result", async () => {
   const out = capture();
@@ -91,6 +91,34 @@ test("non-TTY output stays a single start line for both outcomes", async () => {
     runWithProgress(() => Promise.reject(new Error("x")), "working", { stream: bad }),
   );
   assert.equal(bad.buf, "working...\n");
+});
+
+test("runWithProgress pads a shrinking redraw, so the shorter line clears the longer one", async () => {
+  const out = ttyCapture();
+  let text = "fetching page 1 — rate limited by GitHub, retrying in 60s (retry 1 of 3)";
+  await runWithProgress(
+    async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      text = "fetching page 1";
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    },
+    () => text,
+    { stream: out, intervalMs: 5 },
+  );
+  const [visible] = renderTerminalRows(out.buf);
+  assert.equal(visible.trimEnd(), "fetching page 1 — done in 0s");
+  assert.doesNotMatch(visible, /rate limited/);
+});
+
+test("runWithProgress caps the drawn line to the terminal width, so it cannot wrap", async () => {
+  const out = Object.assign(ttyCapture(), { columns: 20 });
+  await runWithProgress(() => new Promise((resolve) => setTimeout(resolve, 20)), "a".repeat(60), {
+    stream: out,
+    intervalMs: 5,
+  });
+  for (const seg of out.buf.split("\r").filter(Boolean)) {
+    assert.ok(seg.replace(/\n$/, "").length <= 20, JSON.stringify(seg));
+  }
 });
 
 test("formatImportStatus renders a short line per phase", () => {

@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { AuthError, EATClient, EATError } from "../src/client.js";
 import { markerFor } from "../src/dedup.js";
-import { runDirect } from "../src/direct.js";
+import { makeRateLimitNotice, runDirect } from "../src/direct.js";
 import { DEFAULT_CUSTOMIZATION, FALLBACK_LIMITS } from "../src/mapping.js";
 import { makeState, startMockServer } from "../src/mockserver.js";
 import { capture, issueNode, withGitHubStub } from "./helpers.js";
@@ -2977,4 +2977,29 @@ test("a refused comment leaves its story marked imported, so the next run skips 
   } finally {
     await mock.close();
   }
+});
+
+// --- the notice slot several backoffs share (story #259659) ------------------
+
+test("a finished wait does not clear one still running, and the longest is shown", () => {
+  const notice = makeRateLimitNotice();
+  assert.equal(notice.text(), "");
+  // The GraphQL walk and the REST release listing back off together: two loops, one slot.
+  notice.onWait({ seconds: 1, attempt: 1, maxRetries: 3 }, 1);
+  assert.match(notice.text(), /retrying in 1s \(retry 1 of 3\)/);
+  notice.onWait({ seconds: 30, attempt: 2, maxRetries: 3 }, 2);
+  assert.match(notice.text(), /retrying in 30s \(retry 2 of 3\)/);
+  notice.onWait(null, 1);
+  assert.match(notice.text(), /retrying in 30s/, "the 30s wait is still running");
+  notice.onWait(null, 2);
+  assert.equal(notice.text(), "", "both waits ended, so the slot is empty");
+});
+
+test("the longest wait wins whichever order the backoffs start in", () => {
+  const notice = makeRateLimitNotice();
+  notice.onWait({ seconds: 30, attempt: 1, maxRetries: 3 }, 1);
+  notice.onWait({ seconds: 2, attempt: 1, maxRetries: 3 }, 2);
+  assert.match(notice.text(), /retrying in 30s/, "the later, shorter wait must not take the slot");
+  notice.onWait(null, 2);
+  assert.match(notice.text(), /retrying in 30s/);
 });

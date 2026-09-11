@@ -15,7 +15,7 @@ import {
 } from "../src/direct.js";
 import { RateBudgetError } from "../src/github.js";
 import { startMockServer } from "../src/mockserver.js";
-import { capture, issueNode, releaseRow, withGitHubStub } from "./helpers.js";
+import { capture, issueNode, releaseRow, renderTerminalRows, withGitHubStub } from "./helpers.js";
 
 /**
  * @param {string} base
@@ -705,4 +705,187 @@ test("the server engine's output and import body are byte-identical to before th
   } finally {
     await mock.close();
   }
+});
+
+// --- the rate-limit wait on the progress line (story #259659) ----------------
+
+/**
+ * A GitHub stand-in that rate-limits the two listings the direct engine runs together.
+ * It refuses the first `refusals` `ImportIssues` POSTs (bare 429, so the run falls back to
+ * the floor, unless `issueRetryAfter` names a wait) and, when `releaseRetryAfter` is set,
+ * the first REST release listing. The counters make a retry that did nothing visible.
+ *
+ * @param {(context: { base: string,
+ *   state: { issuePosts: number, releaseGets: number } }) => Promise<void>} fn
+ * @param {{ refusals?: number, issueRetryAfter?: number | null,
+ *   releaseRetryAfter?: number | null }} [options]
+ */
+async function withRateLimitedGitHub(
+  fn,
+  { refusals = 1, issueRetryAfter = null, releaseRetryAfter = null } = {},
+) {
+  const http = await import("node:http");
+  const state = { issuePosts: 0, releaseGets: 0 };
+  const page = { pageInfo: { hasNextPage: false, endCursor: null } };
+  const server = http.createServer(async (req, res) => {
+    const { pathname } = new URL(req.url ?? "", "http://x");
+    if (req.method === "POST" && pathname === "/graphql") {
+      /** @type {Buffer[]} */
+      const chunks = [];
+      for await (const chunk of req) chunks.push(Buffer.from(chunk));
+      const request = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      const issues = request.operationName === "ImportIssues";
+      if (issues) state.issuePosts += 1;
+      if (issues && state.issuePosts <= refusals) {
+        res.writeHead(429, {
+          "Content-Type": "application/json",
+          ...(issueRetryAfter === null ? {} : { "retry-after": String(issueRetryAfter) }),
+        });
+        res.end(JSON.stringify({ message: "slow down" }));
+        return;
+      }
+      /** @type {Record<string, unknown>} */
+      const connections = {
+        ImportIssues: { issues: { totalCount: 1, ...page, nodes: [issueNode()] } },
+        ImportLabels: { labels: { ...page, nodes: [] } },
+      };
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ data: { repository: connections[request.operationName] ?? {} } }));
+      return;
+    }
+    if (pathname === "/repos/o/r/releases") {
+      state.releaseGets += 1;
+      if (releaseRetryAfter !== null && state.releaseGets === 1) {
+        res.writeHead(429, {
+          "Content-Type": "application/json",
+          "retry-after": String(releaseRetryAfter),
+        });
+        res.end(JSON.stringify({ message: "slow down" }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end("[]");
+      return;
+    }
+    const body =
+      pathname === "/rate_limit" ? { resources: { graphql: { remaining: 5000 } } } : null;
+    res.writeHead(body === null ? 404 : 200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(body ?? { message: "no stub route" }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(undefined)));
+  const address = /** @type {import("node:net").AddressInfo} */ (server.address());
+  try {
+    await fn({ base: `http://127.0.0.1:${address.port}`, state });
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(() => resolve(undefined)));
+  }
+}
+
+/**
+ * Run one import whose GitHub listings are rate-limited, with the floor cut to a second so
+ * every wait is real but short.
+ *
+ * @param {import("../src/progress.js").OutStream} stream
+ * @param {{ refusals?: number, issueRetryAfter?: number | null,
+ *   releaseRetryAfter?: number | null, included?: string[] }} [options]
+ * @returns {Promise<{ issuePosts: number, releaseGets: number }>}
+ */
+async function importThroughWaits(stream, { included = ["issues"], ...stub } = {}) {
+  const { runDirect } = await import("../src/direct.js");
+  const { withEnv } = await import("./helpers.js");
+  const mock = await startMockServer();
+  /** @type {{ issuePosts: number, releaseGets: number }} */
+  let counted = { issuePosts: 0, releaseGets: 0 };
+  try {
+    await withEnv({ GITHUB_IMPORT_RATE_LIMIT_FLOOR_SECS: "1" }, () =>
+      withRateLimitedGitHub(async ({ base, state }) => {
+        await runDirect(new EATClient(mock.baseUrl, "ea_token"), 91, "o", "r", {
+          included,
+          token: "ghp_secret",
+          apiBase: base,
+          stream,
+        });
+        counted = state;
+      }, stub),
+    );
+  } finally {
+    await mock.close();
+  }
+  return counted;
+}
+
+/** The elapsed seconds one redraw reported, or -1 when it carried no clock. */
+const elapsedOf = (/** @type {string} */ redraw) => Number(redraw.match(/\((\d+)s\)/)?.[1] ?? -1);
+
+test("a rate-limit wait shows on the redrawn fetch line and never breaks it", async () => {
+  const stream = { ...capture(), isTTY: true, columns: 200 };
+  const state = await importThroughWaits(stream);
+  assert.equal(state.issuePosts, 2, "the refused listing was re-sent exactly once");
+  // The whole fetch stage is one `\r`-redrawn line, so it ends at the first newline.
+  const fetchLine = stream.buf.slice(0, stream.buf.indexOf("\n"));
+  assert.match(fetchLine, /rate limited by GitHub, retrying in 1s \(retry 1 of 3\)/);
+  // What the reader is left looking at is the rendered row, not the last chunk written:
+  // a shorter redraw leaves the tail of the longer notice behind unless the writer pads.
+  const [visible] = renderTerminalRows(fetchLine);
+  assert.match(visible.trimEnd(), /^fetching o\/r from GitHub page 1\/1 — done in \d+s$/);
+  assert.doesNotMatch(visible, /rate limited/);
+});
+
+test("the notice cannot push the fetch line past the terminal width", async () => {
+  const stream = { ...capture(), isTTY: true, columns: 80 };
+  const state = await importThroughWaits(stream);
+  assert.equal(state.issuePosts, 2);
+  const fetchLine = stream.buf.slice(0, stream.buf.indexOf("\n"));
+  assert.match(fetchLine, /rate limited by GitHub, retrying in 1s/);
+  // A wrapped line puts `\r` at the start of the last visual row only, so every later
+  // redraw corrupts the rows above it.
+  const rows = renderTerminalRows(fetchLine, { columns: 80 });
+  assert.equal(rows.length, 1, `the line wrapped: ${JSON.stringify(rows)}`);
+  assert.doesNotMatch(rows[0], /rate limited/);
+});
+
+test("a wait that ends leaves a longer one still running on the line", async () => {
+  const stream = { ...capture(), isTTY: true, columns: 200 };
+  const state = await importThroughWaits(stream, {
+    included: ["issues", "releases"],
+    issueRetryAfter: 3,
+    releaseRetryAfter: 1,
+  });
+  assert.equal(state.issuePosts, 2, "the refused issue listing was re-sent once");
+  assert.equal(state.releaseGets, 2, "the release listing was refused and re-sent alongside it");
+  const fetchLine = stream.buf.slice(0, stream.buf.indexOf("\n"));
+  const redraws = fetchLine.split("\r").filter(Boolean);
+  // The 1s wait ends a full two seconds before the 3s one, so a redraw that still names
+  // the 3s wait past then is the ref-count surviving the shorter wait's clear.
+  const stillShown = redraws.filter((r) => r.includes("retrying in 3s")).map(elapsedOf);
+  assert.ok(
+    Math.max(-1, ...stillShown) >= 2,
+    `the 3s wait stopped showing when the 1s wait cleared: ${JSON.stringify(redraws)}`,
+  );
+  // The shorter wait is over by then: showing it would promise an earlier resume.
+  for (const redraw of redraws.filter((r) => elapsedOf(r) >= 2)) {
+    assert.doesNotMatch(redraw, /retrying in 1s/);
+  }
+  const [visible] = renderTerminalRows(fetchLine);
+  assert.doesNotMatch(visible, /rate limited/, "both waits ended, so the notice is gone");
+});
+
+test("a non-TTY run prints one plain line per wait, so a silent minute is not a hang", async () => {
+  const stream = capture();
+  const state = await importThroughWaits(stream, { refusals: 2 });
+  assert.equal(state.issuePosts, 3, "two refusals, then the attempt that succeeded");
+  // One line per wait, each naming its own attempt: at a single wait "per wait" and
+  // "per run" render the same log.
+  assert.deepEqual(
+    stream.buf.split("\n").filter((line) => line.includes("rate limited by GitHub")),
+    [
+      "rate limited by GitHub, retrying in 1s (retry 1 of 3)...",
+      "rate limited by GitHub, retrying in 1s (retry 2 of 3)...",
+    ],
+  );
+  const notice = "rate limited by GitHub, retrying in 1s (retry 1 of 3)";
+  // Between the fetch line and the next stage: the notice landed during the wait.
+  assert.ok(stream.buf.indexOf(notice) > stream.buf.indexOf("fetching o/r from GitHub..."));
+  assert.ok(stream.buf.indexOf(notice) < stream.buf.indexOf("scanning project 91"));
 });

@@ -858,14 +858,56 @@ it; the cost is wording on an already-failed run (SAML enforcement or an IP
 allow-list reads as an unclassified fetch error rather than "check your token"),
 never a different row.
 
-**The transport does not retry a rate limit.** The server re-issues a
-rate-limited request after the advertised `retry-after`, or after a one-minute
-floor when the header is absent, for at most three attempts — abandoning the
-wait when it would exceed two minutes, since that is the hourly budget resetting
-rather than GitHub's secondary limit (its story #145337). This transport
-classifies such a refusal identically and then raises it. Tracked as story
-#259659; until that lands, a run meeting the secondary limit stops where the
-server engine would have waited it out.
+**The GitHub fetch retries a rate limit, three times at most per refused
+request** (story #259659, mirroring github.rs `send_retrying` and its story
+#145337). A refusal the status mapping above classes as rate limiting — a 429, or
+a 403 carrying `retry-after` or `x-ratelimit-remaining: 0` — is re-sent after the
+wait it advertises, three times past the first attempt, so **four requests at
+most for that request**. The counter lives inside the retry, so the next request
+starts again at four: a listing that meets the limit on every page spends the
+budget on every page. That bound is the server's own, but the server runs the
+import as a background job, where this one holds a member's terminal. A
+run-level cap is a known gap, not a divergence in the retry itself.
+
+The wait is `retry-after` read as a whole number of seconds. A leading `+` is
+part of such a number, as github.rs's `u64::from_str` reads it. A header that is
+absent, or that is not such a number — an HTTP-date, a fraction, a leading `-`,
+an empty or unparseable value — falls back to a **one-minute floor**.
+`GITHUB_IMPORT_RATE_LIMIT_FLOOR_SECS` sets that floor, which is how the tests
+avoid spending it, and the default is a full minute. The variable **sets** the
+floor rather than only shortening it, and both engines take the value as given
+(config.rs reads it unclamped). The ceiling below judges that floor like any
+advertised wait, so **a value above 120 turns the retry off** for every refusal
+carrying no `retry-after`: the run fails on the first response. A value of `0`
+sends the four requests back to back. Neither is clamped, on either engine.
+
+A wait **longer than two minutes** fails at once — without sleeping, and without
+spending a retry — because that is the hourly budget resetting rather than the
+secondary limit. A number too large to be a wait at all — past
+`Number.MAX_SAFE_INTEGER` — fails there too, rather than reading as a header that
+was never sent. github.rs parses that header as a `u64` and refuses it on the
+same ceiling; past `u64::MAX` its parse fails and it takes the floor instead. Anything the mapping does not class as
+rate limiting (a 500, a bare 403) is raised on the first response, unretried, and
+so is the free `GET /rate_limit` probe: its answer is optional and it fails open,
+so github.rs sends it with plain `send` and this sends it once as well.
+
+**One retry serves both transports**, since both call the one `sendRetrying`
+rather than a copy of it. The GraphQL **envelope's** own `RATE_LIMITED` error is
+*not* retried: that is the point budget below, an hour-scale bucket a foreground
+command must not wait on, and github.rs classifies it after `send_retrying`
+returns as well. The two degradable REST stages — the sub-issue listing and
+`--include deps` — sit behind the same retry, so each now pays up to three
+backoffs before it abandons that issue and warns. github.rs runs its dependency
+batch through `send_retrying` too, so the cost is shared, not a divergence.
+
+The wait is visible while it runs. On a TTY it rides the `\r`-redrawn progress
+line the fetch stage already draws, padded to the previous line and capped to the
+terminal width so the notice can neither wrap nor leave its tail behind. Up to
+four requests back off at once, so the line shows the **longest wait still
+running** and clears only when the last of them ends. A non-TTY run redraws
+nothing, so it prints one plain line per wait instead — a silent minute would
+otherwise read as a hang in a CI log. Both lines are built from numbers this
+transport parsed, so no host-supplied text reaches the terminal through them.
 
 **The point budget is a separate bucket.** GraphQL bills 5000 *points* per hour,
 scored on the nodes a query returns; it does **not** draw on the REST request
@@ -1904,9 +1946,10 @@ engine now does the same, on a **narrow allowlist** of statuses:
   next. The list is an **allowlist for exactly this reason**: a `400 <= s < 500`
   band would absorb a status that means the run itself is wrong, and skip every
   remaining row instead of stopping.
-- **`429` is not retried and not contained** on any write or listing path. The
-  transport does not wait out a rate limit (see "The transport does not retry a
-  rate limit" above), so it raises a typed error naming the `Retry-After` wait and
+- **`429` is not retried and not contained** on any write or listing path. This
+  transport talks to EAT, not to GitHub, and it does not wait out a rate limit —
+  the bounded backoff in "The GitHub fetch retries a rate limit" above covers the
+  GitHub fetch alone. It raises a typed error naming the `Retry-After` wait and
   the run stops. Absorbing it would burn the rest of the plan against a server that
   is answering nothing. The feature detects are the one exception — they swallow a
   `429` like every other failure, see "The listing and prescan stages do not
