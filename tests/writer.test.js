@@ -584,6 +584,119 @@ for (const state of ["started", "finished", "delivered", "accepted"]) {
   });
 }
 
+// --- a draft release's planned date (#1124728) --------------------------------
+
+/** @returns {import("../src/writer.js").WritePlan} */
+const releasePlan = () => ({
+  labels: [],
+  stories: [
+    {
+      external_id: "release-101",
+      name: "v2.1.0-draft",
+      description: null,
+      story_type: "release",
+      current_state: "unstarted",
+      created_at: "2026-07-20T00:00:00Z",
+      completed_at: null,
+      scheduled_at: "2026-07-20T00:00:00Z",
+      labels: [],
+      tasks: [],
+      comments: [],
+    },
+  ],
+});
+
+test("sendReleaseDate sends a draft release's scheduled_at", async () => {
+  const { client, stories } = recordingClient();
+  await writePlan(client, 91, releasePlan(), {
+    stream: capture(),
+    sendProvenance: true,
+    sendReleaseDate: true,
+  });
+
+  assert.equal(stories[0].scheduled_at, "2026-07-20T00:00:00Z");
+});
+
+test("without sendReleaseDate a draft release create carries no scheduled_at", async () => {
+  const { client, stories } = recordingClient();
+  await writePlan(client, 91, releasePlan(), { stream: capture(), sendProvenance: true });
+
+  assert.ok(!("scheduled_at" in stories[0]), JSON.stringify(stories[0]));
+});
+
+// stories.rs:3858-3869 auto-places a dated release at its projected date boundary unless the
+// create also carries `import_source` — without the pair the field would reorder the board.
+test("sendReleaseDate without sendProvenance sends no scheduled_at", async () => {
+  const { client, stories } = recordingClient();
+  await writePlan(client, 91, releasePlan(), { stream: capture(), sendReleaseDate: true });
+
+  assert.ok(!("scheduled_at" in stories[0]), JSON.stringify(stories[0]));
+});
+
+test("a published release's null scheduled_at is omitted, not sent as null", async () => {
+  const { client, stories } = recordingClient();
+  const plan = releasePlan();
+  plan.stories[0].current_state = "accepted";
+  plan.stories[0].completed_at = "2026-07-20T12:00:00Z";
+  plan.stories[0].scheduled_at = null;
+  await writePlan(client, 91, plan, {
+    stream: capture(),
+    sendProvenance: true,
+    sendReleaseDate: true,
+  });
+
+  assert.ok(!("scheduled_at" in stories[0]), JSON.stringify(stories[0]));
+});
+
+// The server 400s `release_date_release_only` before it touches a row. The refusal is
+// row-scoped, so a mapper bug would cost that release its story, not the run.
+for (const storyType of ["feature", "bug", "chore"]) {
+  test(`a ${storyType} op carrying a scheduled_at sends none`, async () => {
+    const { client, stories } = recordingClient();
+    const plan = releasePlan();
+    plan.stories[0].story_type = /** @type {any} */ (storyType);
+    await writePlan(client, 91, plan, {
+      stream: capture(),
+      sendProvenance: true,
+      sendReleaseDate: true,
+    });
+
+    assert.ok(!("scheduled_at" in stories[0]), JSON.stringify(stories[0]));
+  });
+}
+
+// Deliberately independent of `sendDates`: the server binds `scheduled_at` raw, outside the
+// `clamp_dates` chain that ties `started_at` to `created_at`, so nothing couples the two.
+test("sendReleaseDate rides without sendDates, the one date field that does", async () => {
+  const { client, stories } = recordingClient();
+  await writePlan(client, 91, releasePlan(), {
+    stream: capture(),
+    sendProvenance: true,
+    sendReleaseDate: true,
+  });
+
+  assert.equal(stories[0].scheduled_at, "2026-07-20T00:00:00Z");
+  assert.ok(!("created_at" in stories[0]), JSON.stringify(stories[0]));
+});
+
+// The real create binds it on the INSERT (stories.rs:3848), so the mock must store it too —
+// a recording client alone cannot tell "sent" from "accepted".
+test("an unpublished release's planned date lands on the stored row", async () => {
+  const mock = await startMockServer();
+  try {
+    await writePlan(new EATClient(mock.baseUrl, "ea_token"), 91, releasePlan(), {
+      stream: capture(),
+      sendProvenance: true,
+      sendReleaseDate: true,
+    });
+
+    const [story] = mock.state.stories[91];
+    assert.equal(story.scheduled_at, "2026-07-20T00:00:00Z");
+  } finally {
+    await mock.close();
+  }
+});
+
 /**
  * @param {import("../src/mapping.js").StoryOp["links"]} links
  * @returns {import("../src/writer.js").WritePlan}

@@ -74,6 +74,8 @@ import { DONE_STATES, STARTED_STATES } from "./mapping.js";
  * @property {boolean} startedBackdating when true (default, mirroring prod) *and*
  *   `backdating` is too, the openapi advertises `started_at` and the handler persists it;
  *   false predates #35489
+ * @property {boolean} releaseDate when true (default, mirroring prod), the openapi advertises
+ *   `scheduled_at`, the handler persists it, and another type carrying it is 400d (#386356)
  * @property {boolean} people when true (default, mirroring the server tree), the openapi
  *   advertises + the handlers persist the EAT #32773 person fields; false, absent + ignored,
  *   and an `external`-only owner 400s the way serde-dropping the unknown key makes it
@@ -147,6 +149,7 @@ export function makeState(overrides = {}) {
     provenance: true,
     backdating: true,
     startedBackdating: true,
+    releaseDate: true,
     people: true,
     dependencyImport: true,
     storyLinks: true,
@@ -195,6 +198,8 @@ const STORY_FIELDS = new Set([
   "blockers",
   "import_source",
   "import_external_id",
+  // Story #386356 — on the real server's allowlist too, release rows only.
+  "scheduled_at",
 ]);
 
 /**
@@ -206,7 +211,7 @@ const STORY_FIELDS = new Set([
  */
 function openapiDoc(state) {
   const ml = state.maxLengths ?? {};
-  // Backdated instants — advertised only when the server supports backdating.
+  // The instant shape the backdating and release-date fields are advertised with.
   const dateTime = { type: ["string", "null"], format: "date-time" };
   const externalPerson = { type: ["object", "null"] };
   /** @param {Record<string, number | undefined>} fields @param {Record<string, any>} [extra] */
@@ -276,6 +281,7 @@ function openapiDoc(state) {
           estimate: { type: ["string", "null"] },
           ...(state.backdating ? { created_at: dateTime, completed_at: dateTime } : {}),
           ...(startedBackdatingOn(state) ? { started_at: dateTime } : {}),
+          ...(state.releaseDate ? { scheduled_at: dateTime } : {}),
           // `owners` is server story #199, not #32773 — every older server publishes it.
           owners: { type: ["array", "null"] },
           ...(state.people ? { requestor: externalPerson } : {}),
@@ -1024,6 +1030,18 @@ function createStory(state, projectId, body) {
     }
   }
 
+  // Last guard before the row is built, like the real handler, which checks the pair and the
+  // attribution first. A bare `BadRequestWithCode`: no `details`, unlike the refusals above.
+  if (state.releaseDate && body.scheduled_at != null && body.story_type !== "release") {
+    return {
+      status: 400,
+      payload: {
+        code: "release_date_release_only",
+        error: "A release date can only be set on release stories.",
+      },
+    };
+  }
+
   state.labels[projectId] ??= [];
   const projectLabels = state.labels[projectId];
   const labels = [];
@@ -1093,6 +1111,9 @@ function createStory(state, projectId, body) {
       story.completed_at =
         body.completed_at < body.created_at ? body.created_at : body.completed_at;
     }
+  }
+  if (state.releaseDate && body.scheduled_at != null) {
+    story.scheduled_at = body.scheduled_at;
   }
   if (startedBackdatingOn(state) && body.started_at != null) {
     // Clamped by the server's one shared chain (common.rs `clamp_dates`) against the row's

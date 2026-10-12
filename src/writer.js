@@ -199,14 +199,20 @@ async function withRetry(fn, attempts, delayMs) {
  * @param {{ runId?: string, stream?: import("./progress.js").OutStream,
  *   retryAttempts?: number, retryDelayMs?: number, sendProvenance?: boolean,
  *   sendDates?: boolean, sendStarted?: boolean, sendPeople?: boolean,
- *   sendLinks?: boolean }} [options]
+ *   sendLinks?: boolean, sendReleaseDate?: boolean }} [options]
  *   `runId` scopes the idempotency keys (fresh per run, stable across in-run
  *   retries); `sendProvenance` adds the re-import pair (EAT #31427) to every
  *   story create; `sendDates` adds backdated `created_at`/`completed_at` to the
  *   writes; `sendStarted` adds a backdated `started_at` (EAT #35489) to creates at or past
  *   `started`; `sendPeople` adds the imported GitHub requestor, owners and comment author
  *   (EAT #32773); `sendLinks` writes each story's `pull_request` links — all off keep
- *   the payloads and the call sequence byte-identical to v3
+ *   the payloads and the call sequence byte-identical to v3; `sendReleaseDate` adds an
+ *   unpublished release's `scheduled_at` (EAT #386356), only alongside `sendProvenance`,
+ *   whose presence the server's placement branch reads. It is deliberately **not** gated on
+ *   `sendDates`: the create binds `scheduled_at` raw, outside the `clamp_dates` chain that
+ *   ties `started_at` to `created_at`, so no mechanism couples the two. A planned date on a
+ *   `now()`-stamped row is unreachable by shipping order (#31425 long predates #386356) and
+ *   harmless if it ever occurs — the column is a plan, not a position on the created axis
  * @returns {Promise<WriteResult>}
  */
 export async function writePlan(client, projectId, plan, options = {}) {
@@ -220,6 +226,7 @@ export async function writePlan(client, projectId, plan, options = {}) {
     sendStarted = false,
     sendPeople = false,
     sendLinks = false,
+    sendReleaseDate = false,
   } = options;
   /** @template T @param {() => Promise<T>} fn */
   const retrying = (fn) => withRetry(fn, retryAttempts, retryDelayMs);
@@ -479,6 +486,18 @@ export async function writePlan(client, projectId, plan, options = {}) {
             if (op.completed_at != null && DONE_STATES.has(op.current_state)) {
               body.completed_at = op.completed_at;
             }
+          }
+          // Paired with the provenance marker on purpose: stories.rs:3858-3869 auto-places a
+          // dated release unless the create carries `import_source`, reordering the board.
+          if (
+            sendReleaseDate &&
+            sendProvenance &&
+            op.scheduled_at != null &&
+            // The server 400s the field on any other type; contained, that costs the row
+            // and its sub-rows, so the guard keeps a mapper bug from dropping a release.
+            op.story_type === "release"
+          ) {
+            body.scheduled_at = op.scheduled_at;
           }
           /** @type {import("./mapping.js").ExternalPerson[]} */
           const storyPeople = [];

@@ -361,6 +361,45 @@ test("supportsStartedBackdating is false when /openapi.json is absent", async ()
   }
 });
 
+// --- release date feature detection (story #1124728) --------------------------
+
+test("supportsReleaseDate is true when the spec advertises scheduled_at, false otherwise", async () => {
+  const mock = await startMockServer();
+  try {
+    assert.equal(await new EATClient(mock.baseUrl, "tok").supportsReleaseDate(), true);
+  } finally {
+    await mock.close();
+  }
+  const older = await startMockServer(makeState({ releaseDate: false }));
+  try {
+    assert.equal(await new EATClient(older.baseUrl, "tok").supportsReleaseDate(), false);
+  } finally {
+    await older.close();
+  }
+});
+
+// EAT #386356 shipped after #31425's backdating pair, so a server can publish the pair
+// and not this field — folding the two into one probe would guess wrong here.
+test("supportsReleaseDate is independent of supportsBackdating", async () => {
+  const older = await startMockServer(makeState({ releaseDate: false }));
+  try {
+    const client = new EATClient(older.baseUrl, "tok");
+    assert.equal(await client.supportsBackdating(), true);
+    assert.equal(await client.supportsReleaseDate(), false);
+  } finally {
+    await older.close();
+  }
+});
+
+test("supportsReleaseDate is false when /openapi.json is absent", async () => {
+  const mock = await startMockServer(makeState({ serverDryRun: false }));
+  try {
+    assert.equal(await new EATClient(mock.baseUrl, "tok").supportsReleaseDate(), false);
+  } finally {
+    await mock.close();
+  }
+});
+
 // --- person attribution feature detection (story #33465) ----------------------
 
 test("supportsPersonAttribution is true when the spec advertises requestor, false otherwise", async () => {

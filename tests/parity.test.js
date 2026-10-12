@@ -110,6 +110,20 @@ test("parity: a draft release imports to the backlog, and so does one with no pu
   assert.equal(oneRelease({ body: "   " }).description, null);
 });
 
+// `release_to_record` plans a draft from its own `created_at` and leaves the published
+// branch None — the direct engine mirrors both halves (story #1124728).
+test("parity: only a draft release carries the planned date, and it is its created_at", () => {
+  assert.equal(
+    oneRelease({ draft: true, published_at: null }).scheduled_at,
+    "2024-03-01T00:00:00Z",
+  );
+  assert.equal(
+    oneRelease({ draft: false, published_at: null }).scheduled_at,
+    "2024-03-01T00:00:00Z",
+  );
+  assert.equal(oneRelease({}).scheduled_at, null);
+});
+
 // A published release lands `accepted`, which is inside STARTED_STATES, so the writer's
 // rank guard cannot backstop this — only `release_to_record`'s own null keeps it off the wire.
 for (const [label, over] of /** @type {[string, object][]} */ ([

@@ -1747,6 +1747,77 @@ test("a published:false release with no publish date is a backlog story too", ()
   assert.equal(op.completed_at, null);
 });
 
+// --- a draft release's planned date (story #1124728) -------------------------
+
+// `release_to_record` seeds an unpublished release's `scheduled_at` from its own
+// `created_at`, never from `published_at` — which a draft has none of anyway.
+test("a draft release carries its created_at as the planned date", () => {
+  const [op] = mapRepo(releaseRepo(releaseRow({ draft: true, published_at: null }))).stories;
+  assert.equal(op.scheduled_at, "2026-07-08T11:46:45Z");
+  assert.equal(op.created_at, "2026-07-08T11:46:45Z");
+});
+
+test("a release published:false by a missing publish date carries the planned date too", () => {
+  const [op] = mapRepo(releaseRepo(releaseRow({ published_at: null }))).stories;
+  assert.equal(op.scheduled_at, "2026-07-08T11:46:45Z");
+});
+
+// `release_to_record` leaves `scheduled_at` None on the published branch: the row is
+// accepted, and its date is the completion, not a plan.
+test("a published release carries no planned date", () => {
+  const [op] = mapRepo(releaseRepo(releaseRow())).stories;
+  assert.equal(op.scheduled_at, null);
+  assert.equal(op.completed_at, "2026-07-08T11:59:40Z");
+});
+
+// Not "the create would reject it": `parse_release_date` also takes a bare `YYYY-MM-DD`.
+// `sourceDate` is the mapper's one strict RFC 3339 gate, and the planned date rides it too.
+test("a created_at outside the mapper's date gate carries no planned date", () => {
+  for (const created_at of UNSENDABLE_DATES) {
+    const [op] = mapRepo(releaseRepo(releaseRow({ draft: true, created_at }))).stories;
+    assert.equal(op.scheduled_at, null, `created_at ${JSON.stringify(created_at)}`);
+  }
+});
+
+// The one entry the server would have taken: a date-only `created_at` reaches
+// `parse_release_date` as midnight UTC, so the importer plans the release and we send
+// nothing. GitHub emits RFC 3339 always, so no real repo reaches it (CONTRACT.md).
+test("a date-only created_at is the mapper's one planned-date parity gap", () => {
+  const [op] = mapRepo(releaseRepo(releaseRow({ draft: true, created_at: "2026-07-08" }))).stories;
+  assert.equal(op.scheduled_at, null);
+  assert.equal(op.created_at, null);
+});
+
+// The field is release-only server-side (`400 release_date_release_only`), so no other
+// mapper may emit the key at all — an absent key cannot reach the write by accident.
+test("only a release op carries a scheduled_at key", () => {
+  const plan = mapRepo({
+    issues: [
+      {
+        number: 7,
+        title: "an issue",
+        body: "",
+        state: "open",
+        created_at: "2024-05-01T00:00:00Z",
+        labels: [],
+      },
+    ],
+    comments: [],
+    labels: [],
+    releases: [releaseRow({ draft: true })],
+  });
+  const issue = /** @type {any} */ (plan.stories.find((op) => op.external_id === "7"));
+  assert.ok(!("scheduled_at" in issue), JSON.stringify(issue));
+  const release = /** @type {any} */ (plan.stories.find((op) => op.external_id === "release-100"));
+  assert.equal(release.scheduled_at, "2026-07-08T11:46:45Z");
+});
+
+test("clampPlan carries a draft release's planned date through untouched", () => {
+  const [op] = mapRepo(releaseRepo(releaseRow({ draft: true }))).stories;
+  const { stories } = clampPlan({ labels: [], stories: [op] }, FALLBACK_LIMITS);
+  assert.equal(stories[0].scheduled_at, "2026-07-08T11:46:45Z");
+});
+
 // github.rs:869-876 runs both dates through parse_source_datetime, which yields None on
 // anything it cannot read — so "published" means the date is real. The direct engine has a
 // second, stricter bound the importer does not: it *forwards* the value into
