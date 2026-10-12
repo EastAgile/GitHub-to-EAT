@@ -976,6 +976,92 @@ test("a server without #35489 ignores started_at instead of rejecting it", async
   }
 });
 
+// --- a draft release's planned date (#1124728) --------------------------------
+
+test("a release create persists scheduled_at and advertises it", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    assert.equal(await client.supportsReleaseDate(), true);
+    const created = await client.createStory(
+      91,
+      {
+        name: "v2.1.0-draft",
+        story_type: "release",
+        current_state: "unstarted",
+        scheduled_at: "2026-07-20T00:00:00Z",
+      },
+      "k",
+    );
+    assert.equal(created.scheduled_at, "2026-07-20T00:00:00Z");
+    const [story] = mock.state.stories[91];
+    assert.equal(story.scheduled_at, "2026-07-20T00:00:00Z");
+  } finally {
+    await mock.close();
+  }
+});
+
+// stories.rs:3765 refuses it before any row is touched, with a bare code and no `details`.
+for (const storyType of ["feature", "bug", "chore"]) {
+  test(`scheduled_at on a ${storyType} create is 400 release_date_release_only`, async () => {
+    const mock = await startMockServer();
+    try {
+      await assert.rejects(
+        new EATClient(mock.baseUrl, "ea_token").createStory(
+          91,
+          { name: "s", story_type: storyType, scheduled_at: "2026-07-20T00:00:00Z" },
+          "k",
+        ),
+        /** @param {any} err */ (err) =>
+          err.status === 400 && err.code === "release_date_release_only",
+      );
+      assert.equal(mock.state.stories[91], undefined);
+    } finally {
+      await mock.close();
+    }
+  });
+}
+
+// No deny_unknown_fields server-side, so a server predating #386356 drops the key silently —
+// a run against it must still import, just without the planned date.
+test("a server without #386356 ignores scheduled_at instead of rejecting it", async () => {
+  const mock = await startMockServer(makeState({ releaseDate: false }));
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    assert.equal(await client.supportsReleaseDate(), false);
+    await client.createStory(
+      91,
+      {
+        name: "v2.1.0-draft",
+        story_type: "release",
+        current_state: "unstarted",
+        scheduled_at: "2026-07-20T00:00:00Z",
+      },
+      "k",
+    );
+    const [story] = mock.state.stories[91];
+    assert.ok(!("scheduled_at" in story), JSON.stringify(story));
+  } finally {
+    await mock.close();
+  }
+});
+
+// The refusal is the newer field's, so an older server must not invent it either.
+test("a server without #386356 does not refuse scheduled_at on a non-release type", async () => {
+  const mock = await startMockServer(makeState({ releaseDate: false }));
+  try {
+    await new EATClient(mock.baseUrl, "ea_token").createStory(
+      91,
+      { name: "s", story_type: "feature", scheduled_at: "2026-07-20T00:00:00Z" },
+      "k",
+    );
+    const [story] = mock.state.stories[91];
+    assert.ok(!("scheduled_at" in story), JSON.stringify(story));
+  } finally {
+    await mock.close();
+  }
+});
+
 test("async import returns 202 then a job that progresses to done with a result", async () => {
   const mock = await startMockServer(makeState({ asyncImport: true }));
   try {

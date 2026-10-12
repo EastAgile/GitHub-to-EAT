@@ -1172,6 +1172,100 @@ test("releases import as release stories carrying the server importer's provenan
   }
 });
 
+// --- a draft release's planned date (#1124728) --------------------------------
+
+test("a draft release imports with its created_at as the planned date", async () => {
+  const mock = await startMockServer();
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    await runDirect(client, 91, "o", "r", {
+      included: ["issues", "releases"],
+      stream: capture(),
+      github: {
+        fetchAll: async () => ({ issues: [], comments: [], labels: [], releases: releaseRows() }),
+      },
+    });
+    const rows = mock.state.stories[91];
+    const draft = /** @type {any} */ (rows.find((r) => r.import_external_id === "release-101"));
+    assert.equal(draft.scheduled_at, "2026-07-20T00:00:00Z");
+    // The published row is accepted: its date is the completion, so it carries no plan.
+    const published = /** @type {any} */ (rows.find((r) => r.import_external_id === "release-100"));
+    assert.ok(!("scheduled_at" in published), JSON.stringify(published));
+    assert.equal(published.completed_at, "2026-07-08T11:59:40Z");
+  } finally {
+    await mock.close();
+  }
+});
+
+// Such a server drops the unknown key silently, so the stored row looks the same whether the
+// probe fired or not — only the sent body can say the CLI withheld the field.
+test("against a server without #386356 the create body carries no scheduled_at", async () => {
+  const mock = await startMockServer(makeState({ releaseDate: false }));
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    const creates = spy(client, "createStory");
+    const outcome = await runDirect(client, 91, "o", "r", {
+      included: ["issues", "releases"],
+      stream: capture(),
+      github: {
+        fetchAll: async () => ({ issues: [], comments: [], labels: [], releases: releaseRows() }),
+      },
+    });
+    assert.equal(outcome.importedStories, 2);
+    assert.equal(creates.length, 2);
+    for (const [, body] of creates) assert.ok(!("scheduled_at" in body), JSON.stringify(body));
+    const draft = /** @type {any} */ (
+      mock.state.stories[91].find((r) => r.import_external_id === "release-101")
+    );
+    assert.equal(draft.current_state, "unstarted");
+    assert.equal(draft.created_at, "2026-07-20T00:00:00Z");
+  } finally {
+    await mock.close();
+  }
+});
+
+// stories.rs:3858-3869 auto-places a dated release unless the create carries `import_source`,
+// so without the pair the planned date would reorder the board the import must preserve.
+test("without server provenance a draft release is written with no planned date", async () => {
+  const mock = await startMockServer(makeState({ provenance: false }));
+  try {
+    const client = new EATClient(mock.baseUrl, "ea_token");
+    assert.equal(await client.supportsReleaseDate(), true);
+    const outcome = await runDirect(client, 91, "o", "r", {
+      included: ["issues", "releases"],
+      stream: capture(),
+      github: {
+        fetchAll: async () => ({ issues: [], comments: [], labels: [], releases: releaseRows() }),
+      },
+    });
+    assert.equal(outcome.importedStories, 2);
+    for (const row of mock.state.stories[91]) {
+      assert.ok(!("scheduled_at" in row), JSON.stringify(row));
+    }
+  } finally {
+    await mock.close();
+  }
+});
+
+// The plan gains a field, not a row: the dry-run preview must read exactly as it did before.
+test("the planned date does not change what a dry run reports", async () => {
+  const mock = await startMockServer();
+  try {
+    const outcome = await runDirect(new EATClient(mock.baseUrl, "ea_token"), 91, "o", "r", {
+      included: ["issues", "releases"],
+      dryRun: true,
+      stream: capture(),
+      github: { fetchAll: async () => ({ ...fetchedRepo(), releases: releaseRows() }) },
+    });
+    assert.equal(outcome.importedStories, 4);
+    assert.equal(outcome.skipped, 0);
+    assert.deepEqual(outcome.errors, []);
+    assert.equal(mock.state.stories[91], undefined);
+  } finally {
+    await mock.close();
+  }
+});
+
 test("a release story the server importer already wrote is skipped, not duplicated", async () => {
   const mock = await startMockServer();
   try {

@@ -148,7 +148,8 @@ export class HybridFetcher {
  *       supportsBackdating?: () => Promise<boolean>,
  *       supportsStartedBackdating?: () => Promise<boolean>,
  *       supportsPersonAttribution?: () => Promise<boolean>,
- *       supportsStoryLinks?: () => Promise<boolean> }} DirectClient
+ *       supportsStoryLinks?: () => Promise<boolean>,
+ *       supportsReleaseDate?: () => Promise<boolean> }} DirectClient
  */
 
 /**
@@ -546,6 +547,9 @@ export async function runDirect(client, projectId, owner, repo, options) {
 
   // One probe gates writing the pair and reading it back via the list filters.
   const sendProvenance = await (client.supportsProvenanceDedup?.() ?? false);
+  // Its own probe: #386356 shipped after the dedup pair, and the create drops an unknown
+  // field silently. Paired with the provenance gate in the writer — the date reorders without it.
+  const sendReleaseDate = await (client.supportsReleaseDate?.() ?? false);
 
   const imported = await runWithProgress(
     async () => {
@@ -623,6 +627,7 @@ export async function runDirect(client, projectId, owner, repo, options) {
     sendStarted,
     sendPeople,
     sendLinks,
+    sendReleaseDate,
   });
   return {
     importedStories: written.stories,

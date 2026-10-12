@@ -74,6 +74,9 @@ import { DONE_STATES, STARTED_STATES } from "./mapping.js";
  * @property {boolean} startedBackdating when true (default, mirroring prod) *and*
  *   `backdating` is too, the openapi advertises `started_at` and the handler persists it;
  *   false predates #35489
+ * @property {boolean} releaseDate when true (default, mirroring prod), the openapi advertises
+ *   `scheduled_at` on story creates, the handler persists it, and a non-`release` type
+ *   carrying it is refused `400 release_date_release_only` (EAT #386356); false predates it
  * @property {boolean} people when true (default, mirroring the server tree), the openapi
  *   advertises + the handlers persist the EAT #32773 person fields; false, absent + ignored,
  *   and an `external`-only owner 400s the way serde-dropping the unknown key makes it
@@ -147,6 +150,7 @@ export function makeState(overrides = {}) {
     provenance: true,
     backdating: true,
     startedBackdating: true,
+    releaseDate: true,
     people: true,
     dependencyImport: true,
     storyLinks: true,
@@ -276,6 +280,7 @@ function openapiDoc(state) {
           estimate: { type: ["string", "null"] },
           ...(state.backdating ? { created_at: dateTime, completed_at: dateTime } : {}),
           ...(startedBackdatingOn(state) ? { started_at: dateTime } : {}),
+          ...(state.releaseDate ? { scheduled_at: dateTime } : {}),
           // `owners` is server story #199, not #32773 — every older server publishes it.
           owners: { type: ["array", "null"] },
           ...(state.people ? { requestor: externalPerson } : {}),
@@ -992,6 +997,18 @@ function createStory(state, projectId, body) {
     };
   }
 
+  // stories.rs:3765 refuses the planned date on any other type before it touches a row —
+  // a bare `code`, unlike the validation refusals above, with no `details.fields`.
+  if (state.releaseDate && body.scheduled_at != null && body.story_type !== "release") {
+    return {
+      status: 400,
+      payload: {
+        code: "release_date_release_only",
+        error: "A release date can only be set on release stories.",
+      },
+    };
+  }
+
   // EAT #31427 owner-gates the pair and rejects a lone field (probed 2026-07-24).
   if (state.provenance) {
     const hasSource = body.import_source != null;
@@ -1093,6 +1110,9 @@ function createStory(state, projectId, body) {
       story.completed_at =
         body.completed_at < body.created_at ? body.created_at : body.completed_at;
     }
+  }
+  if (state.releaseDate && body.scheduled_at != null) {
+    story.scheduled_at = body.scheduled_at;
   }
   if (startedBackdatingOn(state) && body.started_at != null) {
     // Clamped by the server's one shared chain (common.rs `clamp_dates`) against the row's
