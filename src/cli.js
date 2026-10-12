@@ -246,6 +246,7 @@ function reportDryRunPlan(plan, { stdout, stderr, owner, repo, project, projectT
       (created.length
         ? `  would create ${created.length} placeholder owner(s): ${placeholderOwnersTail(created)}`
         : "") +
+      (plan.warnings ?? []).map((w) => `  note: ${warningLine(w)}\n`).join("") +
       "No changes made.\n",
   );
   writeRowErrors(stderr, plan.errors);

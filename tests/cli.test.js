@@ -442,6 +442,94 @@ test("--engine direct with --dry-run renders the same plan block as the server p
   );
 });
 
+/**
+ * Run a direct-engine --dry-run whose engine returns `plan`; return stdout. A plan
+ * without `warnings` reaches the renderer with no warnings key at all.
+ *
+ * @param {Partial<import("../src/importer.js").ImportOutcome>} plan
+ */
+async function directDryRun(plan) {
+  const out = capture();
+  await inTempDir(() =>
+    withEnv({ EAT_AGENT_KEY: "key" }, async () => {
+      const code = await main(
+        [
+          "--token",
+          "ghp_test",
+          "--project",
+          "91",
+          "--repo",
+          "o/r",
+          "--engine",
+          "direct",
+          "--dry-run",
+        ],
+        {
+          stdout: out,
+          stderr: capture(),
+          preflight: async () => preflightResult(),
+          runDirect: async () => {
+            /** @type {any} */
+            const result = { ...outcome({ dryRun: true }), ...plan };
+            if (plan.warnings === undefined) delete result.warnings;
+            return result;
+          },
+        },
+      );
+      assert.equal(code, 0);
+    }),
+  );
+  return out.buf;
+}
+
+test("a direct dry run reports each warning after the placeholder line, before the close", async () => {
+  const out = await directDryRun({
+    importedStories: 4,
+    externalMembersCreated: ["alice"],
+    warnings: [
+      { code: "dependencies_fetch_failed", count: 1 },
+      { code: "cross_reference_links_failed" },
+    ],
+  });
+  assert.ok(
+    out.includes(
+      "  would import 4 stories (0 labels), would skip 0, 0 error(s).\n" +
+        "  would create 1 placeholder owner(s): @alice — external members outside the " +
+        "project roster; auto-linked when the matching GitHub account signs in.\n" +
+        "  note: dependencies_fetch_failed (1 story)\n" +
+        "  note: cross_reference_links_failed\n" +
+        "No changes made.\n",
+    ),
+    out,
+  );
+  assert.equal(out.trimEnd().split("\n").at(-1), "No changes made.", out);
+});
+
+test("a direct dry-run warning cannot write control characters to the terminal", async () => {
+  const out = await directDryRun({
+    warnings: [{ code: "history\u001b[2K\u202eclamped", count: 1, floor_year: 2024 }],
+  });
+  assert.ok(out.includes("  note: history[2Kclamped (1 story, floor year 2024)\n"), out);
+  assert.ok(!out.includes("\u001b"), JSON.stringify(out));
+  assert.ok(!out.includes("\u202e"), JSON.stringify(out));
+});
+
+for (const [label, warnings] of /** @type {[string, unknown[] | undefined][]} */ ([
+  ["an empty list", []],
+  ["no warnings key", undefined],
+])) {
+  test(`a direct dry run with ${label} prints no note`, async () => {
+    const out = await directDryRun({ importedStories: 4, warnings });
+    assert.ok(
+      out.includes(
+        "  would import 4 stories (0 labels), would skip 0, 0 error(s).\nNo changes made.\n",
+      ),
+      out,
+    );
+    assert.ok(!out.includes("note:"), out);
+  });
+}
+
 test("the direct engine prompts for confirmation like the server engine", async () => {
   await inTempDir(() =>
     withEnv({ EAT_AGENT_KEY: "key" }, async () => {
