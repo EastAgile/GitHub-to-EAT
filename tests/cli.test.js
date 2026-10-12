@@ -442,12 +442,8 @@ test("--engine direct with --dry-run renders the same plan block as the server p
   );
 });
 
-/**
- * Run a direct-engine --dry-run whose engine returns `plan`; return stdout. A plan
- * without `warnings` reaches the renderer with no warnings key at all.
- *
- * @param {Partial<import("../src/importer.js").ImportOutcome>} plan
- */
+/** A plan without `warnings` reaches the renderer with no warnings key at all.
+ * @param {Partial<import("../src/importer.js").ImportOutcome>} plan */
 async function directDryRun(plan) {
   const out = capture();
   await inTempDir(() =>
