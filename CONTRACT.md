@@ -124,15 +124,20 @@ The API base is `.../api/v1`. Shapes the CLI parses:
   issues can hit it. The CLI renders one scrubbed `note:` line per
   entry naming the code, the story count and the floor year.
 
-  A `dry_run` preview reports the same set of `warnings` that the committing
-  import of the same payload reports (agile-tracker `import-mapping.md` §2.4.3,
-  and §3 "Dry-run preview"). `--dry-run` renders them through the same `note:`
-  renderer: one indented `note:` line per entry inside the plan block, after the
-  `would` lines and before the closing `No changes made.`, so an advisory cannot
-  read as a report of a write. The direct engine's local dry run renders its
-  plan's `warnings` through the same block; that engine reports none today. The
-  local-preview fallback for an older server has no server result, so it prints
-  no `note:` line.
+  A `dry_run` preview reports the same advisories as the committing import of
+  the same payload, except `cross_reference_links_failed` (agile-tracker
+  `import-mapping.md` §2.4.3, and §3 "Dry-run preview"). A preview never runs
+  the post-commit PR↔issue link attach that emits that code: in agile-tracker
+  `handlers/import.rs`, only a committing GitHub import takes
+  `execute_github_streamed_import`, and that function holds the attach. `--dry-run`
+  renders the preview's `warnings` through the same `note:` renderer: one
+  indented `note:` line per entry inside the plan block, after the `would` lines
+  and before the closing `No changes made.`. For a preview that the server
+  confirmed (`dry_run: true` in the result), no write took place, so an advisory
+  above that close cannot read as a report of a write. The direct engine's local dry
+  run renders its plan's `warnings` through the same block; that engine reports
+  none today. The local-preview fallback for an older server has no server
+  result, so it prints no `note:` line.
 
   **`unmatched` is always empty for a GitHub import.** The lists are built from
   the *email/name actor cells* a source can carry — `owner_emails`,
