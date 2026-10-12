@@ -1795,7 +1795,8 @@ real server 2026-07-16 and mirrored by `src/mockserver.js`):
   `title` *and* under a `name` alias, both in the `fields=` allowlist;
   missing → `400 validation_failed`); optional `description`, `story_type`,
   `current_state`, `estimate`, `icebox`, `created_at`, `started_at`,
-  `completed_at`, `import_source`, `import_external_id`, `requestor`, `owners`,
+  `completed_at`, `scheduled_at`, `import_source`, `import_external_id`,
+  `requestor`, `owners`,
   and `labels` as bare strings or `{ "name": "..." }` objects — the server
   attaches by name, get-or-creating with default colors (unlike `POST /labels`,
   it never 409s on an existing name), and embeds the full label objects in the
@@ -1816,9 +1817,15 @@ real server 2026-07-16 and mirrored by `src/mockserver.js`):
   `requestor` and `owners[].external` (`ExternalPersonInput`, server story
   #32773 — create-only: the PUT `owners` reconcile rejects `external`); see
   "Marker dedup", "GitHub identity mapping (both engines)" and "Fidelity
-  limitations". The create body has **no** `scheduled_at` — that column is
-  importer-only, so the direct engine cannot reproduce the planned date the
-  server importer seeds on a draft release. 200 → the full story object
+  limitations". **`scheduled_at` is release-only** (server story #386356, on the
+  published spec 2026-10-12, typed `["string", "null"]` / `date-time`): an
+  RFC3339 instant or a bare `YYYY-MM-DD` (midnight UTC), refused on any other
+  `story_type` with `400 release_date_release_only` — a bare machine `code`, no
+  `details.fields` — before any row is written. A release created **with** a
+  date and **without** `import_source` is auto-placed at its projected date
+  boundary instead of the panel top, so the writer sends the date only
+  alongside the dedup pair; see "A draft release's planned date rides the
+  create". 200 → the full story object
   (`story_id`, `title`, `current_state`, `labels`, …). `estimate` is on the
   create schema (`CreateStory`, read from `GET /openapi.json` 2026-07-29) —
   typed `["string", "null"]`, a scale *label* ("3", "½") resolved within the
@@ -2347,11 +2354,28 @@ and both are prescanned, in union.
   engines are otherwise expected to agree row for row. Both engines write **no**
   link row for a blank URL (`github.rs:1086-1090` filters it on the self-link
   path too).
-- **A draft release loses its planned date.** The server importer seeds a draft
-  release's `scheduled_at` from the release's `created_at`, which places it in
-  the iteration grid. `scheduled_at` is not on the public `POST /stories` body
-  (it is importer-only), so the direct engine imports the draft to the backlog
-  with its `created_at` and no planned date. Everything else about the row —
-  title, notes, type, state, external id — matches the server importer, so the
-  two engines still dedup each other's releases. Raising `scheduled_at` on the
-  public create is the EAT-side ask that would close the gap.
+- **A draft release's planned date rides the create, where the server publishes
+  the field.** The server importer seeds a draft release's `scheduled_at` from
+  the release's own `created_at` (`services/import/github.rs::release_to_record`)
+  and leaves it NULL on a published release, whose date is a completion rather
+  than a plan. The direct engine maps the same two branches and sends
+  `scheduled_at` on the `release` create (server story #386356). Three gates
+  stand in front of that write:
+  - The field must be on the published `POST /stories` body
+    (`supportsReleaseDate`). It is its **own** probe: #386356 shipped after the
+    backdating pair, and the create drops an unknown field silently.
+  - The create must also carry the dedup pair.
+    `handlers/stories.rs:3858-3869` auto-places a release created **with** a
+    date at its projected date boundary instead of the panel top, unless
+    `import_source` is set — "imports seed `scheduled_at` from the source's
+    `created_at` and must preserve the source board order, so they keep the top
+    placement". A date without the pair would reorder the board, so the writer
+    sends the two together or neither.
+  - The row's `story_type` must be `release`. The server refuses the field on
+    any other type with `400 release_date_release_only` (a bare machine `code`,
+    no `details.fields`) before it writes a row, which would abort the run.
+  **Divergence, against a server that does not publish the field:** the draft
+  imports to the backlog with its `created_at` and no planned date. Everything
+  else about the row — title, notes, type, state, external id — matches the
+  server importer either way, so the two engines still dedup each other's
+  releases.
