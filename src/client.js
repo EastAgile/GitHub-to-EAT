@@ -374,14 +374,8 @@ export class EATClient {
     return false;
   }
 
-  /**
-   * True when the story create accepts a draft release's planned date (`scheduled_at`,
-   * EAT #386356) — its own probe, since #386356 shipped after #31425 and the create
-   * drops an unknown field silently. Any error (404, auth, parse) counts as "not
-   * supported" — the run then imports a draft release with no planned date.
-   *
-   * @returns {Promise<boolean>}
-   */
+  /** True when the story create accepts a draft release's `scheduled_at` (EAT #386356).
+   * Its own probe: #386356 shipped after #31425, and the create drops an unknown field. */
   async supportsReleaseDate() {
     const spec = await this.#openapi();
     for (const [path, ops] of Object.entries(spec?.paths ?? {})) {

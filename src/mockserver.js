@@ -75,8 +75,7 @@ import { DONE_STATES, STARTED_STATES } from "./mapping.js";
  *   `backdating` is too, the openapi advertises `started_at` and the handler persists it;
  *   false predates #35489
  * @property {boolean} releaseDate when true (default, mirroring prod), the openapi advertises
- *   `scheduled_at` on story creates, the handler persists it, and a non-`release` type
- *   carrying it is refused `400 release_date_release_only` (EAT #386356); false predates it
+ *   `scheduled_at`, the handler persists it, and another type carrying it is 400d (#386356)
  * @property {boolean} people when true (default, mirroring the server tree), the openapi
  *   advertises + the handlers persist the EAT #32773 person fields; false, absent + ignored,
  *   and an `external`-only owner 400s the way serde-dropping the unknown key makes it

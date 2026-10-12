@@ -205,9 +205,9 @@ async function withRetry(fn, attempts, delayMs) {
  *   story create; `sendDates` adds backdated `created_at`/`completed_at` to the
  *   writes; `sendStarted` adds a backdated `started_at` (EAT #35489) to creates at or past
  *   `started`; `sendPeople` adds the imported GitHub requestor, owners and comment author
- *   (EAT #32773); `sendLinks` writes each story's `pull_request` links; `sendReleaseDate`
- *   adds a draft release's planned `scheduled_at` (EAT #386356), and only alongside
- *   `sendProvenance` — all off keep the payloads and the call sequence byte-identical to v3
+ *   (EAT #32773); `sendLinks` writes each story's `pull_request` links — all off keep
+ *   the payloads and the call sequence byte-identical to v3; `sendReleaseDate` adds a
+ *   draft release's `scheduled_at` (EAT #386356), only alongside `sendProvenance`
  * @returns {Promise<WriteResult>}
  */
 export async function writePlan(client, projectId, plan, options = {}) {

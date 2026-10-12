@@ -998,8 +998,7 @@ export const STARTED_STATES = new Set(["started", ...DONE_STATES]);
  * @property {string | null} completed_at the GitHub closed date, or a release's
  *   `published_at`, kept
  * @property {string | null} [scheduled_at] a draft release's planned date, its own
- *   `created_at` (EAT #386356). Release rows only: every other mapper omits the key,
- *   because the server refuses the field on any other type
+ *   `created_at` (EAT #386356). Release rows only — every other mapper omits the key
  * @property {string[]} labels label names on this story
  * @property {{ url: string, link_type: string }[]} [links] a PR's own URL, or the URLs of
  *   the PRs that close this issue
