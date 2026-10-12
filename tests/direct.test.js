@@ -154,11 +154,14 @@ test("dry-run computes the plan locally and writes nothing", async () => {
     assert.equal(plan.skipped, 0);
     assert.equal(plan.dryRun, true);
     assert.deepEqual(plan.errors, []);
+    // CONTRACT says this engine reports no warnings; #386282 changes this pin and that sentence together.
+    assert.deepEqual(plan.warnings, []);
     assert.equal((mock.state.stories[91] ?? []).length, 0);
     assert.equal((mock.state.labels[91] ?? []).length, 0);
 
     // After a real import, a dry-run re-run reports everything as would-skip.
-    await runDirect(client, 91, "o", "r", options);
+    const committed = await runDirect(client, 91, "o", "r", options);
+    assert.deepEqual(committed.warnings, []);
     const rerun = await runDirect(client, 91, "o", "r", { ...options, dryRun: true });
     assert.equal(rerun.importedStories, 0);
     assert.equal(rerun.importedLabels, 0);

@@ -442,7 +442,7 @@ test("--engine direct with --dry-run renders the same plan block as the server p
   );
 });
 
-/** A plan without `warnings` reaches the renderer with no warnings key at all.
+/** An older server sends no `warnings` key, and spreading `warnings: undefined` would keep it.
  * @param {Partial<import("../src/importer.js").ImportOutcome>} plan */
 async function directDryRun(plan) {
   const out = capture();
@@ -484,7 +484,7 @@ test("a direct dry run reports each warning after the placeholder line, before t
     externalMembersCreated: ["alice"],
     warnings: [
       { code: "dependencies_fetch_failed", count: 1 },
-      { code: "cross_reference_links_failed" },
+      { code: "dependencies_truncated", count: 2 },
     ],
   });
   assert.ok(
@@ -493,7 +493,7 @@ test("a direct dry run reports each warning after the placeholder line, before t
         "  would create 1 placeholder owner(s): @alice — external members outside the " +
         "project roster; auto-linked when the matching GitHub account signs in.\n" +
         "  note: dependencies_fetch_failed (1 story)\n" +
-        "  note: cross_reference_links_failed\n" +
+        "  note: dependencies_truncated (2 stories)\n" +
         "No changes made.\n",
     ),
     out,

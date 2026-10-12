@@ -435,7 +435,7 @@ test("a server dry run reports each warning inside the plan block", async () => 
 });
 
 test("a server dry-run warning cannot write control characters to the terminal", async () => {
-  const { out } = await runCliWith(
+  const { code, out } = await runCliWith(
     {
       dry_run: true,
       imported: { stories: 1, labels: 0 },
@@ -445,8 +445,34 @@ test("a server dry-run warning cannot write control characters to the terminal",
     },
     DRY_RUN_ARGS,
   );
+  assert.equal(code, 0);
   assert.ok(out.includes("  note: history[2Kclamped (1 story, floor year 2024)\n"), out);
   assert.ok(!out.includes("\u001b"), JSON.stringify(out));
+  assert.ok(!out.includes("\r"), JSON.stringify(out));
+});
+
+test("a dry-run note renders each warning exactly as the committing run's note", async () => {
+  const result = {
+    imported: { stories: 4, labels: 0 },
+    skipped: 0,
+    errors: [],
+    warnings: [
+      { code: "dependencies_truncated", count: 0 },
+      { code: "history_floor_clamped", floor_year: 2024 },
+      "bare_string_advisory",
+      { code: "history_floor_clamped", count: 3, floor_year: 2024 },
+    ],
+  };
+  /** @param {string} out */
+  const notes = (out) =>
+    out
+      .split("\n")
+      .filter((line) => /^ {0,2}note: /.test(line))
+      .map((line) => line.replace(/^ {2}/, ""));
+  const committed = notes((await runCliWith(result)).out);
+  const previewed = notes((await runCliWith({ ...result, dry_run: true }, DRY_RUN_ARGS)).out);
+  assert.equal(committed.length, 4, committed.join("\n"));
+  assert.deepEqual(previewed, committed);
 });
 
 test("a server dry run without warnings prints no note", async () => {
@@ -967,6 +993,7 @@ test("--dry-run falls back to the local preview on older servers", async () => {
     await mock.close();
   }
   assert.ok(out.buf.includes("Dry run: would import o/r into project 91"));
+  assert.ok(!out.buf.includes("note:"), out.buf);
   assert.equal(mock.state.imports.length, 0); // no import call at all
 });
 
