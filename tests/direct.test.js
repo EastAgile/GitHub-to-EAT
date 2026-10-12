@@ -1248,19 +1248,37 @@ test("without server provenance a draft release is written with no planned date"
 });
 
 // The plan gains a field, not a row: the dry-run preview must read exactly as it did before.
-test("the planned date does not change what a dry run reports", async () => {
+// The field rides a row the plan already had, so the dry-run count and the live count must
+// agree exactly — the planned date must never show up as an extra row.
+test("the planned date rides a planned row rather than adding one", async () => {
+  const options = {
+    included: ["issues", "releases"],
+    stream: capture(),
+    github: { fetchAll: async () => ({ ...fetchedRepo(), releases: releaseRows() }) },
+  };
+  const preview = await startMockServer();
+  /** @type {any} */
+  let planned;
+  try {
+    planned = await runDirect(new EATClient(preview.baseUrl, "ea_token"), 91, "o", "r", {
+      ...options,
+      dryRun: true,
+    });
+    assert.equal(preview.state.stories[91], undefined, "a dry run writes nothing");
+  } finally {
+    await preview.close();
+  }
+
   const mock = await startMockServer();
   try {
-    const outcome = await runDirect(new EATClient(mock.baseUrl, "ea_token"), 91, "o", "r", {
-      included: ["issues", "releases"],
-      dryRun: true,
-      stream: capture(),
-      github: { fetchAll: async () => ({ ...fetchedRepo(), releases: releaseRows() }) },
-    });
-    assert.equal(outcome.importedStories, 4);
-    assert.equal(outcome.skipped, 0);
-    assert.deepEqual(outcome.errors, []);
-    assert.equal(mock.state.stories[91], undefined);
+    const written = await runDirect(new EATClient(mock.baseUrl, "ea_token"), 91, "o", "r", options);
+    assert.equal(written.importedStories, planned.importedStories);
+    assert.equal(mock.state.stories[91].length, planned.importedStories);
+    const dated = mock.state.stories[91].filter((/** @type {any} */ r) => "scheduled_at" in r);
+    assert.deepEqual(
+      dated.map((/** @type {any} */ r) => [r.import_external_id, r.scheduled_at]),
+      [["release-101", "2026-07-20T00:00:00Z"]],
+    );
   } finally {
     await mock.close();
   }

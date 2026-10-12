@@ -1821,11 +1821,16 @@ real server 2026-07-16 and mirrored by `src/mockserver.js`):
   published spec 2026-10-12, typed `["string", "null"]` / `date-time`): an
   RFC3339 instant or a bare `YYYY-MM-DD` (midnight UTC), refused on any other
   `story_type` with `400 release_date_release_only` — a bare machine `code`, no
-  `details.fields` — before any row is written. A release created **with** a
-  date and **without** `import_source` is auto-placed at its projected date
-  boundary instead of the panel top, so the writer sends the date only
-  alongside the dedup pair; see "A draft release's planned date rides the
-  create". 200 → the full story object
+  `details.fields` — before any row is written. It is **not** clamped: the
+  create binds it raw, outside the `clamp_dates` chain that pulls `started_at`
+  forward to `created_at`, so it is independent of the backdating fields and
+  the writer gates it on its own probe alone. A `release` create carrying a
+  date is auto-placed at its projected date boundary instead of the panel top
+  **only when all four hold** — it lands in the `backlog` panel, its initial
+  state is `unstarted`, `import_source` is absent, and the boundary walk finds
+  an anchor; the writer therefore sends the date only alongside the dedup pair.
+  See "An unpublished release's planned date rides the create". 200 → the full
+  story object
   (`story_id`, `title`, `current_state`, `labels`, …). `estimate` is on the
   create schema (`CreateStory`, read from `GET /openapi.json` 2026-07-29) —
   typed `["string", "null"]`, a scale *label* ("3", "½") resolved within the
@@ -2043,11 +2048,14 @@ therefore clamps plan text client-side before writing:
   every plan string it enumerates below — story name, description, cross-link block,
   external id and label names, label name and colours, epic title and description,
   task, blocker, comment, link url and type, and each imported person's id, username,
-  display name and profile URL. Four written plan strings are **outside** it: the
-  story's `created_at`, `started_at` and `completed_at`, and a comment's `created_at`.
-  The mock does not check those four either, so a NUL in one costs its row — one
-  contained refusal, not the run. Only GitHub's own timestamps fill them, and a
-  release's date is validated RFC 3339 before it is used at all.
+  display name and profile URL. Five written plan strings are **outside** it: the
+  story's `created_at`, `started_at`, `completed_at` and `scheduled_at` (a release's
+  planned date), and a comment's `created_at`.
+  The mock does not check those five either, so a NUL in one costs its row — one
+  contained refusal, not the run. Only GitHub's own timestamps fill them. A release's
+  two dates — its `created_at` and its `scheduled_at`, the same string — additionally
+  pass `sourceDate`'s strict RFC 3339 gate, which no string holding a NUL can clear;
+  an issue's three dates and a comment's are forwarded as fetched.
   The **external id** is load-bearing beyond the write: it keys the dedup marker and
   the Idempotency-Key, so a NUL left in it would break the re-run key, not one
   column. Postgres `text` cannot store a NUL, so the public create refuses the row
@@ -2080,8 +2088,11 @@ therefore clamps plan text client-side before writing:
   label colours and the provenance pair (`import_source` / `import_external_id`).
   Nothing in the mock proves those four are NUL-free, so the strip in `clampPlan` is
   their only guard and its own tests have to carry a NUL through each of them. The
-  four **date** fields above are neither checked here nor stripped there, so they
-  have no guard at all — a NUL in one is a contained row.
+  five **date** fields above — the story's `created_at`, `started_at`,
+  `completed_at` and `scheduled_at`, and a comment's `created_at` — are neither
+  checked here nor stripped there, so they have no guard at all: a NUL in one is
+  a contained row. A release's own two dates are the exception, gated by
+  `sourceDate` at map time.
 
 ### Marker dedup (direct engine)
 
@@ -2354,28 +2365,46 @@ and both are prescanned, in union.
   engines are otherwise expected to agree row for row. Both engines write **no**
   link row for a blank URL (`github.rs:1086-1090` filters it on the self-link
   path too).
-- **A draft release's planned date rides the create, where the server publishes
-  the field.** The server importer seeds a draft release's `scheduled_at` from
-  the release's own `created_at` (`services/import/github.rs::release_to_record`)
-  and leaves it NULL on a published release, whose date is a completion rather
-  than a plan. The direct engine maps the same two branches and sends
-  `scheduled_at` on the `release` create (server story #386356). Three gates
-  stand in front of that write:
+- **An unpublished release's planned date rides the create, where the server
+  publishes the field.** The server importer seeds every *unpublished*
+  release's `scheduled_at` — `draft: true`, and `draft: false` with an absent
+  or unparseable `published_at` alike — from the release's own `created_at`
+  (`release_to_record`, `services/import/github.rs`), and leaves it NULL on a
+  published release, whose date is a completion rather than a plan. The direct
+  engine maps the same two branches and sends `scheduled_at` on the `release`
+  create (server story #386356). Three gates stand in front of that write:
   - The field must be on the published `POST /stories` body
     (`supportsReleaseDate`). It is its **own** probe: #386356 shipped after the
-    backdating pair, and the create drops an unknown field silently.
-  - The create must also carry the dedup pair.
-    `handlers/stories.rs:3858-3869` auto-places a release created **with** a
-    date at its projected date boundary instead of the panel top, unless
-    `import_source` is set — "imports seed `scheduled_at` from the source's
-    `created_at` and must preserve the source board order, so they keep the top
-    placement". A date without the pair would reorder the board, so the writer
-    sends the two together or neither.
+    backdating pair, and the create drops an unknown field silently. It is not
+    ANDed with the backdating probe, because the server binds the column
+    outside its date clamp — the two are independent.
+  - The create must also carry the dedup pair. The handler re-places a dated
+    `release` create at its projected date boundary instead of the panel top
+    when it lands `unstarted` in the `backlog` panel with no `import_source`
+    and the boundary walk finds an anchor — "imports seed `scheduled_at` from
+    the source's `created_at` and must preserve the source board order, so they
+    keep the top placement". Every row this CLI writes meets the first two
+    conditions, so a date without the pair would reorder the imported board.
+    The writer sends the two together or neither.
   - The row's `story_type` must be `release`. The server refuses the field on
     any other type with `400 release_date_release_only` (a bare machine `code`,
-    no `details.fields`) before it writes a row, which would abort the run.
-  **Divergence, against a server that does not publish the field:** the draft
+    no `details.fields`) before it writes a row. That refusal is row-scoped
+    like every other create `400`, so a mapper bug would cost that release its
+    story and its sub-rows, not the run — see "Row-error containment (direct
+    engine)" and its 20-refusal ceiling.
+  **Divergence, against a server that does not publish the field:** the release
   imports to the backlog with its `created_at` and no planned date. Everything
   else about the row — title, notes, type, state, external id — matches the
   server importer either way, so the two engines still dedup each other's
-  releases.
+  releases. **There is no backfill.** A row imported dateless stays dateless
+  after the server gains the field: the next run finds it by the dedup pair and
+  skips it, and the direct engine never PUTs an imported story. Recovering the
+  date means deleting the release in EAT and re-importing, the same cost as the
+  `people` and `links` gaps.
+  **One parity gap even where the field rides:** `parse_release_date` also
+  accepts a bare `YYYY-MM-DD` as midnight UTC, but the mapper's `sourceDate`
+  gate admits strict RFC 3339 only, so a date-only `created_at` makes the
+  server importer plan the release while the direct engine sends nothing. The
+  gate is one date grammar for every mapped field and worth more than this
+  field's reach; GitHub's REST and GraphQL APIs both emit RFC 3339, so no real
+  repository reaches it.

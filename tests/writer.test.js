@@ -648,8 +648,8 @@ test("a published release's null scheduled_at is omitted, not sent as null", asy
   assert.ok(!("scheduled_at" in stories[0]), JSON.stringify(stories[0]));
 });
 
-// The server 400s `release_date_release_only` before it touches a row, which would abort the
-// run — so the type test is what keeps a future mapper bug off that refusal.
+// The server 400s `release_date_release_only` before it touches a row. The refusal is
+// row-scoped, so a mapper bug would cost that release its story, not the run.
 for (const storyType of ["feature", "bug", "chore"]) {
   test(`a ${storyType} op carrying a scheduled_at sends none`, async () => {
     const { client, stories } = recordingClient();
@@ -665,9 +665,23 @@ for (const storyType of ["feature", "bug", "chore"]) {
   });
 }
 
+// Deliberately independent of `sendDates`: the server binds `scheduled_at` raw, outside the
+// `clamp_dates` chain that ties `started_at` to `created_at`, so nothing couples the two.
+test("sendReleaseDate rides without sendDates, the one date field that does", async () => {
+  const { client, stories } = recordingClient();
+  await writePlan(client, 91, releasePlan(), {
+    stream: capture(),
+    sendProvenance: true,
+    sendReleaseDate: true,
+  });
+
+  assert.equal(stories[0].scheduled_at, "2026-07-20T00:00:00Z");
+  assert.ok(!("created_at" in stories[0]), JSON.stringify(stories[0]));
+});
+
 // The real create binds it on the INSERT (stories.rs:3848), so the mock must store it too —
 // a recording client alone cannot tell "sent" from "accepted".
-test("a draft release's planned date lands on the stored row", async () => {
+test("an unpublished release's planned date lands on the stored row", async () => {
   const mock = await startMockServer();
   try {
     await writePlan(new EATClient(mock.baseUrl, "ea_token"), 91, releasePlan(), {

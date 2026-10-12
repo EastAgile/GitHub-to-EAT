@@ -1001,7 +1001,50 @@ test("a release create persists scheduled_at and advertises it", async () => {
   }
 });
 
-// stories.rs:3765 refuses it before any row is touched, with a bare code and no `details`.
+// `EATError` carries `status` and `code` and no `details`, so the client cannot see the
+// envelope at all — only the raw body proves `BadRequestWithCode` sent no `details.fields`.
+// `scheduled_at` is on the real server's `fields=` allowlist, so a projection naming it must
+// not 400 here — a mock-only refusal would read as a server one.
+test("fields=scheduled_at projects the planned date", async () => {
+  const mock = await startMockServer();
+  try {
+    await post(mock.baseUrl, "/projects/91/stories", {
+      name: "v2.1.0-draft",
+      story_type: "release",
+      current_state: "unstarted",
+      scheduled_at: "2026-07-20T00:00:00Z",
+    });
+    const res = await fetch(`${mock.baseUrl}/projects/91/stories?fields=scheduled_at`, {
+      headers: { "X-TrackerToken": "ea_token" },
+    });
+    const rows = await res.json();
+    assert.equal(res.status, 200, JSON.stringify(rows));
+    assert.deepEqual(Object.keys(rows[0]).sort(), ["scheduled_at", "story_id"]);
+    assert.equal(rows[0].scheduled_at, "2026-07-20T00:00:00Z");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("the release-date refusal is a bare code, with no details block", async () => {
+  const mock = await startMockServer();
+  try {
+    const res = await post(mock.baseUrl, "/projects/91/stories", {
+      name: "s",
+      story_type: "feature",
+      scheduled_at: "2026-07-20T00:00:00Z",
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.code, "release_date_release_only");
+    assert.equal(body.error, "A release date can only be set on release stories.");
+    assert.equal(body.details, undefined, JSON.stringify(body));
+  } finally {
+    await mock.close();
+  }
+});
+
+// Refused before any row is touched, so the type refusal costs no row at all.
 for (const storyType of ["feature", "bug", "chore"]) {
   test(`scheduled_at on a ${storyType} create is 400 release_date_release_only`, async () => {
     const mock = await startMockServer();

@@ -949,8 +949,8 @@ function releaseToStory(release) {
     created_at: sourceDate(release.created_at),
     started_at: null,
     completed_at: published ? publishedAt : null,
-    // github.rs:877-882 plans a draft from its own `created_at`; the published branch
-    // leaves the column None, where the date is a completion rather than a plan.
+    // `release_to_record` plans every *unpublished* release from its own `created_at`; the
+    // published branch leaves the column None, where that date is a completion, not a plan.
     scheduled_at: published ? null : sourceDate(release.created_at),
     labels: [],
     // `release_to_record` maps no people either — a release has no author or assignees.
@@ -997,7 +997,7 @@ export const STARTED_STATES = new Set(["started", ...DONE_STATES]);
  *   other row (github.rs:1186)
  * @property {string | null} completed_at the GitHub closed date, or a release's
  *   `published_at`, kept
- * @property {string | null} [scheduled_at] a draft release's planned date, its own
+ * @property {string | null} [scheduled_at] an unpublished release's planned date, its own
  *   `created_at` (EAT #386356). Release rows only — every other mapper omits the key
  * @property {string[]} labels label names on this story
  * @property {{ url: string, link_type: string }[]} [links] a PR's own URL, or the URLs of
