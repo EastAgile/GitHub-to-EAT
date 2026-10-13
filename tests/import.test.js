@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { main } from "../src/cli.js";
@@ -381,16 +382,108 @@ test("runImport defaults warnings to an empty list", async () => {
   assert.deepEqual(outcome.warnings, []);
 });
 
-test("a history_floor_clamped warning is reported", async () => {
+/** @param {string} out */
+const noteLines = (out) => out.split("\n").filter((line) => line.startsWith("note: "));
+
+// Server shapes per `ImportWarning` (agile-tracker 79f2240e4): `floor_year` is serialized
+// for `history_floor_clamped` only, so the other four arrive without the key.
+const COUNT_ONLY_WARNING_CODES = [
+  "cross_reference_links_failed",
+  "dependencies_fetch_failed",
+  "dependencies_truncated",
+  "estimates_unpointed_dropped",
+];
+
+test("history_floor_clamped renders its count and its floor year", async () => {
   const { code, out } = await runCliWith({
     imported: { stories: 4, labels: 0 },
     skipped: 0,
     errors: [],
-    warnings: [{ code: "history_floor_clamped", count: 3, floor_year: 2024 }],
+    warnings: [{ code: "history_floor_clamped", count: 3, floor_year: 2010 }],
   });
   assert.equal(code, 0);
-  assert.ok(out.includes("note: history_floor_clamped (3 stories, floor year 2024)\n"), out);
-  assert.ok(!out.includes("[object Object]"), out);
+  assert.deepEqual(noteLines(out), ["note: history_floor_clamped (3 stories, floor year 2010)"]);
+});
+
+for (const warningCode of COUNT_ONLY_WARNING_CODES) {
+  test(`${warningCode} renders its count and no floor year`, async () => {
+    const { code, out } = await runCliWith({
+      imported: { stories: 4, labels: 0 },
+      skipped: 0,
+      errors: [],
+      warnings: [{ code: warningCode, count: 2 }],
+    });
+    assert.equal(code, 0);
+    assert.deepEqual(noteLines(out), [`note: ${warningCode} (2 stories)`]);
+    assert.ok(!out.includes("floor year"), out);
+  });
+}
+
+/**
+ * The body rows of the CONTRACT.md table whose header row starts with `header`,
+ * as trimmed cells with backticks removed.
+ *
+ * @param {string} header
+ * @returns {string[][]}
+ */
+function contractTable(header) {
+  const lines = readFileSync(new URL("../CONTRACT.md", import.meta.url), "utf8").split("\n");
+  const start = lines.findIndex((line) => line.trim().startsWith(header));
+  assert.notEqual(start, -1, `CONTRACT.md has no table headed "${header}"`);
+  const rows = [];
+  for (const line of lines.slice(start + 2)) {
+    if (!line.trim().startsWith("|")) break;
+    rows.push(
+      line
+        .trim()
+        .slice(1, -1)
+        .split("|")
+        .map((cell) => cell.trim().replaceAll("`", "")),
+    );
+  }
+  return rows;
+}
+
+test("CONTRACT.md lists exactly the warning codes the renderer tests cover", () => {
+  const codes = contractTable("| Warning code |").map(([code]) => code);
+  assert.deepEqual(
+    codes.toSorted(),
+    ["history_floor_clamped", ...COUNT_ONLY_WARNING_CODES].toSorted(),
+  );
+});
+
+test("CONTRACT.md marks estimates_unpointed_dropped as the one code a GitHub import cannot raise", () => {
+  const reach = Object.fromEntries(
+    contractTable("| Warning code |").map(([code, , github]) => [code, github.split(".")[0]]),
+  );
+  assert.deepEqual(reach, {
+    history_floor_clamped: "Yes",
+    cross_reference_links_failed: "Yes",
+    dependencies_fetch_failed: "Yes",
+    dependencies_truncated: "Yes",
+    estimates_unpointed_dropped: "No",
+  });
+});
+
+// agile-tracker 79f2240e4: `validate_github_request` refuses two codes before a job exists;
+// the other six reach the caller only as a failed job's `error_code`.
+const POST_400 = "400 response to the POST";
+const FAILED_JOB = "error_code of a failed job";
+
+test("CONTRACT.md lists the server's eight import_github_* codes and where each arrives", () => {
+  const arrival = Object.fromEntries(
+    contractTable("| Error code |").map(([code, , arrives]) => [code, arrives]),
+  );
+  assert.deepEqual(arrival, {
+    import_github_no_token: POST_400,
+    import_github_shared_quota_low: POST_400,
+    import_github_auth: FAILED_JOB,
+    import_github_forbidden: FAILED_JOB,
+    import_github_not_found: FAILED_JOB,
+    import_github_rate_limited: FAILED_JOB,
+    import_github_rate_limited_platform: FAILED_JOB,
+    import_github_unavailable: FAILED_JOB,
+  });
 });
 
 test("a warning cannot write control characters to the terminal", async () => {
