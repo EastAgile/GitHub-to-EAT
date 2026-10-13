@@ -419,37 +419,61 @@ for (const warningCode of COUNT_ONLY_WARNING_CODES) {
   });
 }
 
+const CONTRACT_URL = new URL("../CONTRACT.md", import.meta.url);
+
 /** @param {string} header @returns {string[][]} */
 function contractTable(header) {
-  const lines = readFileSync(new URL("../CONTRACT.md", import.meta.url), "utf8").split("\n");
+  const lines = readFileSync(CONTRACT_URL, "utf8").split("\n");
   const start = lines.findIndex((line) => line.trim().startsWith(header));
   assert.notEqual(start, -1, `CONTRACT.md has no table headed "${header}"`);
+  /** @param {string} line */
+  const cells = (line) =>
+    line
+      .trim()
+      .slice(1, -1)
+      .split("|")
+      .map((cell) => cell.trim().replaceAll("`", ""));
+  const width = cells(lines[start]).length;
+  assert.match(lines[start + 1].trim(), /^\|(-{3,}\|)+$/, `"${header}" lacks its separator row`);
   const rows = [];
   for (const line of lines.slice(start + 2)) {
     if (!line.trim().startsWith("|")) break;
-    rows.push(
-      line
-        .trim()
-        .slice(1, -1)
-        .split("|")
-        .map((cell) => cell.trim().replaceAll("`", "")),
-    );
+    const row = cells(line);
+    assert.equal(row.length, width, `a "${header}" row has ${row.length} cells: ${line}`);
+    rows.push(row);
   }
   return rows;
 }
 
+/** CONTRACT.md with every whitespace run collapsed, so a sentence matches across a wrap. */
+const contractProse = () => readFileSync(CONTRACT_URL, "utf8").replace(/\s+/g, " ");
+const NUMBER_WORDS = [
+  "zero",
+  "one",
+  "two",
+  "three",
+  "four",
+  "five",
+  "six",
+  "seven",
+  "eight",
+  "nine",
+];
+/** @param {number} n */
+const capitalized = (n) => NUMBER_WORDS[n][0].toUpperCase() + NUMBER_WORDS[n].slice(1);
+
+const WARNING_CODES = ["history_floor_clamped", ...COUNT_ONLY_WARNING_CODES];
+
 test("CONTRACT.md lists exactly the warning codes the renderer tests cover", () => {
   const codes = contractTable("| Warning code |").map(([code]) => code);
-  assert.deepEqual(
-    codes.toSorted(),
-    ["history_floor_clamped", ...COUNT_ONLY_WARNING_CODES].toSorted(),
-  );
+  assert.equal(codes.length, WARNING_CODES.length, codes.join(", "));
+  assert.deepEqual(codes.toSorted(), WARNING_CODES.toSorted());
 });
 
 test("CONTRACT.md marks estimates_unpointed_dropped as the one code a GitHub import cannot raise", () => {
-  const reach = Object.fromEntries(
-    contractTable("| Warning code |").map(([code, , github]) => [code, github.split(".")[0]]),
-  );
+  const rows = contractTable("| Warning code |");
+  assert.deepEqual(rows.map(([code]) => code).toSorted(), WARNING_CODES.toSorted());
+  const reach = Object.fromEntries(rows.map(([code, , github]) => [code, github.split(".")[0]]));
   assert.deepEqual(reach, {
     history_floor_clamped: "Yes",
     cross_reference_links_failed: "Yes",
@@ -459,25 +483,147 @@ test("CONTRACT.md marks estimates_unpointed_dropped as the one code a GitHub imp
   });
 });
 
+test("CONTRACT.md's warning counts match its warning table", () => {
+  const rows = contractTable("| Warning code |");
+  const raisable = rows.filter(([, , github]) => github.startsWith("Yes.")).length;
+  assert.ok(
+    contractProse().includes(
+      `The server defines ${NUMBER_WORDS[rows.length]} codes, and a GitHub import can raise ` +
+        `${NUMBER_WORDS[raisable]} of them:`,
+    ),
+    `no count sentence for ${rows.length} codes, ${raisable} raisable`,
+  );
+});
+
 // agile-tracker 79f2240e4: `validate_github_request` refuses two codes before a job exists;
 // the other six reach the caller only as a failed job's `error_code`.
 const POST_400 = "400 response to the POST";
 const FAILED_JOB = "error_code of a failed job";
+const GITHUB_ERROR_ARRIVAL = {
+  import_github_no_token: POST_400,
+  import_github_shared_quota_low: POST_400,
+  import_github_auth: FAILED_JOB,
+  import_github_forbidden: FAILED_JOB,
+  import_github_not_found: FAILED_JOB,
+  import_github_rate_limited: FAILED_JOB,
+  import_github_rate_limited_platform: FAILED_JOB,
+  import_github_unavailable: FAILED_JOB,
+};
 
-test("CONTRACT.md lists the server's eight import_github_* codes and where each arrives", () => {
-  const arrival = Object.fromEntries(
-    contractTable("| Error code |").map(([code, , arrives]) => [code, arrives]),
+test("CONTRACT.md's error-code table lists eight import_github_* codes and where each arrives", () => {
+  const rows = contractTable("| Error code |");
+  assert.equal(rows.length, Object.keys(GITHUB_ERROR_ARRIVAL).length, rows.join("\n"));
+  assert.deepEqual(
+    rows.map(([code]) => code).toSorted(),
+    Object.keys(GITHUB_ERROR_ARRIVAL).toSorted(),
   );
-  assert.deepEqual(arrival, {
-    import_github_no_token: POST_400,
-    import_github_shared_quota_low: POST_400,
-    import_github_auth: FAILED_JOB,
-    import_github_forbidden: FAILED_JOB,
-    import_github_not_found: FAILED_JOB,
-    import_github_rate_limited: FAILED_JOB,
-    import_github_rate_limited_platform: FAILED_JOB,
-    import_github_unavailable: FAILED_JOB,
+  const arrival = Object.fromEntries(rows.map(([code, , arrives]) => [code, arrives]));
+  assert.deepEqual(arrival, GITHUB_ERROR_ARRIVAL);
+});
+
+test("CONTRACT.md's error-code counts match its error-code table", () => {
+  const rows = contractTable("| Error code |");
+  const refused = rows.filter(([, , arrives]) => arrives === POST_400).length;
+  const failed = rows.filter(([, , arrives]) => arrives === FAILED_JOB).length;
+  const prose = contractProse();
+  for (const sentence of [
+    `The server defines ${NUMBER_WORDS[rows.length]} \`import_github_*\` codes`,
+    `${capitalized(refused)} of them refuse the request before a job exists`,
+    `The other ${NUMBER_WORDS[failed]} occur while the job fetches GitHub`,
+  ]) {
+    assert.ok(prose.includes(sentence), `CONTRACT.md lacks "${sentence}"`);
+  }
+});
+
+test("a warning with neither count nor floor_year renders the bare code", async () => {
+  const { code, out } = await runCliWith({
+    imported: { stories: 1, labels: 0 },
+    skipped: 0,
+    errors: [],
+    warnings: [{ code: "dependencies_truncated" }],
   });
+  assert.equal(code, 0);
+  assert.deepEqual(noteLines(out), ["note: dependencies_truncated"]);
+});
+
+/** @param {Record<string, unknown>} body the 400 body that replaces the mock's import answer */
+async function runCliWithImportRefusal(body) {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = /** @type {any} */ (
+    (/** @type {any} */ input, /** @type {any} */ init) =>
+      init?.method === "POST" && String(input).endsWith("/import/json")
+        ? Promise.resolve(
+            new Response(JSON.stringify(body), {
+              status: 400,
+              headers: { "content-type": "application/json" },
+            }),
+          )
+        : realFetch(input, init)
+  );
+  try {
+    return await runCliWith({ imported: { stories: 0, labels: 0 }, skipped: 0, errors: [] });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+// Server messages verbatim from `validate_github_request` / `ensure_shared_pat_budget`
+// (agile-tracker 79f2240e4); the quota one runs past the client's 200-character body cut.
+const IMPORT_REFUSALS = {
+  import_github_no_token:
+    "Missing 'token' field for GitHub import, and the server has no platform fallback " +
+    "configured (GITHUB_IMPORT_PAT). Supply a token or configure the fallback.",
+  import_github_shared_quota_low:
+    "The shared GitHub token has only 120 of 5000 points left before its limit resets, " +
+    "and an import needs at least 500. Wait for the reset, or supply your own personal " +
+    "access token to import now.",
+};
+
+for (const [errorCode, message] of Object.entries(IMPORT_REFUSALS)) {
+  test(`a 400 ${errorCode} refusal names its code on stderr`, async () => {
+    const { code, err } = await runCliWithImportRefusal({ code: errorCode, error: message });
+    assert.equal(code, 1);
+    const lines = err.split("\n").filter((line) => line.startsWith("error: "));
+    assert.equal(lines.length, 1, err);
+    assert.ok(
+      lines[0].startsWith(
+        `error: import failed: request to /projects/91/import/json failed (400): {"code":"${errorCode}"`,
+      ),
+      lines[0],
+    );
+    assert.ok(
+      err.includes(
+        "  hint: private repo, or the server has no platform PAT? set GITHUB_TOKEN or pass --token.\n",
+      ),
+      err,
+    );
+  });
+}
+
+test("a failed job prints its error under a doubled import-failed prefix", async () => {
+  const mock = await startMockServer(makeState({ asyncImport: true, asyncFail: true }));
+  const out = capture();
+  const err = capture();
+  let code = -1;
+  try {
+    await inTempDir(() =>
+      withEnv({ EAT_AGENT_KEY: "ea_token", EAT_API_BASE: mock.baseUrl }, async () => {
+        code = await main(["--project", "91", "--repo", "o/r", "-y"], {
+          stdout: out,
+          stderr: err,
+          runImport: (client, project, owner, repo, options) =>
+            runImport(client, project, owner, repo, { ...options, poll: NO_SLEEP }),
+        });
+      }),
+    );
+  } finally {
+    await mock.close();
+  }
+  assert.equal(code, 1);
+  assert.ok(
+    err.buf.includes("error: import failed: import failed: import failed on the tracker\n"),
+    err.buf,
+  );
 });
 
 test("a warning cannot write control characters to the terminal", async () => {
