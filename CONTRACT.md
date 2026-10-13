@@ -36,8 +36,11 @@ truth for what the tool does and what it depends on from the East Agile Tracker
    - **No token field** (public repos) — the EAT server fetches GitHub using a
      platform PAT (`GITHUB_IMPORT_PAT`), so users never supply a GitHub token.
      When neither a request token nor a platform PAT exists, the server
-     responds `400 import_github_no_token`; a bad token is
-     `400 import_github_auth`.
+     answers `400 import_github_no_token`. A malformed token (too long, or
+     with control characters or whitespace) gets `400 invalid_parameter`
+     before a job exists. A token that GitHub rejects fails the job with
+     `import_github_auth`. *GitHub import error codes* (under v2) lists the
+     `import_github_*` codes.
    - **Private repos / no platform PAT** — the CLI may include an optional
      `"token"` (a GitHub PAT) via `--token` / `GITHUB_TOKEN`; the server uses it
      instead of the platform PAT.
@@ -116,13 +119,28 @@ The API base is `.../api/v1`. Shapes the CLI parses:
   dropped, not rendered as an empty label. See "Row-error containment" below.
 
   `warnings` are **coded** non-fatal advisories about an import that otherwise
-  succeeded — unlike `errors`, nothing was skipped (server story #32239). Each
-  entry is a `{ "code": ..., "count": N, "floor_year": Y }` object; today the
-  only code is `history_floor_clamped` (completed stories dated before the
-  server's grid floor were placed on the oldest iteration's Done board), which
-  fires for any source with imported stories, so a GitHub import of long-closed
-  issues can hit it. The CLI renders one scrubbed `note:` line per
-  entry naming the code, the story count and the floor year.
+  succeeded. Unlike `errors`, a warning skips no row (server story #32239).
+  Each entry carries `code` and `count`. Only `history_floor_clamped` also
+  carries `floor_year`: the server omits that key on the other four codes
+  (`ImportWarning` in agile-tracker `services/import/mod.rs`, origin/main
+  79f2240e4). The server defines five codes, and a GitHub import can raise four
+  of them:
+
+  | Warning code | Added by | Can a GitHub import raise it? |
+  |---|---|---|
+  | `history_floor_clamped` | #32239 | Yes. Any source with imported stories raises it when completed stories date before the server's grid floor. The server places those stories on the oldest iteration's Done board, so a GitHub import of long-closed issues can hit it. |
+  | `cross_reference_links_failed` | #55746 | Yes. GitHub only, only with `include_pull_requests`, and only on a committing run: the post-commit PR↔issue link attach failed, and `count` is the number of issues whose links can be missing. A dry-run preview never carries it (see the dry-run paragraph below). |
+  | `dependencies_fetch_failed` | #163271 | Yes. GitHub only, and only with `include_dependencies`: GitHub refused the `blockedBy` selection, so `count` issues imported with no blockers. |
+  | `dependencies_truncated` | #146020 | Yes. GitHub only, and only with `include_dependencies`: the `blockedBy` walk of `count` issues read part of the listing and then stopped. |
+  | `estimates_unpointed_dropped` | #558598 | No. The writer raises it when it drops a bug or chore estimate that the project does not point. The GitHub connector sets no estimate on any row (`services/import/github.rs`), so a GitHub import has no estimate to drop. The opt-in pre-check `check_unpointed_estimates` counts file sources only, and the server ignores it for `source: "github"` (`ImportJsonRequest` in `handlers/import.rs`). |
+
+  The CLI renders one scrubbed `note:` line per entry. The parentheses hold
+  the count (`1 story`, `<count> stories`) and, when the entry carries
+  `floor_year`, `floor year <Y>`, with a comma between the two. For example,
+  `note: history_floor_clamped (3 stories, floor year 2010)` and
+  `note: dependencies_truncated (1 story)`. An entry with neither field prints
+  `note: <code>` alone. The CLI special-cases no code, so a code that a newer
+  server adds renders through the same line.
 
   A `dry_run` preview reports the same advisories as the committing import of
   the same payload, except `cross_reference_links_failed` (agile-tracker
@@ -338,6 +356,63 @@ returns immediately; the CLI polls a status endpoint until the job finishes.
 The async accept, status endpoint, and progression are mirrored by the bundled
 mock server under `makeState({ asyncImport: true })` (`--async` when run
 standalone); `asyncFail: true` drives the `failed` branch.
+
+### GitHub import error codes
+
+The server defines eight `import_github_*` codes (agile-tracker origin/main
+79f2240e4). Two of them refuse the request before a job exists:
+`validate_github_request` in `handlers/import.rs` answers the `POST` with a
+`400` whose body carries the code. The other six occur while the job fetches
+GitHub, after the `POST` answered `202`. They reach the CLI only as the
+`error_code` of a `failed` job (`job_error_parts` in `handlers/import.rs`). A
+dry run rides the same job, so it fails with the same codes.
+
+For the six job codes, the last column describes a refusal of a listing query:
+`ImportIssues`, `ImportPullRequests` or `ImportReleases` in
+`services/import/github.rs`. The list after the table names the exceptions.
+
+| Error code | Added by | Arrives as | The server raises it when |
+|---|---|---|---|
+| `import_github_no_token` | #26479 | `400` response to the `POST` | The request has no `token`, and the server has no platform PAT (`GITHUB_IMPORT_PAT`). |
+| `import_github_shared_quota_low` | #47448 | `400` response to the `POST` | The request has no `token`, and the shared platform PAT has fewer than 500 GraphQL points left (`ensure_shared_pat_budget`). Since #482606 the check reads the GraphQL point budget alone. The check is advisory: when the budget probe itself fails, the import continues. A request with a `token` skips the check. |
+| `import_github_auth` | #14628 | `error_code` of a `failed` job | GitHub answers `401`, or GraphQL reports `UNAUTHORIZED` or `BAD_CREDENTIALS`. GitHub rejects the token as invalid or expired. |
+| `import_github_forbidden` | #14628 | `error_code` of a `failed` job | GitHub answers `403` with no rate-limit signal, or GraphQL reports `FORBIDDEN` or `INSUFFICIENT_SCOPES`. The token cannot read the repository. |
+| `import_github_not_found` | #14628 | `error_code` of a `failed` job | GitHub answers `404`, GraphQL reports `NOT_FOUND`, or GraphQL returns no repository. The owner or repo is wrong, or the token cannot see the repository. |
+| `import_github_rate_limited` | #14628 | `error_code` of a `failed` job | GitHub refuses for rate limiting, and the request supplied the `token`. An HTTP `429`, or a `403` with `retry-after` or `X-RateLimit-Remaining: 0`, fails the job when 3 retries do not clear it. When GitHub asks for a wait over 120 s, the server skips the retries (`send_retrying`). A GraphQL `RATE_LIMITED` arrives in a `200` body, and the server does not retry it. |
+| `import_github_rate_limited_platform` | #47445 | `error_code` of a `failed` job | The same refusal on a run that uses the shared platform PAT (`github_fetch_error`): the shared PAT hit a GitHub rate limit, primary or secondary. A retry with a caller `token` spends that token's own limit. |
+| `import_github_unavailable` | #1087819 | `error_code` of a `failed` job | Any other GitHub fetch failure. GitHub is unreachable, answers an unexpected status, returns a body that the server cannot read, or serves a listing that does not end. GraphQL reports an error type that the server does not classify, or the host's schema lacks a field that the server cannot drop from the query. The CLI never sees a `502` status. |
+
+The exceptions come from `classify_gql_errors` and the follow-up walks in
+`services/import/github.rs`:
+
+- **An error on the `blockedBy` field of `ImportIssues`** fails the job only
+  when its type is `RATE_LIMITED`, `UNAUTHORIZED` or `BAD_CREDENTIALS`
+  (#384801). For any other type, the server repeats the listing without
+  `blockedBy`, and the run reports `dependencies_fetch_failed`.
+- **Several GraphQL errors in one response**: apart from the `blockedBy`
+  rule and a missing schema field, the first error decides the code.
+- **An error on an `ImportIssueBlockedBy` follow-up page** ends the blocker
+  walk of that one issue. The issue keeps the blockers that the walk read, the
+  run reports `dependencies_truncated`, and the job continues.
+- **A `NOT_FOUND` on an `ImportIssueComments` or `ImportPullRequestComments`
+  follow-up page** means that the issue or pull request vanished during the
+  run. The job fails with `import_github_unavailable`, not
+  `import_github_not_found` (`name_vanished_parent`).
+
+The CLI special-cases none of these codes. Each failure prints one line on
+stderr, and a run without `--token` adds a hint line after it:
+
+- A `400` prints
+  `error: import failed: request to /projects/<id>/import/json failed (400): <body>`.
+  The client keeps the first 200 characters of the body. The server
+  serializes `code` before `error`, so the code survives the cut.
+- A `failed` job prints `error: import failed: import failed: <error>`. That
+  doubled prefix is the current output. The CLI prints the job's `error_code`
+  in place of `<error>` only when the job has no `error` message.
+- The hint line is
+  `  hint: private repo, or the server has no platform PAT? set GITHUB_TOKEN or pass --token.`
+
+The direct engine fetches GitHub itself, so it never receives these codes.
 
 ## Reserved — not built yet
 
