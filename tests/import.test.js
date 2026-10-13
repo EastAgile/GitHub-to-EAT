@@ -419,13 +419,7 @@ for (const warningCode of COUNT_ONLY_WARNING_CODES) {
   });
 }
 
-/**
- * The body rows of the CONTRACT.md table whose header row starts with `header`,
- * as trimmed cells with backticks removed.
- *
- * @param {string} header
- * @returns {string[][]}
- */
+/** @param {string} header @returns {string[][]} */
 function contractTable(header) {
   const lines = readFileSync(new URL("../CONTRACT.md", import.meta.url), "utf8").split("\n");
   const start = lines.findIndex((line) => line.trim().startsWith(header));
